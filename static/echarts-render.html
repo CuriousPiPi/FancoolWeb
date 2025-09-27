@@ -278,6 +278,38 @@
     return narrow;
   }
 
+  // NEW: 统一 viewport 布局刷新调度，避免 resize / fullscreen / 父窗口消息 三处重复执行同样分支
+  let _viewportRefreshScheduled = false;
+  function scheduleViewportRefresh(reason){
+    if (_viewportRefreshScheduled) return;
+    _viewportRefreshScheduled = true;
+    requestAnimationFrame(() => {
+      _viewportRefreshScheduled = false;
+      refreshViewportLayout(reason);
+    });
+  }
+  function refreshViewportLayout(reason){
+    if (!chart) return;
+    const nowNarrow = layoutIsNarrow();
+    if (lastIsNarrow === null) lastIsNarrow = nowNarrow;
+
+    if (nowNarrow !== lastIsNarrow) {
+      lastIsNarrow = nowNarrow;
+      if (lastPayload) {
+        render(lastPayload);
+      } else {
+        chart.resize();
+      }
+    } else {
+      chart.resize();
+      if (lastOption) {
+        const { x, y, visible } = computePrefixCenter(lastOption);
+        placeAxisOverlayAt(x, y, visible && !lastOption.__empty);
+        placeFitUI();
+        repaintPointer();
+      }
+    }
+  }
   // ====== 拟合功能状态 ======
   const FIT_ALGO_NAME = '趋势拟合';
   let showRawCurves = true;    // “ECHARTS曲线”
@@ -295,25 +327,7 @@
       devicePixelRatio: window.devicePixelRatio || 1
     });
 
-    window.addEventListener('resize', () => {
-      if (!chart) return;
-      const nowNarrow = layoutIsNarrow();
-      if (lastIsNarrow === null) lastIsNarrow = nowNarrow;
-
-      if (nowNarrow !== lastIsNarrow) {
-        lastIsNarrow = nowNarrow;
-        if (lastPayload) render(lastPayload);
-        else chart.resize();
-      } else {
-        chart.resize();
-        if (lastOption) {
-          const { x, y, visible } = computePrefixCenter(lastOption);
-          placeAxisOverlayAt(x, y, visible && !lastOption.__empty);
-          placeFitUI();
-          repaintPointer();
-        }
-      }
-    });
+    window.addEventListener('resize', () => scheduleViewportRefresh('window-resize'));
 
     document.addEventListener('fullscreenchange', async () => {
       isFs = !!document.fullscreenElement;
@@ -322,22 +336,7 @@
           try { screen.orientation.unlock(); } catch(_) {}
         }
       }
-      const nowNarrow = layoutIsNarrow();
-      if (lastIsNarrow === null) lastIsNarrow = nowNarrow;
-
-      if (nowNarrow !== lastIsNarrow) {
-        lastIsNarrow = nowNarrow;
-        if (lastPayload) render(lastPayload);
-        else chart && chart.resize();
-      } else {
-        chart && chart.resize();
-        if (lastOption) {
-          const { x, y, visible } = computePrefixCenter(lastOption);
-          placeAxisOverlayAt(x, y, visible && !lastOption.__empty);
-          placeFitUI();
-          repaintPointer();
-        }
-      }
+      scheduleViewportRefresh('fullscreen-change');
     });
 
     chart.on('legendselectchanged', () => {
@@ -1673,25 +1672,12 @@
     if (e.origin !== window.location.origin) return;
     const { type, payload } = e.data || {};
     if (type==='chart:update' && payload) render(payload);
-    if (type==='chart:resize' && chart) {
-      const nowNarrow = layoutIsNarrow();
-      if (lastIsNarrow === null) lastIsNarrow = nowNarrow;
-
-      if (nowNarrow !== lastIsNarrow) {
-        lastIsNarrow = nowNarrow;
-        if (lastPayload) render(lastPayload);
-        else chart.resize();
-      } else {
-        chart.resize();
-        if (lastOption) {
-          const { x, y, visible } = computePrefixCenter(lastOption);
-          placeAxisOverlayAt(x, y, visible && !lastOption.__empty);
-          placeFitUI();
-          repaintPointer();
-        }
-      }
+    if (type==='chart:resize') {
+      // REPLACED: 去除内联重复代码，统一调度
+      scheduleViewportRefresh('parent-resize');
     }
   });
+
 
   document.addEventListener('DOMContentLoaded', init);
 
