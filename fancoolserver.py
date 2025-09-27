@@ -86,6 +86,7 @@ def add_security_headers(resp):
             # 初次可用较短时间，例如 max-age=300 做验证，确认无误再调大
             resp.headers.setdefault('Strict-Transport-Security',
                                     'max-age=31536000; includeSubDomains; preload')
+        resp.headers.setdefault('X-Frame-Options', 'SAMEORIGIN')
         resp.headers.setdefault('X-Content-Type-Options', 'nosniff')
         resp.headers.setdefault('Referrer-Policy', 'strict-origin-when-cross-origin')
         # 可按需加：resp.headers.setdefault('Permissions-Policy','camera=(),microphone=()')
