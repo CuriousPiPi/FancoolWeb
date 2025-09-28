@@ -1,0 +1,13 @@
+/* ========== 暗色主题变量 ========== */
+[data-theme="dark"] {
+  --bg-primary:#111827;
+  --bg-secondary:#1f2937;
+  --text-primary:#f3f4f6;
+  --text-secondary:#d1d5db;
+  --border-color:#374151;
+  --shadow-color:rgba(0,0,0,0.55);
+
+  --toast-bg:#1f2937;
+  --toast-border:#374151;
+  --toast-text:#f3f4f6;
+}
