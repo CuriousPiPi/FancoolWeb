@@ -144,3 +144,37 @@
   white-space: normal;
   font-family: monospace;
 }
+
+/* ========== 主题切换按钮 ========== */
+.theme-toggle {
+ position:fixed; top:10px; right:25px; z-index:1000;
+ background:var(--bg-secondary); border:1px solid var(--border-color);
+ display:flex; align-items:center; justify-content:center;
+ cursor:pointer; box-shadow:0 2px 6px var(--shadow-color);
+ width: 44px;
+ height: 44px;
+ border-radius: 50%;
+ transition: background .25s, transform .25s;
+}
+.theme-toggle:active {
+ transform: scale(0.95);
+}
+
+/* ========== 信息按钮 ========== */
+.info-source-btn {
+  transition: all .2s ease;
+}
+.info-source-btn:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 4px 8px rgba(0,0,0,.15);
+}
+
+/* ========== 粘性底部 ========== */
+.sticky-footer {
+  position: sticky;
+  bottom: 0;
+  background: var(--bg-secondary);
+  border-top: 1px solid var(--border-color);
+  padding: 12px;
+  margin-top: auto;
+}

@@ -1,0 +1,98 @@
+<!-- 排行榜区域 -->
+<div class="rank-content-box">
+  <!-- 分段控件 -->
+  <div class="mb-3">
+    <div class="seg" data-active="queries-panel" role="tablist" aria-label="榜单切换">
+      <button class="seg-btn is-active" data-target="queries-panel" role="tab" 
+              aria-selected="true" aria-controls="queries-panel">查询榜</button>
+      <button class="seg-btn" data-target="likes-panel" role="tab" 
+              aria-selected="false" aria-controls="likes-panel">好评榜</button>
+      <span class="seg-thumb"></span>
+    </div>
+  </div>
+
+  <!-- 查询榜面板 -->
+  <div class="rank-panel active" id="queries-panel" role="tabpanel" aria-label="查询榜">
+    <div class="rank-table-scroll">
+      <table class="ranking-table">
+        <thead>
+          <tr>
+            <th class="rank-header">排名</th>
+            <th>品牌</th>
+            <th>型号</th>
+            <th>尺寸</th>
+            <th>热门负载场景</th>
+            <th>查询次数</th>
+            <th class="add-header">添加</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for query in top_queries %}
+          <tr class="hover:bg-gray-50">
+            <td class="rank-cell">
+              {% if loop.index == 1 %}
+                <i class="fa-solid fa-medal gold text-2xl" aria-label="第一名"></i>
+              {% elif loop.index == 2 %}
+                <i class="fa-solid fa-medal silver text-2xl" aria-label="第二名"></i>
+              {% elif loop.index == 3 %}
+                <i class="fa-solid fa-medal bronze text-2xl" aria-label="第三名"></i>
+              {% else %}
+                <span class="font-medium">{{ loop.index }}</span>
+              {% endif %}
+            </td>
+            <td>{{ query.brand_name_zh }}</td>
+            <td>{{ query.model_name }} ({{ query.max_speed }} RPM)</td>
+            <td>{{ query.size }}x{{ query.thickness }}</td>
+            <td>
+              {% if query.resistance_location_zh %}
+                {{ query.resistance_type_zh }}({{ query.resistance_location_zh }})
+              {% else %}
+                {{ query.resistance_type_zh }}
+              {% endif %}
+            </td>
+            <td class="text-blue-600 font-medium">{{ query.query_count }}</td>
+            <td>
+              <button class="btn-add"
+                      title="添加到图表"
+                      aria-label="添加 {{ query.brand_name_zh }} {{ query.model_name }} 到图表"
+                      data-mode="add"
+                      data-brand="{{ query.brand_name_zh }}"
+                      data-model="{{ query.model_name }}"
+                      data-res-type="{{ query.resistance_type_zh }}"
+                      data-res-loc="{{ query.resistance_location_zh or '' }}">
+                <i class="fa-solid fa-plus"></i>
+              </button>
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+
+  <!-- 好评榜面板 -->
+  <div class="rank-panel" id="likes-panel" role="tabpanel" aria-label="好评榜">
+    <div class="rank-table-scroll">
+      <table class="ranking-table" id="ratingRankTable">
+        <thead>
+          <tr>
+            <th class="rank-header">排名</th>
+            <th>品牌</th>
+            <th>型号</th>
+            <th>尺寸</th>
+            <th>热门负载场景</th>
+            <th>好评次数</th>
+            <th class="add-header">添加</th>
+          </tr>
+        </thead>
+        <tbody id="topRatingsContent">
+          <tr>
+            <td colspan="7" class="text-center text-gray-500 py-6">
+              首次点击"好评榜"加载...
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>

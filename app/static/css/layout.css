@@ -127,29 +127,87 @@
 .ranking-table th, 
 .ranking-table td { padding:.6rem; vertical-align:middle; font-size:14px; }
 .ranking-table th { text-align:left; white-space:nowrap; font-weight:600; letter-spacing:.5px; }
+.ranking-table th:last-child, 
+.ranking-table td:last-child { 
+  text-align:center; 
+  width:60px; 
+  position: sticky; 
+  right: 0;   
+  background: var(--bg-secondary); 
+}
+.ranking-table td:last-child { padding: 8px; }
+.rank-cell, .ranking-table th.rank-header { width:56px; text-align:center; }
+.ranking-table thead th {
+  position:sticky; top:0; z-index:8;
+  background:var(--bg-secondary);
+  box-shadow:0 2px 3px -1px rgba(0,0,0,.08);
+}
+[data-theme="dark"] .ranking-table thead th {
+  background:var(--bg-secondary);
+  box-shadow:0 2px 3px -1px rgba(0,0,0,.45);
+}
+
+.ranking-table tr:hover { background:rgba(60,120,255,.05); }
+[data-theme="dark"] .ranking-table tr:hover { background:#2a3545!important; }
+.ranking-table .fa-medal.gold { color:#FFD700!important; }
+.ranking-table .fa-medal.silver { color:#C0C0C0!important; }
+.ranking-table .fa-medal.bronze { color:#CD7F32!important; }
+
+.marquee-cell { overflow:hidden; }
+.marquee-inner { display:inline-block; will-change:transform; }
+
+.condition-label {
+  font-style: italic;
+  color: var(--text-secondary);
+  margin-bottom: 12px;
+}
 
 /* ========== 主内容区域 ========== */
 #main-content {
   display: flex;
   flex-direction: column;
-  height: 100vh;
-  overflow: hidden;
-}
-
-#top-container {
-  flex: 0 0 auto;
-  padding: 20px 25px 0;
-  background: var(--bg-primary);
+  min-height: 100vh;
+  padding-top: 0;
 }
 
 #chart-container {
   flex: 1 1 auto;
   overflow: hidden;
   background: var(--bg-secondary);
-  border-radius: 12px 12px 0 0;
-  margin: 20px 25px 0;
+  border-radius: 12px;
+  margin: 0;
   display: flex;
   flex-direction: column;
+}
+
+.container {
+  width: 100%;
+  max-width: none;
+  padding-left: 1rem;
+  padding-right: 1rem;
+}
+
+.chart-container {
+  min-height: 600px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  padding: 24px;
+  margin-top: 24px;
+}
+
+/* ========== 右侧面板卡片 ========== */
+.right-panel-card .rank-content-box { position: relative; }
+.right-panel-card .rank-content-box::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: -2px;
+  bottom: 0;
+  width: calc(var(--sbw) + 3px);
+  background: var(--bg-secondary);
+  pointer-events: none;
+  z-index: 20;
 }
 
 /* ========== 侧栏页签顶部固定 ========== */
