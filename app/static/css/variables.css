@@ -1,0 +1,63 @@
+/* ========== 基础设置 ========== */
+html { font-size: 16px; }
+
+/* ========== 自定义变量（集中管理） ========== */
+:root {
+  --bg-primary:#f9fafb;
+  --bg-secondary:#ffffff;
+  --text-primary:#1f2937;
+  --text-secondary:#4b5563;
+  --border-color:#e5e7eb;
+  --shadow-color:rgba(0,0,0,0.12);
+  --transition-speed:0.28s;
+
+  --toast-bg:#ffffff;
+  --toast-border:#e5e7eb;
+  --toast-text:#1f2937;
+  --toast-success:#059669;
+  --toast-error:#dc2626;
+  --toast-loading:#2563eb;
+
+  --control-height:46px;
+  --control-radius:10px;
+  --control-h-padding:14px;
+  --control-btn-h-padding:18px;
+  --form-row-gap:16px;
+
+  --brand-green:#10B981;
+  --brand-green-hover:#0ea373;
+  --brand-green-dark:#198f63;
+  --brand-green-dark-hover:#147452;
+  --danger:#dc2626;
+  --danger-hover:#b91c1c;
+  --primary:#2563eb;
+  --primary-hover:#1d4ed8;
+  --primary-dark:#194ec0;
+  --muted:#6b7280;
+
+  --content-left-gutter: 25px;
+  --content-right-gutter: 25px;
+  --content-bottom-gap: 12px;
+  --bottom-title-gap: 10px;
+  --bottom-title-top-pad: 4px;
+  --header-divider-offset: 8px;
+
+  --sidebar-footer-h: 32px;
+  --footer-v-pad: 16px;
+  --sbw: 16px; /* 滚动条预估宽度（Windows/Chrome 约 15~17px） */
+
+  --item-like-w: 24px;
+  --item-remove-w: 16px;
+  --item-actions-gap: 12px;
+
+  --action-restore-col-w: 16px;
+  --action-like-col-w: 24px;
+  --action-add-col-w: 16px;
+  --action-gap: 12px;
+
+  /* 分隔条上下死区 */
+  --sidebar-splitter-up-deadzone: 0; 
+  --sidebar-splitter-down-deadzone: 0;
+
+  --seg-btn-w: 80px; /* 子页签切换控件宽度 */
+}

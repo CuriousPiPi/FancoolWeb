@@ -1,0 +1,49 @@
+/* ========== 图表相关样式 ========== */
+#chartFrame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 12px;
+}
+
+.chart-controls {
+  padding: 15px;
+  border-bottom: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+}
+
+.chart-wrapper {
+  flex: 1;
+  overflow: hidden;
+  position: relative;
+}
+
+/* 图表加载状态 */
+.chart-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+/* 图表错误状态 */
+.chart-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 200px;
+  color: var(--toast-error);
+  font-size: 14px;
+}
+
+/* 颜色点 */
+.js-color-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 8px;
+  border: 1px solid var(--border-color);
+}
