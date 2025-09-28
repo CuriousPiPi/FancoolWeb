@@ -1,0 +1,27 @@
+<!-- 图表区域 -->
+<div class="chart-container bg-white rounded-xl shadow-md p-6 relative" id="chart-settings">
+  <div class="chart-controls mb-4">
+    <div class="flex items-center justify-between">
+      <h3 class="text-lg font-semibold text-gray-900">性能对比图表</h3>
+      <div class="flex items-center space-x-2">
+        <button id="shareBtn" class="ui-btn" title="分享当前图表" aria-label="分享图表">
+          <i class="fa-solid fa-share-alt mr-1"></i>
+          分享
+        </button>
+        <button id="chartFullscreenBtn" class="ui-btn secondary" title="全屏显示" aria-label="全屏显示图表">
+          <i class="fa-solid fa-expand"></i>
+        </button>
+      </div>
+    </div>
+  </div>
+  
+  <div class="chart-wrapper" id="chartRoot">
+    <iframe id="chartFrame" 
+            src="/static/echarts-render.html" 
+            allow="fullscreen" 
+            allowfullscreen 
+            style="width:100%;height:100%;border:0;"
+            title="风扇性能图表">
+    </iframe>
+  </div>
+</div>
