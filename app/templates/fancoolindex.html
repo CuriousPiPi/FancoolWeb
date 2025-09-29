@@ -86,6 +86,9 @@
     --sidebar-splitter-down-deadzone: 0;
 
     --seg-btn-w: 80px; /* 子页签切换控件宽度 */
+
+    /* Gesture Close Zone: Default 24px (user-adjustable). Increase if users have difficulty triggering edge swipe. */
+    --gesture-close-zone-width: 24px;
   }
 
   /* 暗色主题变量 */
@@ -816,7 +819,7 @@
     position: absolute;
     top: 0;
     right: 0px;
-    width: GESTURE_CLOSE_ZONE_WIDTH + 'px';             /* 可调：与 JS GESTURE_CLOSE_ZONE_WIDTH 保持一致 */
+    width: var(--gesture-close-zone-width);             /* User requested default width 24px (was previously discussed as 48px) for narrower edge gesture */
     height: 100%;
     z-index: 350;
     touch-action: none;        /* 我们接管 pointer 以避免系统横向手势抢占 */
@@ -1834,7 +1837,9 @@ window.APP_CONFIG = {
     window.ensureGestureZone();
   }
 
-  const GESTURE_CLOSE_ZONE_WIDTH = 24;
+  // Derive gesture close zone width from CSS variable for centralized configuration
+  const zoneWidthVar = getComputedStyle(document.documentElement).getPropertyValue('--gesture-close-zone-width').trim();
+  const GESTURE_CLOSE_ZONE_WIDTH = parseInt(zoneWidthVar, 10) || 24;
   const CLOSE_RATIO = 0.30;
   const MIN_DRAG_X = 12;
   const MAX_SLOPE = 0.65;
@@ -1946,7 +1951,7 @@ window.APP_CONFIG = {
     }, { passive:true });
 
     const ro = ('ResizeObserver' in window) ? new ResizeObserver(()=>{
-      zone.style.width = GESTURE_CLOSE_ZONE_WIDTH + 'px';
+      // Width is now handled by CSS variable, no need to set it dynamically
     }) : null;
     if (ro) ro.observe(sidebar);
   }
