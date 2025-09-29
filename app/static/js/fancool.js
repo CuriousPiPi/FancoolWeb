@@ -356,20 +356,31 @@ function ensureToastRoot() {
 }
 let toastIdCounter = 0;
 const activeLoadingKeys = new Set();
-function createToast(msg, type='info', opts={}){
+
+function createToast(msg, type='info', opts={}) {
   const container = ensureToastRoot();
   const { autoClose = (type === 'loading' ? false : 2600), id = 't_'+(++toastIdCounter) } = opts;
+
+  while (document.getElementById(id)) {
+    document.getElementById(id).remove();
+  }
+
   const iconMap = {
     success:'<i class="icon fa-solid fa-circle-check" style="color:var(--toast-success)"></i>',
     error:'<i class="icon fa-solid fa-circle-xmark" style="color:var(--toast-error)"></i>',
     loading:'<i class="icon fa-solid fa-spinner fa-spin" style="color:var(--toast-loading)"></i>',
     info:'<i class="icon fa-solid fa-circle-info" style="color:#3B82F6"></i>'
   };
+
   const div = document.createElement('div');
-  div.className = 'toast '+type; div.id = id;
+  div.className = 'toast '+type;
+  div.id = id;
   div.innerHTML = `${iconMap[type]||iconMap.info}<div class="msg">${msg}</div><span class="close-btn" data-close="1">&times;</span>`;
   container.appendChild(div);
-  if (autoClose) setTimeout(()=>closeToast(id), autoClose);
+
+  if (autoClose) {
+    setTimeout(()=>closeToast(id), autoClose);
+  }
   return id;
 }
 function closeToast(id){
@@ -383,15 +394,61 @@ document.addEventListener('click', (e)=>{
     const t = e.target.closest('.toast'); if (t) closeToast(t.id);
   }
 });
-function showLoading(key,text='加载中...'){
-  if (activeLoadingKeys.has(key)) return;
+
+const loadingTimeoutMap = new Map();
+function showLoading(key, text='加载中...') {
+  // 已有同 key：只更新文本，不再创建新节点
+  if (activeLoadingKeys.has(key)) {
+    const existing = document.getElementById('loading_'+key);
+    if (existing) {
+      const msgEl = existing.querySelector('.msg');
+      if (msgEl) msgEl.textContent = text;
+    }
+    return;
+  }
   activeLoadingKeys.add(key);
-  createToast(text,'loading',{id:'loading_'+key});
+  createToast(text, 'loading', { id: 'loading_' + key });
+
+  // 可选兜底关闭（保持你之前 12 秒逻辑）
+  const to = setTimeout(()=>{
+    if (activeLoadingKeys.has(key)) {
+      hideLoading(key);
+    }
+  }, 12000);
+  loadingTimeoutMap.set(key, to);
 }
-function hideLoading(key){
+
+function hideLoading(key) {
   activeLoadingKeys.delete(key);
-  closeToast('loading_'+key);
+
+  const id = 'loading_' + key;
+
+  const nodes = [];
+
+  while (document.getElementById(id)) {
+    nodes.push(document.getElementById(id));
+    document.getElementById(id).remove(); 
+  }
+
+  const t = loadingTimeoutMap.get(key);
+  if (t) {
+    clearTimeout(t);
+    loadingTimeoutMap.delete(key);
+  }
 }
+
+function autoCloseOpLoading() {
+  hideLoading('op');
+  document.querySelectorAll('.toast.loading').forEach(t => {
+    const msgEl = t.querySelector('.msg');
+    if (!msgEl) return;
+    const text = (msgEl.textContent || '').trim();
+    if (/^(添加中|移除中)/.test(text)) {
+      t.remove();
+    }
+  });
+}
+
 const showSuccess = (m)=>createToast(m,'success');
 const showError = (m)=>createToast(m,'error');
 const showInfo = (m)=>createToast(m,'info', {autoClose:1800});
@@ -1533,8 +1590,13 @@ let __shareAxisApplied = false;
 function processState(data, successMsg){
   const prevSelectedKeys = new Set(selectedKeySet);
 
-  if (data.error_message){ hideLoading('op'); showError(data.error_message); }
-  else { if (successMsg) showSuccess(successMsg); hideLoading('op'); }
+  if (data.error_message){
+     hideLoading('op'); showError(data.error_message); 
+    } else { 
+    if (successMsg) showSuccess(successMsg); 
+      hideLoading('op'); 
+      autoCloseOpLoading();  
+    }
 
   let pendingChart = null;
   if ('chart_data' in data) pendingChart = data.chart_data;
