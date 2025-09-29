@@ -3,60 +3,36 @@
 <head>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-  <meta name="color-scheme" content="light dark"/>
-  <link rel="icon" type="image/png" href="/static/logo.png">
-  <!-- Theme Init (robust) -->
-  <script>(function(){try{var saved=localStorage.getItem('theme');if(saved!=='light'&&saved!=='dark')saved='';}catch(e){saved='';}var sys=window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;var theme=saved|| (sys?'dark':'light');document.documentElement.setAttribute('data-theme',theme);}())</script>
   <title>风扇库</title>
   <script src="https://cdn.tailwindcss.com"></script>
-  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css" integrity="sha512-SnH5WK+bZxgPHs44uWIX+LLJAJ9/2PkPKZ5QiAj6Ta86w+fsb2TkcmfRyVX3pBnMFcV7oQPJkl9QevSCWr3W6A==" crossorigin="anonymous" referrerpolicy="no-referrer">
-  <style>
-  /* =============================================================
-     Layered Design Tokens (Base / Semantic / Motion / Elevation)
-     ============================================================= */
+
+  <!-- Font Awesome 6.5.2 -->
+  <link rel="stylesheet"
+        href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
+        integrity="sha512-SnH5WK+bZxgPHs44uWIX+LLJAJ9/2PkPKZ5QiAj6Ta86w+fsb2TkcmfRyVX3pBnMFcV7oQPJkl9QevSCWr3W6A=="
+        crossorigin="anonymous" referrerpolicy="no-referrer">
+        
+<style>
+  /* ========== 基础设置 ========== */
+  html { font-size: 16px; }
+
+  /* ========== 自定义变量（集中管理） ========== */
   :root {
-    /* Palette (base) */
-    --color-bg-1:#f9fafb; /* page */
-    --color-bg-2:#ffffff; /* surface */
-    --color-text-1:#1f2937;
-    --color-text-2:#4b5563;
-    --color-border:#e5e7eb;
-    --color-border-strong:#d1d5db;
+    --bg-primary:#f9fafb;
+    --bg-secondary:#ffffff;
+    --text-primary:#1f2937;
+    --text-secondary:#4b5563;
+    --border-color:#e5e7eb;
+    --shadow-color:rgba(0,0,0,0.12);
+    --transition-speed:0.28s;
 
-    /* Semantic */
-    --color-accent:#2563eb;
-    --color-accent-hover:#1d4ed8;
-    --color-accent-active:#194ec0;
-    --color-success:#10B981;
-    --color-success-hover:#0ea373;
-    --color-success-active:#0c8c60;
-    --color-danger:#dc2626;
-    --color-danger-hover:#b91c1c;
-    --color-danger-active:#991b1b;
-    --color-muted:#6b7280;
+    --toast-bg:#ffffff;
+    --toast-border:#e5e7eb;
+    --toast-text:#1f2937;
+    --toast-success:#059669;
+    --toast-error:#dc2626;
+    --toast-loading:#2563eb;
 
-    /* Legacy aliases (to be deprecated) */
-    --primary:var(--color-accent);
-    --primary-hover:var(--color-accent-hover);
-    --primary-dark:var(--color-accent-active);
-    --brand-green:var(--color-success);
-    --brand-green-hover:var(--color-success-hover);
-    --brand-green-dark:var(--color-success-active);
-    --brand-green-dark-hover:var(--color-success-hover);
-    --danger:var(--color-danger);
-    --danger-hover:var(--color-danger-hover);
-    --muted:var(--color-muted);
-
-    /* Elevation */
-    --shadow-elev-1:0 2px 6px rgba(0,0,0,0.08);
-    --shadow-elev-2:0 4px 12px rgba(0,0,0,0.18);
-
-    /* Motion */
-    --transition-fast:.16s;
-    --transition-base:.25s;
-    --transition-slow:.40s;
-
-    /* Controls & Layout */
     --control-height:46px;
     --control-radius:10px;
     --control-h-padding:14px;
@@ -99,6 +75,9 @@
     --sidebar-splitter-down-deadzone: 0;
 
     --seg-btn-w: 80px; /* 子页签切换控件宽度 */
+
+    /* Gesture Close Zone: Default 24px (user-adjustable). Increase if users have difficulty triggering edge swipe. */
+    --gesture-close-zone-width: 24px;
   }
 
   /* 暗色主题变量 */
@@ -829,7 +808,7 @@
     position: absolute;
     top: 0;
     right: 0px;
-    width: GESTURE_CLOSE_ZONE_WIDTH + 'px';             /* 可调：与 JS GESTURE_CLOSE_ZONE_WIDTH 保持一致 */
+    width: var(--gesture-close-zone-width);             /* User requested default width 24px (was previously discussed as 48px) for narrower edge gesture */
     height: 100%;
     z-index: 350;
     touch-action: none;        /* 我们接管 pointer 以避免系统横向手势抢占 */
@@ -1099,9 +1078,53 @@
     --tooltip-shadow: 0 8px 28px rgba(0,0,0,.45);
   }
 
-  /* Reduced Motion */
-  @media (prefers-reduced-motion: reduce){ * { animation:none !important; transition:none !important; } }
-  </style>
+  /* 全局 tooltip 容器：挂在 body 下，避免被 overflow 裁切 */
+  #appTooltip {
+    position: fixed;
+    z-index: 3000;                   /* 高于 toast(2000) */
+    max-width: min(70vw, 320px);
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.35;
+    color: var(--tooltip-text);
+    background: var(--tooltip-bg);
+    border: 1px solid var(--tooltip-border);
+    border-radius: 8px;
+    box-shadow: var(--tooltip-shadow);
+    pointer-events: none;            /* 不截获鼠标，交给锚点 */
+    opacity: 0;
+    transform: translate(-50%, -6px);
+    transition: opacity .15s ease, transform .15s ease;
+    white-space: normal;
+  }
+  #appTooltip[data-show="1"] {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+
+  /* 小三角（可选） */
+  #appTooltip::after {
+    content: "";
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
+    bottom: -6px;                    /* 默认朝下方外延（当放在上方展示时，三角在下边） */
+    border-width: 6px 6px 0 6px;
+    border-style: solid;
+    border-color: var(--tooltip-bg) transparent transparent transparent;
+  }
+  #appTooltip[data-placement="bottom"]::after {
+    top: -6px; bottom: auto;
+    border-width: 0 6px 6px 6px;
+    border-color: transparent transparent var(--tooltip-bg) transparent;
+  }
+
+  .share-fail-url {
+    word-break: break-all;
+    white-space: normal;
+    font-family: monospace;
+  }
+</style>
 </head>
 <body class="bg-gray-50 min-h-screen">
   <div id="toastContainer"></div>
@@ -1803,7 +1826,9 @@ window.APP_CONFIG = {
     window.ensureGestureZone();
   }
 
-  const GESTURE_CLOSE_ZONE_WIDTH = 24;
+  // Derive gesture close zone width from CSS variable for centralized configuration
+  const zoneWidthVar = getComputedStyle(document.documentElement).getPropertyValue('--gesture-close-zone-width').trim();
+  const GESTURE_CLOSE_ZONE_WIDTH = parseInt(zoneWidthVar, 10) || 24;
   const CLOSE_RATIO = 0.30;
   const MIN_DRAG_X = 12;
   const MAX_SLOPE = 0.65;
@@ -1915,7 +1940,7 @@ window.APP_CONFIG = {
     }, { passive:true });
 
     const ro = ('ResizeObserver' in window) ? new ResizeObserver(()=>{
-      zone.style.width = GESTURE_CLOSE_ZONE_WIDTH + 'px';
+      // Width is now handled by CSS variable, no need to set it dynamically
     }) : null;
     if (ro) ro.observe(sidebar);
   }
