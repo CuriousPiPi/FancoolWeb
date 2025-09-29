@@ -401,7 +401,7 @@
     text-align:center; 
     width:60px; 
     position: sticky; 
-    z-index: ; 
+    z-index: 9; 
     right: 0;   
     background: var(--bg-secondary); 
   }
@@ -898,8 +898,6 @@
 
   /* 让侧栏上半区两个页签的左右内边距对称，避免整体向右偏移 */
   #top-panel .sidebar-panel-content > nav.tab-nav {
-    /* 原来是 padding-left: var(--content-left-gutter); padding-right: var(--content-right-gutter);
-       由于这两个值不相等（25px vs 10px），看起来会偏右。这里改为对称。 */
     padding-top: 0 !important;
     padding-left: var(--content-left-gutter) !important;
     padding-right: var(--content-left-gutter) !important;

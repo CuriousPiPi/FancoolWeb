@@ -1,4 +1,5 @@
-window.APP_CONFIG = window.APP_CONFIG || { clickCooldownMs: 100, maxItems: 0 };
+
+window.APP_CONFIG = window.APP_CONFIG || { clickCooldownMs: 2000, maxItems: 0 };
 /* ==== 命名空间根 ==== */
 window.__APP = window.__APP || {};
 
@@ -1012,9 +1013,6 @@ if (sidebar){
   mo.observe(sidebar, { attributes:true });
 }
 
-function updateTogglePosition(){ /* 位置固定，不再随宽度改变 */ }
-updateTogglePosition();
-
 function expandSidebarIfCollapsed(){
   if (!sidebar) return;
 
@@ -1247,7 +1245,6 @@ if (resizer && sidebar && mainContent){
     if (!isCollapsed){
       mainContent.style.marginLeft = w + 'px';
       currentSidebarWidth = w;
-      updateTogglePosition();
       if (typeof window.updateSplitterRails === 'function') window.updateSplitterRails();
     }
   }
@@ -1437,12 +1434,6 @@ function syncQuickActionButtons(){
     const key = mapKeyFromDataset(d);
     if (selectedMapSet.has(key)) toRemoveState(btn); else toAddState(btn);
   });
-}
-
-let lastSelectedSignature = null;
-function computeSignatureFromFans(fans){
-  try { return JSON.stringify((fans||[]).map(f=>f.key).sort()); }
-  catch { return String((fans||[]).length); }
 }
 
 /* =========================================================
