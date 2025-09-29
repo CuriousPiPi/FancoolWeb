@@ -1,17 +1,28 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <link rel="icon" type="image/png" href="/static/logo.png">
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
   <script>
     (function () {
-      const savedTheme = localStorage.getItem('theme');
-      const systemPrefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+      let savedTheme = null;
+      try {
+        savedTheme = localStorage.getItem('theme');
+      } catch (e) {
+        // localStorage might be blocked in private mode
+      }
+      
+      // Validate saved theme (only 'light' or 'dark' allowed)
+      if (savedTheme !== 'light' && savedTheme !== 'dark') {
+        savedTheme = null;
+      }
+      
+      const systemPrefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
       const theme = savedTheme || (systemPrefersDark ? 'dark' : 'light');
       document.documentElement.setAttribute('data-theme', theme);
     })();
   </script>
-  <meta charset="UTF-8"/>
-  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <link rel="icon" type="image/png" href="/static/logo.png">
   <title>风扇库</title>
 
   <!-- Tailwind -->
@@ -65,10 +76,8 @@
     --content-right-gutter: 25px;
     --content-bottom-gap: 12px;
     --bottom-title-gap: 10px;
-    --bottom-title-top-pad: 4px;
     --header-divider-offset: 8px;
 
-    --sidebar-footer-h: 32px;
     --footer-v-pad: 16px;
     --sbw: 16px; /* 滚动条预估宽度（Windows/Chrome 约 15~17px） */
 
@@ -81,14 +90,19 @@
     --action-add-col-w: 16px;
     --action-gap: 12px;
 
-    /* 分隔条上下死区 */
-    --sidebar-splitter-up-deadzone: 0; 
-    --sidebar-splitter-down-deadzone: 0;
-
     --seg-btn-w: 80px; /* 子页签切换控件宽度 */
 
-    /* Gesture Close Zone: Default 24px (user-adjustable). Increase if users have difficulty triggering edge swipe. */
+    /* Gesture Close Zone: default 24px (increase if users miss swipe). */
     --gesture-close-zone-width: 24px;
+    
+    /* Transition system */
+    --transition-fast: 0.15s ease;
+    --transition-base: 0.25s ease;
+    --transition-slow: 0.35s ease;
+    
+    /* Shadow elevation system */
+    --shadow-elev-1: 0 2px 6px rgba(0, 0, 0, 0.12);
+    --shadow-elev-2: 0 4px 12px rgba(0, 0, 0, 0.15);
   }
 
   /* 暗色主题变量 */
@@ -100,6 +114,10 @@
     --border-color:#374151;
     --shadow-color:rgba(0,0,0,0.55);
 
+    /* Dark theme shadow system */
+    --shadow-elev-1: 0 2px 6px rgba(0, 0, 0, 0.35);
+    --shadow-elev-2: 0 4px 12px rgba(0, 0, 0, 0.45);
+
     --toast-bg:#1f2937;
     --toast-border:#374151;
     --toast-text:#f3f4f6;
@@ -110,7 +128,7 @@
   body {
     background:var(--bg-primary)!important;
     color:var(--text-primary);
-    transition:background .3s,color .3s;
+    transition:background var(--transition-base),color var(--transition-base);
     font-family:system-ui,-apple-system,"Segoe UI","Helvetica Neue","Microsoft YaHei",Arial,sans-serif;
   }
 
@@ -139,7 +157,7 @@
     display:inline-flex;
     align-items:center;
     font-weight:500;
-    transition:.2s;
+    transition:var(--transition-fast);
   }
 
   select.ui-field {
@@ -202,25 +220,34 @@
   input.ui-field::-webkit-inner-spin-button, input.ui-field::-webkit-outer-spin-button { -webkit-appearance:none; margin:0; }
   input.ui-field[type=number] { -moz-appearance:textfield; }
 
-  [data-theme="dark"] .ui-field,
-  [data-theme="dark"] .ui-select {
-    background-color:var(--bg-secondary)!important;
-    border-color:var(--border-color)!important;
-    color:var(--text-primary)!important;
+  /* Dark theme UI component overrides - minimal differences only */
+  [data-theme="dark"] .ui-btn.success { 
+    background:var(--brand-green-dark)!important; 
+    border-color:var(--brand-green-dark)!important; 
   }
-  [data-theme="dark"] .ui-btn { color:#fff!important; }
-  [data-theme="dark"] .ui-btn:not(.secondary):not(.success) {
-    background:var(--primary)!important;
-    border-color:var(--primary)!important;
+  [data-theme="dark"] .ui-btn.success:hover { 
+    background:var(--brand-green-dark-hover)!important; 
   }
-  [data-theme="dark"] .ui-btn:not(.secondary):not(.success):hover {
-    background:var(--primary-dark)!important;
-    border-color:var(--primary-dark)!important;
+
+  /* ========== Accessibility ========== */
+  
+  /* Reduced motion support */
+  @media (prefers-reduced-motion: reduce) {
+    * { 
+      animation: none !important; 
+      transition: none !important; 
+    }
   }
-  [data-theme="dark"] .ui-btn.secondary { background:var(--danger)!important; border-color:var(--muted)!important; }
-  [data-theme="dark"] .ui-btn.secondary:hover { background:var(--danger-hover)!important; }
-  [data-theme="dark"] .ui-btn.success { background:var(--brand-green-dark)!important; border-color:var(--brand-green-dark)!important; }
-  [data-theme="dark"] .ui-btn.success:hover { background:var(--brand-green-dark-hover)!important; }
+
+  /* Focus outline improvements - ensure visibility instead of removing */
+  .ui-field:focus,
+  .ui-select:focus,
+  .ui-btn:focus,
+  #sidebar-toggle:focus,
+  .theme-toggle:focus {
+    outline: 2px solid var(--primary);
+    outline-offset: 2px;
+  }
 
   .btn-add {
     background:transparent!important;
@@ -229,7 +256,7 @@
     border:none; border-radius:6px;
     padding:4px;
     display:inline-flex; align-items:center; justify-content:center;
-    cursor:pointer; transition:color .2s, transform .2s;
+    cursor:pointer; transition:color var(--transition-fast), transform var(--transition-fast);
     box-shadow:none;
     font-size:14px;
   }
@@ -269,7 +296,7 @@
     color:var(--text-secondary);
     border-bottom:2px solid transparent;
     margin-bottom:-2px;
-    transition:.25s;
+    transition:var(--transition-base);
     user-select:none;
     font-size:16px;
     letter-spacing:.5px;
@@ -321,7 +348,7 @@
     padding: var(--sp-pad-top) var(--sp-pad-x) var(--sp-pad-bottom);
     scrollbar-color: var(--border-color) var(--bg-secondary);
   }    
-  #bottom-panel { transition:flex-basis .35s ease, height .35s ease; }
+  #bottom-panel { transition:flex-basis var(--transition-slow), height var(--transition-slow); }
 
 
   /* 分隔条：上下 1px 细线，避免被相邻内容“吃边”*/
@@ -346,7 +373,7 @@
     border-radius: 9999px;
     background: var(--bg-secondary);
     border: 1px solid var(--border-color);
-    box-shadow: 0 1px 2px rgba(0,0,0,.08);
+    box-shadow: var(--shadow-elev-1);
     cursor: ns-resize;
     display: inline-flex;
     align-items: center;
@@ -375,7 +402,7 @@
 
   #sidebar-splitter .splitter-handle:hover {
     border-color: #93c5fd; /* 可按需调整主题色 */
-    box-shadow: 0 1px 3px rgba(0,0,0,.12);
+    box-shadow: var(--shadow-elev-1);
   }
   #sidebar-splitter .splitter-handle:active {
     transform: translate(-50%,-50%) scale(.98);
@@ -397,17 +424,17 @@
   #sidebar-resizer:hover { background:rgba(0,0,0,.08); }
 
   
-  .tab-content-container { overflow:hidden; position:relative; min-height:460px; }
-  .tab-content-wrapper { display:flex; width:200%; transition:transform .45s cubic-bezier(.4,0,.2,1); }
+  .tab-content-container { overflow:hidden; position:relative; min-height:0; }
+  .tab-content-wrapper { display:flex; width:200%; transition:transform var(--transition-slow) cubic-bezier(.4,0,.2,1); }
   .tab-pane { width:50%; flex-shrink:0; padding:0 2px; }
 
   .right-subseg { display:flex; align-items:center; gap:.5rem; min-height:42px; }
   .right-subseg .seg { margin:0; }
 
   .seg { position:relative; display:inline-flex; gap:0; padding:3px; border:1px solid var(--border-color); border-radius:9999px; background:var(--bg-secondary); }
-  .seg-btn { position:relative; z-index:1; padding:6px 12px; border-radius:9999px; font-weight:600; color:var(--text-secondary); background:none; border:none; cursor:pointer; transition:.2s; font-size:13px; }
+  .seg-btn { position:relative; z-index:1; padding:6px 12px; border-radius:9999px; font-weight:600; color:var(--text-secondary); background:none; border:none; cursor:pointer; transition:var(--transition-fast); font-size:13px; }
   .seg-btn.is-active { color:var(--text-primary); }
-  .seg-thumb { position:absolute; inset:3px auto 3px 3px; width:calc(50% - 3px); border-radius:9999px; background:rgba(59,130,246,.12); transition:transform .25s ease; }
+  .seg-thumb { position:absolute; inset:3px auto 3px 3px; width:calc(50% - 3px); border-radius:9999px; background:rgba(59,130,246,.12); transition:transform var(--transition-base); }
   .seg[data-active$="likes-panel"] .seg-thumb { transform:translateX(100%); }
   [data-theme="dark"] .seg-thumb { background:rgba(95,163,255,.14); }
 
@@ -429,7 +456,7 @@
     text-align:center; 
     width:60px; 
     position: sticky; 
-    z-index: ; 
+    z-index: 9; 
     right: 0;   
     background: var(--bg-secondary); 
   }
@@ -438,11 +465,7 @@
   .ranking-table thead th {
     position:sticky; top:0; z-index:8;
     background:var(--bg-secondary);
-    box-shadow:0 2px 3px -1px rgba(0,0,0,.08);
-  }
-  [data-theme="dark"] .ranking-table thead th {
-    background:var(--bg-secondary);
-    box-shadow:0 2px 3px -1px rgba(0,0,0,.45);
+    box-shadow:var(--shadow-elev-1);
   }
   .right-panel-card .ranking-table thead th:last-child {
     top: 0;                        /* 已有 sticky 表头，这里确保最后一列也顶住 */
@@ -488,11 +511,11 @@
    position:fixed; top:10px; right:25px; z-index:1000;
    background:var(--bg-secondary); border:1px solid var(--border-color);
    display:flex; align-items:center; justify-content:center;
-   cursor:pointer; box-shadow:0 2px 6px var(--shadow-color);
+   cursor:pointer; box-shadow:var(--shadow-elev-1);
    width: 44px;
    height: 44px;
    border-radius: 50%;
-   transition: background .25s, transform .25s;
+   transition: background var(--transition-base), transform var(--transition-base);
   }
   .theme-toggle:active {
    transform: scale(0.95);
@@ -552,7 +575,7 @@
   #sidebar .fan-item .sidebar-marquee-inner {
     display: inline-block;
     will-change: transform;
-    transition: transform .35s ease;
+    transition: transform var(--transition-slow);
   }
 
   #searchSuggestions {
@@ -808,7 +831,7 @@
     backdrop-filter:saturate(120%) blur(2px);
     z-index:250;
     opacity:0;
-    transition:opacity .25s ease;
+    transition: opacity var(--transition-base);
   }
   .sidebar-overlay-backdrop.is-visible { opacity:1; }
 
@@ -846,7 +869,7 @@
     cursor: pointer;
     box-shadow: 0 2px 6px var(--shadow-color);
     z-index: 1100; 
-    transition: background .25s, border-color .25s, box-shadow .25s, transform .2s;
+    transition: background var(--transition-base), border-color var(--transition-base), box-shadow var(--transition-base), transform var(--transition-fast);
   }
 
   #sidebar-toggle .icon-sidebar {
@@ -897,7 +920,7 @@
     width: 24px;
     height: 24px;
     opacity: .55;
-    transition: opacity .25s ease, transform .25s ease;
+    transition: opacity var(--transition-base), transform var(--transition-base);
   }
   .info-source-btn:hover,
   .info-source-btn:focus {
@@ -1072,7 +1095,7 @@
   #recentLikesList .recent-marquee-inner {
     display: inline-block;
     will-change: transform;
-    transition: transform .35s ease;
+    transition: transform var(--transition-slow);
   }
 
   /* === Global Tooltip (主题化) === */
@@ -1141,7 +1164,7 @@
   <div id="toastContainer"></div>
 
   <!-- 左上角浮动侧栏按钮 -->
-  <button id="sidebar-toggle" class="sidebar-fab-toggle" aria-label="展开侧栏" title="展开/收起侧栏">
+  <button id="sidebar-toggle" class="sidebar-fab-toggle" aria-label="Toggle sidebar" title="展开/收起侧栏">
   <span class="icon-sidebar" aria-hidden="true"></span>
   </button>
 
@@ -1275,11 +1298,11 @@
       </header>
 
       <div style="position: fixed; top: 20px; right: 100px; z-index: 1000;">
-        <a href="" class="info-source-btn bg-white text-gray-700 hover:text-blue-600 p-2 rounded-full shadow-md border border-gray-200 flex items-center justify-center" title="数据来源与说明(待开发)">
+        <a href="" class="info-source-btn bg-white text-gray-700 hover:text-blue-600 p-2 rounded-full shadow-md border border-gray-200 flex items-center justify-center" aria-label="Data source info" title="数据来源与说明(待开发)">
           <i class="fa-solid fa-circle-info text-lg"></i>
         </a>
       </div>
-      <div class="theme-toggle" id="themeToggle" title="切换深浅色">
+      <div class="theme-toggle" id="themeToggle" role="button" aria-label="Toggle theme" title="切换深浅色">
         <i class="fa-solid fa-moon" id="themeIcon"></i>
       </div>
 
