@@ -221,11 +221,4 @@
     </div>
   </main>
 
-  <script>
-    /* 全局配置（后端注入） */
-    window.APP_CONFIG = {
-      clickCooldownMs: {{ click_cooldown_ms|default(2000) }},
-      maxItems: {{ max_chart_items }}
-    };
-  </script>
 {% endblock %}
