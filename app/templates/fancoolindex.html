@@ -35,6 +35,8 @@
         crossorigin="anonymous" referrerpolicy="no-referrer">
         
 <style>
+  /* ========== CSS Variables & Base Styles ========== 
+     TODO: Extract to external stylesheet for better maintainability */
   /* ========== 基础设置 ========== */
   html { font-size: 16px; }
 
@@ -142,6 +144,8 @@
   .form-grid { display:grid; grid-template-columns: 1fr; row-gap: var(--form-row-gap); }
   .form-row label { display:block; margin-bottom:6px; font-size:14px; }
 
+  /* ========== UI Components (Forms & Buttons) ========== 
+     TODO: Extract to external stylesheet as components.css */
   .ui-field,
   .ui-btn,
   .ui-select {
@@ -264,16 +268,21 @@
   .btn-add:hover { transform:translateY(-1px); color:var(--brand-green-hover)!important; }
   .btn-add[data-mode="remove"] { color:var(--danger)!important; }
   .btn-add[data-mode="remove"]:hover { color:var(--danger-hover)!important; }
+  
+  /* Dark theme differences only for .btn-add */
   [data-theme="dark"] .btn-add { color:var(--brand-green-dark)!important; }
   [data-theme="dark"] .btn-add:hover { color:var(--brand-green-dark-hover)!important; }
-  [data-theme="dark"] .btn-add[data-mode="remove"] { color:var(--danger)!important; }
   [data-theme="dark"] .btn-add[data-mode="remove"]:hover { color:#ef4444!important; }
 
   .restore-icon { color:var(--brand-green)!important; }
   .restore-icon:hover { color:var(--brand-green-hover)!important; }
+  
+  /* Dark theme differences only for .restore-icon */  
   [data-theme="dark"] .restore-icon { color:var(--brand-green-dark)!important; }
   [data-theme="dark"] .restore-icon:hover { color:var(--brand-green-dark-hover)!important; }
 
+  /* ========== Layout & Navigation ========== 
+     TODO: Extract to external stylesheet as layout.css */
   /* ========== 侧边栏与滚动 ========== */
   #top-panel .tab-nav {
     position: sticky;
@@ -506,6 +515,8 @@
   .marquee-cell { overflow:hidden; }
   .marquee-inner { display:inline-block; will-change:transform; }
 
+  /* ========== Theme Toggle & Interactive Elements ========== 
+     TODO: Extract to external stylesheet as interactive.css */
   /* === 主题切换按钮 === */
   .theme-toggle {
    position:fixed; top:10px; right:25px; z-index:1000;
