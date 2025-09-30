@@ -61,6 +61,7 @@
 
     --seg-btn-w: 80px; /* 子页签切换控件宽度 */
     --gesture-close-zone-width: 24px;
+    --overlay-gutter-x: 24px;
   }
 
   /* 暗色主题变量 */
@@ -282,6 +283,7 @@
   #top-panel .sidebar-panel-content {
     overflow-y: hidden !important;
     overflow-x: hidden !important;
+    padding-bottom: 16px !important;
   }
 
   .sidebar-panel { display:flex; flex-direction:column; overflow:hidden; }
@@ -360,6 +362,25 @@
       height: 30px;
     }
   }
+
+  #sidebar-splitter::before,
+#sidebar-splitter::after {
+  content:"";
+  position:absolute;
+  left:0; right:0;
+  height:1px;
+  background:var(--border-color);
+  pointer-events:none;
+  z-index: -1; /* 低于 handle 和 svg */
+}
+#sidebar-splitter::before { top:0; }
+#sidebar-splitter::after  { bottom:0; }
+#sidebar-splitter svg.splitter-rails {
+  position:relative;
+  z-index:0;
+  width:100%;
+  height:100%;
+}
 
   #sidebar-resizer {
     position:absolute; top:0; right:0; width:6px; height:100%;
@@ -706,7 +727,8 @@
     scrollbar-width: none;
     position: relative;
     width: 100%;
-    height: 200px;
+    flex: 1 1 auto;          /* 允许在清空 style.height 时自然扩展 */
+    min-height: 0;           /* 避免子元素撑破 */
   }
  
 
@@ -783,6 +805,16 @@
     transition:opacity .25s ease;
   }
   .sidebar-overlay-backdrop.is-visible { opacity:1; }
+
+.sidebar-overlay-mode #sidebar .sidebar-panel-content > nav.tab-nav,
+.sidebar-overlay-mode #sidebar #recentlyRemovedList,
+.sidebar-overlay-mode #sidebar #recentLikesList,
+.sidebar-overlay-mode #sidebar #selectedFansList,
+.sidebar-overlay-mode #sidebar #clearAllContainer.sticky-footer,
+.sidebar-overlay-mode #sidebar #bottom-panel .sidebar-panel-content > h2 {
+  padding-left: var(--overlay-gutter-x) !important;
+  padding-right: var(--overlay-gutter-x) !important;
+}
 
   /* ========= PATCH P0-1：侧栏右缘关闭手势（基于独立热区层） ========= */
  
