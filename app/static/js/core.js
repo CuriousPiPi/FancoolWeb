@@ -478,321 +478,7 @@ function unescapeHtml(s){
   return String(s??'').replace(/&(amp|lt|gt|quot|#39);/g,m=>map[m]);
 }
 
-/* =========================================================
-   颜色映射与图表通讯
-   ========================================================= */
-function applyServerStatePatchColorIndices(share_meta){
-  if (!share_meta) return;
-  if (share_meta.color_indices && typeof share_meta.color_indices === 'object') {
-    try {
-      Object.entries(share_meta.color_indices).forEach(([k,v])=>{
-        if (Number.isFinite(v)) { colorIndexMap[k] = v|0; }
-      });
-      saveColorIndexMap(colorIndexMap);
-    } catch(_){}
-  }
-}
 
-function loadColorIndexMap(){
-  try { return JSON.parse(localStorage.getItem('colorIndexMap_v1')||'{}'); } catch { return {}; }
-}
-function saveColorIndexMap(obj){
-  try { localStorage.setItem('colorIndexMap_v1', JSON.stringify(obj)); } catch(_){}
-}
-let colorIndexMap = loadColorIndexMap();
-function ensureColorIndexForKey(key, selectedKeys){
-  if (!key) return 0;
-  if (Object.prototype.hasOwnProperty.call(colorIndexMap,key)) return colorIndexMap[key]|0;
-  const used = new Set();
-  (selectedKeys||[]).forEach(k=>{
-    if (Object.prototype.hasOwnProperty.call(colorIndexMap,k)) used.add(colorIndexMap[k]|0);
-  });
-  let idx=0; while(used.has(idx)) idx++;
-  colorIndexMap[key]=idx; saveColorIndexMap(colorIndexMap);
-  return idx;
-}
-function ensureColorIndicesForSelected(fans){
-  const keys = (fans||[]).map(f=>f.key);
-  keys.forEach(k=>ensureColorIndexForKey(k, keys));
-}
-function colorForKey(key){
-  const idx = (Object.prototype.hasOwnProperty.call(colorIndexMap,key)?(colorIndexMap[key]|0):0);
-  const palette = currentPalette();
-  return palette[idx % palette.length];
-}
-
-/* 颜色映射 withFrontColors（保留并附带 color_index） */
-function withFrontColors(chartData){
-  // 兜底：若分享首次加载且未应用轴类型，则这里也同步一次
-  if (__isShareLoaded && !__shareAxisApplied && chartData && chartData.x_axis_type) {
-    frontXAxisType = (chartData.x_axis_type === 'noise') ? 'noise_db' : chartData.x_axis_type;
-    try { localStorage.setItem('x_axis_type', frontXAxisType); } catch(_){}
-    __shareAxisApplied = true;
-  }
-  const series = (chartData.series||[]).map(s=>{
-    const idx = colorIndexMap[s.key] ?? ensureColorIndexForKey(s.key);
-    return { ...s, color: colorForKey(s.key), color_index: idx };
-  });
-  return { ...chartData, x_axis_type: frontXAxisType, series };
-}
-
-/* ==== 修正：颜色索引回收与去重（稳定版） ==== */
-
-/* 最小未占用 index */
-function nextFreeIndex(assigned){
-  let i = 0;
-  while (assigned.has(i)) i++;
-  return i;
-}
-
-/* 释放某个已移除 key 的颜色索引 */
-function releaseColorIndexForKey(key){
-  if (!key) return;
-  if (Object.prototype.hasOwnProperty.call(colorIndexMap, key)) {
-    delete colorIndexMap[key];
-    saveColorIndexMap(colorIndexMap);
-  }
-}
-
-/* 只在“缺失或冲突”时重分配；唯一者保持不变，避免颜色抖动 */
-function assignUniqueIndicesForSelection(fans){
-  const keys = (fans || []).map(f => f.key).filter(Boolean);
-
-  // 统计每个 idx 的拥有数，用于识别冲突
-  const countByIdx = new Map(); // idx -> count
-  keys.forEach(k => {
-    if (Object.prototype.hasOwnProperty.call(colorIndexMap, k)) {
-      const idx = colorIndexMap[k] | 0;
-      countByIdx.set(idx, (countByIdx.get(idx) || 0) + 1);
-    }
-  });
-
-  // 已最终占用的索引集合（先占住所有“唯一”的旧索引，保证稳定）
-  const assigned = new Set();
-  keys.forEach(k => {
-    if (Object.prototype.hasOwnProperty.call(colorIndexMap, k)) {
-      const idx = colorIndexMap[k] | 0;
-      if ((countByIdx.get(idx) || 0) === 1) {
-        assigned.add(idx); // 保留旧索引
-      }
-    }
-  });
-
-  // 第二轮：仅对“缺失或冲突”的条目分配新索引
-  keys.forEach(k => {
-    const has = Object.prototype.hasOwnProperty.call(colorIndexMap, k);
-    if (has) {
-      const idx = colorIndexMap[k] | 0;
-      const isUnique = (countByIdx.get(idx) || 0) === 1;
-      if (isUnique) {
-        // 唯一者无条件保留旧 idx，避免洗牌
-        // 确保占位（即使第一轮已占位，这里重复 add 也安全）
-        assigned.add(idx);
-        return;
-      }
-    }
-    // 缺失或冲突：分配新 index
-    const newIdx = nextFreeIndex(assigned);
-    colorIndexMap[k] = newIdx;
-    assigned.add(newIdx);
-  });
-
-  saveColorIndexMap(colorIndexMap);
-}
-
-const chartFrame = $('#chartFrame');
-let lastChartData = null;
-let likedKeysSet = new Set();
-let frontXAxisType = 'rpm';
-
-const chartMessageQueue = [];
-let chartFrameReady = false;
-
-function flushChartQueue(){
-  if (!chartFrameReady || !chartFrame || !chartFrame.contentWindow) return;
-  while(chartMessageQueue.length){
-    const msg = chartMessageQueue.shift();
-    try {
-      chartFrame.contentWindow.postMessage(msg, window.location.origin);
-    } catch(e){
-      console.warn('postMessage flush error:', e);
-      break;
-    }
-  }
-  // 补一次 resize，防止初始化阶段尺寸还未稳定
-  setTimeout(()=>resizeChart(), 50);
-}
-
-if (chartFrame) {
-  chartFrame.addEventListener('load', () => {
-    // 若 iframe 未主动发 chart:ready，也在 load 时标记就绪并 flush
-    if (!chartFrameReady) {
-      chartFrameReady = true;
-      flushChartQueue();
-      if (lastChartData && !chartMessageQueue.length) {
-        postChartData(lastChartData);
-      }
-    }
-  });
-}
-
-(function initPersistedXAxisType(){
-  try {
-    const saved = localStorage.getItem('x_axis_type');
-    if (saved === 'rpm' || saved === 'noise_db' || saved === 'noise') {
-      frontXAxisType = (saved === 'noise') ? 'noise_db' : saved;
-    }
-  } catch(_) {}
-})();
-
-// 新增：读取图表容器的实际背景色（透明则回退到 body 或白色）
-function getChartBg(){
-  const host = document.getElementById('chart-settings') || document.body;
-  let bg = '';
-  try { bg = getComputedStyle(host).backgroundColor; } catch(_) {}
-  if (!bg || bg === 'rgba(0, 0, 0, 0)' || bg === 'transparent') {
-    try { bg = getComputedStyle(document.body).backgroundColor; } catch(_) {}
-  }
-  return bg && bg !== 'rgba(0, 0, 0, 0)' ? bg : '#ffffff';
-}
-
-const DARK_BASE_PALETTE = [
-  "#3E9BFF", // 鲜蓝
-  "#FFF958", // 金
-  "#42E049", // 绿
-  "#FF4848", // 红
-  "#DB68FF", // 紫
-  "#2CD1E8", // 青
-  "#F59916", // 橙
-  "#FF67A6", // 粉
-  "#8b5cf6", // 次蓝紫
-  "#14E39E"  // 次绿
-];
-
-/**
- * 检测当前主题
- */
-const currentThemeStr = () =>
-  (document.documentElement.getAttribute('data-theme') === 'dark' ? 'dark' : 'light');
-
-const LIGHT_LINEAR_SCALE = 0.66; // 在“物理线性空间”缩放
-function srgbToLinear(c){ // 0..1
-  return c <= 0.04045 ? c/12.92 : Math.pow((c+0.055)/1.055, 2.4);
-}
-function linearToSrgb(c){
-  return c <= 0.0031308 ? 12.92*c : 1.055*Math.pow(c,1/2.4)-0.055;
-}
-function darkToLightLinear(hex){
-  const h = hex.replace('#','');
-  let r = parseInt(h.slice(0,2),16)/255;
-  let g = parseInt(h.slice(2,4),16)/255;
-  let b = parseInt(h.slice(4,6),16)/255;
-  // 解码到线性光
-  r = srgbToLinear(r);
-  g = srgbToLinear(g);
-  b = srgbToLinear(b);
-  // 线性缩放
-  r *= LIGHT_LINEAR_SCALE;
-  g *= LIGHT_LINEAR_SCALE;
-  b *= LIGHT_LINEAR_SCALE;
-  // 编码回 sRGB
-  r = Math.round(linearToSrgb(r)*255);
-  g = Math.round(linearToSrgb(g)*255);
-  b = Math.round(linearToSrgb(b)*255);
-  const to = v=>v.toString(16).padStart(2,'0');
-  return '#'+to(r)+to(g)+to(b);
-}
-function currentPalette(){
-  return currentThemeStr()==='dark'
-    ? DARK_BASE_PALETTE
-    : DARK_BASE_PALETTE.map(darkToLightLinear);
-}
-
-window.applySidebarColors = function() {
-  const rows = window.__APP.dom.all('#selectedFansList .fan-item');
-  window.__APP.scheduler.write(()=> {
-    rows.forEach(div => {
-      const key = div.getAttribute('data-fan-key');
-      const dot = div.querySelector('.js-color-dot');
-      if (key && dot) dot.style.backgroundColor = colorForKey(key);
-    });
-  });
-};
-
-function isValidNum(v) {
-  return typeof v === 'number' && Number.isFinite(v);
-}
-
-function filterChartDataForAxis(chartData) {
-  const axis = chartData.x_axis_type === 'noise' ? 'noise_db' : chartData.x_axis_type;
-  const cleaned = { ...chartData, series: [] };
-
-  chartData.series.forEach((s) => {
-    const rpmArr   = Array.isArray(s.rpm) ? s.rpm : [];
-    const noiseArr = Array.isArray(s.noise_db) ? s.noise_db : [];
-    const flowArr  = Array.isArray(s.airflow) ? s.airflow : [];
-
-    const xArr = axis === 'noise_db' ? noiseArr : rpmArr;
-
-    const rpmNew = [];
-    const noiseNew = [];
-    const flowNew = [];
-
-    for (let i = 0; i < xArr.length; i++) {
-      const x = xArr[i];
-      const y = flowArr[i];
-      // 仅当 x 与 airflow 都是“真实数值”时才保留该点
-      if (isValidNum(x) && isValidNum(y)) {
-        rpmNew.push(isValidNum(rpmArr[i]) ? rpmArr[i] : null);
-        noiseNew.push(isValidNum(noiseArr[i]) ? noiseArr[i] : null);
-        flowNew.push(y);
-      }
-    }
-
-    // 当前轴维度下没有任何有效点 -> 整个系列不发送
-    const hasAxisPoints = axis === 'noise_db'
-      ? noiseNew.some(isValidNum)
-      : rpmNew.some(isValidNum);
-
-    if (flowNew.length > 0 && hasAxisPoints) {
-      cleaned.series.push({
-        ...s,
-        rpm: rpmNew,
-        noise_db: noiseNew,
-        airflow: flowNew
-      });
-    }
-  });
-
-  return cleaned;
-}
-
-function postChartData(chartData){
-  lastChartData = chartData;
-  if (!chartFrame || !chartFrame.contentWindow) return;
-  const prepared = withFrontColors(chartData);
-  const filtered = filterChartDataForAxis(prepared);
-  const payload = {
-    chartData: filtered,
-    theme: currentThemeStr(),
-    chartBg: getChartBg()
-  };
-  if (pendingShareMeta) {
-    payload.shareMeta = pendingShareMeta;
-    pendingShareMeta = null;
-  }
-  const msg = { type:'chart:update', payload };
-  if (!chartFrameReady){
-    chartMessageQueue.push(msg);
-  } else {
-    chartFrame.contentWindow.postMessage(msg, window.location.origin);
-  }
-}
-
-function resizeChart(){
-  if (!chartFrame || !chartFrame.contentWindow) return;
-  chartFrame.contentWindow.postMessage({ type:'chart:resize' }, window.location.origin);
-}
 
 /* =========================================================
    子段 UI（右侧子段定位）
@@ -1384,41 +1070,8 @@ if (resizer && sidebar && mainContent){
   });
 }
 
-/* =========================================================
-   主题切换
-   ========================================================= */
-const themeToggle = $('#themeToggle');
-const themeIcon = $('#themeIcon');
-let currentTheme = document.documentElement.getAttribute('data-theme') || 'light';
-function setTheme(t){
-  const prev = document.documentElement.getAttribute('data-theme');
-  if (prev === t) {
-    // 只更新图标（初始脚本运行时由 head 脚本已经设置 data-theme）
-    if (themeIcon) themeIcon.className = t==='dark' ? 'fa-solid fa-sun' : 'fa-solid fa-moon';
-    return;
-  }
-  document.documentElement.setAttribute('data-theme', t);
-  if (themeIcon) themeIcon.className = t==='dark' ? 'fa-solid fa-sun' : 'fa-solid fa-moon';
-  localStorage.setItem('theme', t);
-  fetch('/api/theme',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:t})}).catch(()=>{});
-}
-setTheme(currentTheme);
 
-themeToggle?.addEventListener('click', ()=>{
-  currentTheme = currentTheme==='light' ? 'dark':'light';
-  setTheme(currentTheme);
-  window.__APP.dom.all('#selectedFansList .fan-item').forEach(div=>{
-    const key = div.getAttribute('data-fan-key');
-    const dot = div.querySelector('.js-color-dot');
-    if (key && dot) dot.style.backgroundColor = colorForKey(key);
-  });
-  if (lastChartData) {
-    postChartData(lastChartData);
-  } else {
-     resizeChart();
-  }
-  requestAnimationFrame(syncTopTabsViewportHeight);
-});
+
 
 /* =========================================================
    已选 & 快速按钮索引 / 状态
@@ -1517,7 +1170,9 @@ function rebuildSelectedFans(fans){
     selectedCountEl.textContent='0';
     clearAllContainer?.classList.add('hidden');
     rebuildSelectedIndex();
-    requestAnimationFrame(window.applySidebarColors);
+    if (typeof window.applySidebarColors === 'function') {
+      requestAnimationFrame(window.applySidebarColors);
+    }
     requestAnimationFrame(prepareSidebarMarquee);
     scheduleAdjust();
     return;
@@ -1630,22 +1285,24 @@ function processState(data, successMsg){
 
   if ('recently_removed_fans' in data) rebuildRemovedFans(data.recently_removed_fans);
 
-  if ('share_meta' in data && data.share_meta) {
-    pendingShareMeta = {
-      show_raw_curves: data.share_meta.show_raw_curves,
-      show_fit_curves: data.share_meta.show_fit_curves,
-      pointer_x_rpm: data.share_meta.pointer_x_rpm,
-      pointer_x_noise_db: data.share_meta.pointer_x_noise_db,
-      legend_hidden_keys: data.share_meta.legend_hidden_keys
-      // color_indices 已提前处理
-    };
-
-    if (__isShareLoaded && !__shareAxisApplied && data.chart_data && data.chart_data.x_axis_type) {
-      frontXAxisType = (data.chart_data.x_axis_type === 'noise') ? 'noise_db' : data.chart_data.x_axis_type;
-      try { localStorage.setItem('x_axis_type', frontXAxisType); } catch(_){}
-      __shareAxisApplied = true;
-    }
-  }
+   if ('share_meta' in data && data.share_meta) {
+   // 颜色索引已在前面 applyServerStatePatchColorIndices 处理
+   if (window.__APP.chart && typeof window.__APP.chart.setPendingShareMeta === 'function') {
+     window.__APP.chart.setPendingShareMeta({
+       show_raw_curves: data.share_meta.show_raw_curves,
+       show_fit_curves: data.share_meta.show_fit_curves,
+       pointer_x_rpm: data.share_meta.pointer_x_rpm,
+       pointer_x_noise_db: data.share_meta.pointer_x_noise_db,
+       legend_hidden_keys: data.share_meta.legend_hidden_keys
+     });
+   }
+   if (__isShareLoaded && data.chart_data && data.chart_data.x_axis_type) {
+     const axisCandidate = (data.chart_data.x_axis_type === 'noise') ? 'noise_db' : data.chart_data.x_axis_type;
+     if (window.__APP.chart && typeof window.__APP.chart.forceAxis === 'function') {
+       window.__APP.chart.forceAxis(axisCandidate);
+     }
+   }
+ }
 
   if (pendingChart) postChartData(pendingChart);
 
@@ -3071,30 +2728,6 @@ window.__APP.modules = {
   window.addEventListener('resize', () => {
     if (__titleMaskRaf) cancelAnimationFrame(__titleMaskRaf);
     __titleMaskRaf = requestAnimationFrame(applyRecentLikesTitleMask);
-  });
-
-  window.addEventListener('message', (e) => {
-    if (e.origin !== window.location.origin) return;
-    const { type, payload } = e.data || {};
-
-    if (type === 'chart:ready') {
-      chartFrameReady = true;
-      flushChartQueue();
-      // 若队列为空但已有 lastChartData（例如 ready 之前没有触发过 postChartData），补发一次
-      if (lastChartData && !chartMessageQueue.length){
-        postChartData(lastChartData);
-      }
-      return;
-    }
-
-    if (type === 'chart:xaxis-type-changed') {
-      const next = (payload?.x_axis_type === 'noise') ? 'noise_db' : (payload?.x_axis_type || 'rpm');
-      if (next !== frontXAxisType) {
-        frontXAxisType = next;
-        try { localStorage.setItem('x_axis_type', frontXAxisType); } catch(_) {}
-        if (lastChartData) postChartData(lastChartData);
-      }
-    }
   });
 
     // === 新增：记录用户是否点击过侧栏按钮（本地标记） ===
