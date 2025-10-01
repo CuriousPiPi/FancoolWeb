@@ -46,6 +46,7 @@
     });
   }
   rebuildSelectedIndex();
+  const bus = window.__APP.bus;
 
   /* ========================================================
    * 快速按钮构建
@@ -126,13 +127,19 @@
   function rebuildSelectedFans(fans){
     if (!selectedListEl) return;
     selectedListEl.innerHTML='';
-    ensureColorIndicesForSelected(fans||[]);
+
+    // 事件驱动模式下，颜色唯一化已在 color.js 的 selection:changed 处理。
+    // 兜底：如果 color 模块尚未加载（无索引），尝试即时确保。
+    if (!window.__APP.color?.recycleRemovedKeys){
+      try { assignUniqueIndicesForSelection(fans||[]); } catch(_){}
+    }
+
     if (!fans || fans.length===0){
       if (selectedCountEl) selectedCountEl.textContent='0';
       clearAllContainer?.classList.add('hidden');
       rebuildSelectedIndex();
-      requestAnimationFrame(()=> {
-        if (typeof window.applySidebarColors === 'function') window.applySidebarColors();
+      requestAnimationFrame(()=>{
+        window.__APP.color?.applySidebarColors?.();
         window.__APP.layout?.refreshMarquees?.();
         window.__APP.layout?.scheduleAdjust?.();
       });
@@ -171,6 +178,7 @@
     rebuildSelectedIndex();
     window.__APP.layout?.refreshMarquees?.();
     window.__APP.layout?.scheduleAdjust?.();
+    bus?.emit('selectedFans:rebuilt', { count: fans?.length||0, ts: Date.now() });
   }
 
   function rebuildRemovedFans(list){
@@ -197,6 +205,7 @@
       removedListEl.appendChild(div);
     });
     window.__APP.layout?.refreshMarquees?.();
+    if (bus) bus.emit('removedFans:rebuilt', { count: list?.length||0, ts: Date.now() });
   }
 
   /* ========================================================
@@ -292,6 +301,8 @@
     syncQuickActionButtons();
     window.__APP.layout?.refreshMarquees?.();
     recentLikesLoaded = true;
+    let totalScenarios = 0; groups.forEach(g=> totalScenarios += g.scenarios.length );
+    if (bus) bus.emit('recentLikes:rebuilt', { groups: groups.size, scenarios: totalScenarios, ts: Date.now() });
   
     // 关键：双 RAF 以保证布局稳定后测量宽度
     requestAnimationFrame(()=>requestAnimationFrame(()=>applyRecentLikesTitleMask()));
@@ -407,6 +418,7 @@
     likesTabLastLoad = Date.now();
     syncQuickActionButtons();
     window.__APP.layout?.refreshMarquees?.();
+    if (bus) bus.emit('topRatings:rebuilt', { count: list.length, ts: Date.now() });
   }
 
   function loadLikesIfNeeded(){
@@ -458,6 +470,7 @@
     fillSearchTable(searchLikesTbody, byLikes);
     syncQuickActionButtons();
     window.__APP.layout?.refreshMarquees?.();
+    if (bus) bus.emit('search:rendered', { airflowCount: byAirflow.length, ts: Date.now() });
   }
 
   if (searchForm){
@@ -778,59 +791,222 @@
   })();
   let __shareAxisApplied=false;
 
-  function processState(data, successMsg){
-    const prevSelectedKeys=new Set(selectedKeySet);
-    if (data.error_message){
-      hideLoading('op');
-      showError(data.error_message);
-    } else {
-      if (successMsg) showSuccess(successMsg);
-      hideLoading('op');
-      autoCloseOpLoading();
+/* ========= State Patch Subsystem: Diff + Conditional Legacy Aliases ========= */
+
+/* 快照容器（若热更新不覆盖） */
+window.__APP.stateSnapshot = window.__APP.stateSnapshot || {
+  likeKeysHash: null,
+  selectedFanKeys: new Set(),
+  removedFanKeys: new Set(),
+  shareMetaHash: null,
+  chartSignature: null
+};
+const __SS = window.__APP.stateSnapshot;
+
+/* 简易哈希（避免引入重型算法；长度大时用首尾采样） */
+function quickHashList(list){
+  if (!Array.isArray(list)) return '[]';
+  const len = list.length;
+  if (len === 0) return 'len:0';
+  if (len <= 40) return 'len:'+len+'|'+list.join(',');
+  // 采样前 15 + 后 15
+  const head = list.slice(0,15);
+  const tail = list.slice(-15);
+  return 'len:'+len+'|h:'+head.join(',')+'|t:'+tail.join(',');
+}
+
+/* ---------- Patch: like keys ---------- */
+function patchLikeKeys(data){
+  if (!('like_keys' in data)) return { changed:false, count: __SS.likeKeysHash? Number(__SS.likeKeysHash.split(':')[1]) : likedKeysSet.size, skipped:true };
+
+  const incoming = Array.isArray(data.like_keys) ? data.like_keys : [];
+  const newHash = quickHashList(incoming);
+  const changed = newHash !== __SS.likeKeysHash;
+
+  if (changed){
+    likedKeysSet = new Set(incoming);
+    __SS.likeKeysHash = newHash;
+  }
+  return { changed, skipped: !changed, count: incoming.length };
+}
+
+/* ---------- Patch: selected fans ---------- */
+function patchSelectedFans(data){
+  if (!('selected_fans' in data)) {
+    return { changed:false, skipped:true, count: __SS.selectedFanKeys.size, added:[], removed:[] };
+  }
+  const fans = Array.isArray(data.selected_fans) ? data.selected_fans : [];
+  const incomingKeys = new Set(fans.map(f=>f.key).filter(Boolean));
+  const prevKeys = __SS.selectedFanKeys;
+
+  let changed = false;
+  const added = [];
+  const removed = [];
+
+  if (incomingKeys.size !== prevKeys.size) changed = true;
+  if (!changed){
+    for (const k of incomingKeys){
+      if (!prevKeys.has(k)){ changed = true; break; }
     }
+  }
 
-    let pendingChart=null;
-    if ('chart_data' in data) pendingChart=data.chart_data;
+  if (changed){
+    for (const k of incomingKeys) if (!prevKeys.has(k)) added.push(k);
+    for (const k of prevKeys) if (!incomingKeys.has(k)) removed.push(k);
 
-    if ('share_meta' in data && data.share_meta){
-      applyServerStatePatchColorIndices(data.share_meta);
+    const diffPayload = {
+      added,
+      removed,
+      current: Array.from(incomingKeys)
+    };
+    // 缓存最近一次 diff（便于调试）
+    window.__APP.__latestSelectionDiff = diffPayload;
+    // 若 color.js 尚未加载，做一个 pending 以便其加载后消费
+    if (!window.__APP.color?.recycleRemovedKeys){
+      window.__APP.__pendingSelectionDiff = diffPayload;
     }
+    bus?.emit('selection:changed', diffPayload);
 
-    if ('like_keys' in data) likedKeysSet=new Set(data.like_keys||[]);
+    __SS.selectedFanKeys = incomingKeys;
+    rebuildSelectedFans(fans);
+  }
 
-    if ('selected_fans' in data){
-      const incomingKeys=new Set((data.selected_fans||[]).map(f=>f.key).filter(Boolean));
-      try {
-        prevSelectedKeys.forEach(k=>{ if(!incomingKeys.has(k)) releaseColorIndexForKey(k); });
-      }catch(_){}
-      assignUniqueIndicesForSelection(data.selected_fans);
-      rebuildSelectedFans(data.selected_fans);
+  return { changed, skipped: !changed, count: fans.length, added, removed };
+}
+
+
+/* ---------- Patch: recently removed ---------- */
+function patchRemovedFans(data){
+  if (!('recently_removed_fans' in data)) {
+    return { changed:false, skipped:true, count: __SS.removedFanKeys.size };
+  }
+  const list = Array.isArray(data.recently_removed_fans) ? data.recently_removed_fans : [];
+  const incomingKeys = new Set(list.map(i=>i.key).filter(Boolean));
+  const prev = __SS.removedFanKeys;
+  let changed = false;
+  if (incomingKeys.size !== prev.size) changed = true;
+  if (!changed){
+    for (const k of incomingKeys){
+      if (!prev.has(k)){ changed = true; break; }
     }
+  }
+  if (changed){
+    __SS.removedFanKeys = incomingKeys;
+    rebuildRemovedFans(list);
+  }
+  return { changed, skipped: !changed, count: list.length };
+}
 
-    if ('recently_removed_fans' in data) rebuildRemovedFans(data.recently_removed_fans);
+/* ---------- Patch: share meta ---------- */
+function patchShareMeta(data){
+  if (!('share_meta' in data) || !data.share_meta) {
+    return { changed:false, skipped:true, axisApplied:false };
+  }
+  const meta = data.share_meta;
+  const raw = JSON.stringify([
+    meta.show_raw_curves, meta.show_fit_curves,
+    meta.pointer_x_rpm, meta.pointer_x_noise_db,
+    meta.legend_hidden_keys
+  ]);
+  const changed = raw !== __SS.shareMetaHash;
+  let axisApplied = false;
 
-    if ('share_meta' in data && data.share_meta){
-      if (window.__APP.chart && typeof window.__APP.chart.setPendingShareMeta==='function'){
-        window.__APP.chart.setPendingShareMeta({
-          show_raw_curves: data.share_meta.show_raw_curves,
-            show_fit_curves: data.share_meta.show_fit_curves,
-            pointer_x_rpm: data.share_meta.pointer_x_rpm,
-            pointer_x_noise_db: data.share_meta.pointer_x_noise_db,
-            legend_hidden_keys: data.share_meta.legend_hidden_keys
-        });
+  if (changed){
+    applyServerStatePatchColorIndices(meta);
+    if (window.__APP.chart && typeof window.__APP.chart.setPendingShareMeta === 'function'){
+      window.__APP.chart.setPendingShareMeta({
+        show_raw_curves: meta.show_raw_curves,
+        show_fit_curves: meta.show_fit_curves,
+        pointer_x_rpm: meta.pointer_x_rpm,
+        pointer_x_noise_db: meta.pointer_x_noise_db,
+        legend_hidden_keys: meta.legend_hidden_keys
+      });
+    }
+    if (__isShareLoaded && data.chart_data && data.chart_data.x_axis_type){
+      const axisCandidate = (data.chart_data.x_axis_type==='noise') ? 'noise_db' : data.chart_data.x_axis_type;
+      if (window.__APP.chart?.forceAxis){
+        window.__APP.chart.forceAxis(axisCandidate);
+        axisApplied = true;
       }
-      if (__isShareLoaded && data.chart_data && data.chart_data.x_axis_type){
-        const axisCandidate = (data.chart_data.x_axis_type==='noise') ? 'noise_db' : data.chart_data.x_axis_type;
-        if (window.__APP.chart?.forceAxis) window.__APP.chart.forceAxis(axisCandidate);
-      }
     }
+    __SS.shareMetaHash = raw;
+  }
+  return { changed, skipped: !changed, axisApplied };
+}
 
-    if (pendingChart) postChartData(pendingChart);
+/* ---------- Patch: chart data ---------- */
+function patchChartData(data){
+  if (!('chart_data' in data) || !data.chart_data){
+    return { changed:false, skipped:true, series:0 };
+  }
+  const cd = data.chart_data;
+  const seriesCount = Array.isArray(cd.series) ? cd.series.length
+    : Array.isArray(cd.datasets) ? cd.datasets.length
+    : 0;
+  const firstKey = (cd.series && cd.series[0]?.key) || (cd.datasets && cd.datasets[0]?.key) || '';
+  const sig = `${cd.x_axis_type||''}|${seriesCount}|${firstKey}`;
+  const changed = sig !== __SS.chartSignature;
+  if (changed){
+    postChartData(cd);
+    __SS.chartSignature = sig;
+  }
+  return { changed, skipped: !changed, series: seriesCount, xAxis: cd.x_axis_type };
+}
 
+/* ---------- Patch: error & toast ---------- */
+function patchErrorAndToast(data, successMsg){
+  if (data.error_message){
+    hideLoading('op');
+    showError(data.error_message);
+    return { abort:true };
+  } else {
+    if (successMsg) showSuccess(successMsg);
+    hideLoading('op');
+    autoCloseOpLoading();
+    return { abort:false };
+  }
+}
+
+/* ---------- 主调度 processState (增强版) ---------- */
+function processState(data, successMsg){
+  const bus = window.__APP.bus;
+  bus?.emit('state:beforeApply', { raw:data });
+
+  const toast = patchErrorAndToast(data, successMsg);
+  if (toast.abort){
+    bus?.emit('state:error', { message: data.error_message });
+    return;
+  }
+
+  const likeSummary     = patchLikeKeys(data);           bus?.emit('state:patch:likeKeys', likeSummary);
+  const selectedSummary = patchSelectedFans(data);       bus?.emit('state:patch:selectedFans', selectedSummary);
+  const removedSummary  = patchRemovedFans(data);        bus?.emit('state:patch:removedFans', removedSummary);
+  const shareSummary    = patchShareMeta(data);          bus?.emit('state:patch:shareMeta', shareSummary);
+  const chartSummary    = patchChartData(data);          bus?.emit('state:patch:chartData', chartSummary);
+
+  // 只有其中有变化时才做 UI 调整，减少不必要的 reflow
+  if (!(likeSummary.skipped && selectedSummary.skipped && removedSummary.skipped && shareSummary.skipped && chartSummary.skipped)){
     syncQuickActionButtons();
     window.__APP.layout?.refreshMarquees?.();
     window.__APP.layout?.scheduleAdjust?.();
   }
+
+  const summary = {
+    likeKeys: likeSummary,
+    selectedFans: selectedSummary,
+    removedFans: removedSummary,
+    shareMeta: shareSummary,
+    chartData: chartSummary,
+    skipped: {
+      likeKeys: likeSummary.skipped,
+      selectedFans: selectedSummary.skipped,
+      removedFans: removedSummary.skipped,
+      shareMeta: shareSummary.skipped,
+      chartData: chartSummary.skipped
+    }
+  };
+  bus?.emit('state:afterApply', { summary });
+}
 
   /* 点击事件委托 */
   document.addEventListener('click', async e=>{
@@ -1052,10 +1228,4 @@
     syncQuickActionButtons
   };
   
-  // --- Global aliases for backward compatibility (layout.js / legacy code) ---
-  window.rebuildRecentLikes = window.__APP.stateUI.rebuildRecentLikes;
-  window.reloadRecentLikes = window.__APP.stateUI.reloadRecentLikes;
-  window.loadRecentLikesIfNeeded = window.__APP.stateUI.loadRecentLikesIfNeeded;
-  window.reloadTopRatings = window.__APP.stateUI.reloadTopRatings;
-  window.loadLikesIfNeeded = window.__APP.stateUI.loadLikesIfNeeded;
 })();

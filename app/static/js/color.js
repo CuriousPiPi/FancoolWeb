@@ -1,12 +1,13 @@
 /* color.js
- * Phase 2: 颜色 / 主题 / 颜色索引映射
- * 补充：setTheme + 主题切换按钮逻辑 + dispatch app-theme-changed + 调用 chart.refreshTheme()
+ * 颜色索引分配 / 回收 / 唯一化 / 主题
+ * 事件驱动：监听 selection:changed
+ * 已移除所有旧全局兼容导出（window.colorForKey 等）
  */
 
 (function initColorModule(){
   window.__APP = window.__APP || {};
 
-  /* ========= 颜色索引持久化 ========= */
+  /* ========= 持久化 ========= */
   function loadColorIndexMap(){
     try { return JSON.parse(localStorage.getItem('colorIndexMap_v1')||'{}'); } catch { return {}; }
   }
@@ -15,6 +16,7 @@
   }
   let colorIndexMap = loadColorIndexMap();
 
+  /* ========= 分配 / 释放 / 规范化 ========= */
   function ensureColorIndexForKey(key, selectedKeys){
     if (!key) return 0;
     if (Object.prototype.hasOwnProperty.call(colorIndexMap,key)) return colorIndexMap[key]|0;
@@ -26,10 +28,12 @@
     colorIndexMap[key]=idx; saveColorIndexMap(colorIndexMap);
     return idx;
   }
+
   function ensureColorIndicesForSelected(fans){
     const keys = (fans||[]).map(f=>f.key);
     keys.forEach(k=>ensureColorIndexForKey(k, keys));
   }
+
   function releaseColorIndexForKey(key){
     if (!key) return;
     if (Object.prototype.hasOwnProperty.call(colorIndexMap,key)) {
@@ -37,9 +41,11 @@
       saveColorIndexMap(colorIndexMap);
     }
   }
+
   function nextFreeIndex(assigned){
     let i=0; while(assigned.has(i)) i++; return i;
   }
+
   function assignUniqueIndicesForSelection(fans){
     const keys = (fans || []).map(f => f.key).filter(Boolean);
     const countByIdx = new Map();
@@ -50,12 +56,14 @@
       }
     });
     const assigned = new Set();
+    // 保留唯一占用
     keys.forEach(k=>{
       if (Object.prototype.hasOwnProperty.call(colorIndexMap,k)) {
         const idx = colorIndexMap[k]|0;
         if ((countByIdx.get(idx)||0) === 1) assigned.add(idx);
       }
     });
+    // 处理重复 / 无索引
     keys.forEach(k=>{
       const has = Object.prototype.hasOwnProperty.call(colorIndexMap,k);
       if (has) {
@@ -70,6 +78,29 @@
       assigned.add(newIdx);
     });
     saveColorIndexMap(colorIndexMap);
+  }
+
+  /**
+   * recycleRemovedKeys: 回收 + 规范当前集合
+   * @param {string[]} removedKeys
+   * @param {string[]} currentKeys
+   */
+  function recycleRemovedKeys(removedKeys, currentKeys){
+    try {
+      if (Array.isArray(removedKeys) && removedKeys.length){
+        removedKeys.forEach(k=>{
+          if (Object.prototype.hasOwnProperty.call(colorIndexMap,k)){
+            delete colorIndexMap[k];
+          }
+        });
+        saveColorIndexMap(colorIndexMap);
+      }
+      if (Array.isArray(currentKeys) && currentKeys.length){
+        assignUniqueIndicesForSelection(currentKeys.map(k=>({ key:k })));
+      }
+    } catch(e){
+      console.warn('[color] recycleRemovedKeys error', e);
+    }
   }
 
   /* ========= 主题 & 调色 ========= */
@@ -135,56 +166,49 @@
     });
   }
 
-  /* ========= 新增：主题设置 ========= */
   function setTheme(t){
     if (t !== 'dark' && t !== 'light') t = 'light';
     const prev = document.documentElement.getAttribute('data-theme');
     document.documentElement.setAttribute('data-theme', t);
     try { localStorage.setItem('theme', t); } catch(_){}
-    // 更新图标
     const icon = document.getElementById('themeIcon');
     if (icon) {
       icon.className = (t === 'dark') ? 'fa-solid fa-sun' : 'fa-solid fa-moon';
     }
-    // 刷新侧栏颜色点
-    if (typeof window.applySidebarColors === 'function') {
-      window.applySidebarColors();
-    }
-    // 通知图表刷新
+    applySidebarColors();
     if (window.__APP.chart && typeof window.__APP.chart.refreshTheme === 'function') {
       window.__APP.chart.refreshTheme();
     }
-    // 广播事件
     window.dispatchEvent(new CustomEvent('app-theme-changed',{ detail:{ theme:t, previous: prev }}));
   }
 
-  /* 初始化主题（考虑已有 data-theme 或 localStorage 保存） */
-  (function initThemeToggleOnce(){
-    if (window.__APP.__themeInited) return;
-    window.__APP.__themeInited = true;
-
-    let saved = null;
-    try { saved = localStorage.getItem('theme'); } catch(_){}
-    const initial = (saved === 'dark' || saved === 'light') ? saved :
-      (document.documentElement.getAttribute('data-theme') || 'light');
-    setTheme(initial);
-
-    function bind(){
-      const btn = document.getElementById('themeToggle');
-      if (!btn) return false;
-      btn.addEventListener('click', ()=>{
-        const next = (currentThemeStr() === 'light') ? 'dark' : 'light';
-        setTheme(next);
-      });
-      return true;
+  /* ========= 事件监听 ========= */
+  (function initBusIntegration(){
+    const bus = window.__APP.bus;
+    if (!bus){
+      return;
     }
-    if (!bind()){
-      // 若按钮尚未在 DOM（脚本在 head 中），延迟尝试
-      document.addEventListener('DOMContentLoaded', bind, { once:true });
+    bus.on('selection:changed', payload=>{
+      try {
+        recycleRemovedKeys(payload?.removed || [], payload?.current || []);
+      } catch(e){
+        console.warn('[color] selection:changed handler error', e);
+      }
+    });
+    if (window.__APP.__pendingSelectionDiff){
+      const diff = window.__APP.__pendingSelectionDiff;
+      delete window.__APP.__pendingSelectionDiff;
+      recycleRemovedKeys(diff.removed || [], diff.current || []);
     }
   })();
 
-  // 模块导出
+  const themeBtn = document.getElementById('themeToggle');
+  themeBtn?.addEventListener('click', ()=>{
+     const cur = document.documentElement.getAttribute('data-theme')==='dark'?'dark':'light';
+     window.__APP.color.setTheme(cur==='dark'?'light':'dark');
+  });
+
+  /* ========= 命名空间导出 ========= */
   window.__APP.color = {
     loadColorIndexMap,
     saveColorIndexMap,
@@ -193,6 +217,7 @@
     ensureColorIndicesForSelected,
     releaseColorIndexForKey,
     assignUniqueIndicesForSelection,
+    recycleRemovedKeys,
     currentPalette,
     currentThemeStr,
     colorForKey,
@@ -202,20 +227,6 @@
     setTheme
   };
 
-  // 旧全局兼容
-  window.colorForKey = colorForKey;
-  window.ensureColorIndexForKey = ensureColorIndexForKey;
-  window.ensureColorIndicesForSelected = ensureColorIndicesForSelected;
-  window.assignUniqueIndicesForSelection = assignUniqueIndicesForSelection;
-  window.releaseColorIndexForKey = releaseColorIndexForKey;
-  window.applyServerStatePatchColorIndices = applyServerStatePatchColorIndices;
-  window.withFrontColors = function(chartData){
-    const axis = (window.__APP.chart && window.__APP.chart.getFrontXAxisType)
-      ? window.__APP.chart.getFrontXAxisType()
-      : (chartData.x_axis_type || 'rpm');
-    return withFrontColors(chartData, axis);
-  };
-  window.applySidebarColors = applySidebarColors;
-  window.setTheme = setTheme;
+  // 不再提供任何 legacy 全局导出
 
 })();

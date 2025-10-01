@@ -209,3 +209,14 @@ window.__APP.util = {
   escapeHtml, unescapeHtml, formatScenario,
   createToast
 };
+
+// === Event Bus (P4-M1) ===
+if (!window.__APP.bus) {
+  window.__APP.bus = {
+    _map: Object.create(null),
+    on(evt, fn){ (this._map[evt]||(this._map[evt]=[])).push(fn); return () => this.off(evt, fn); },
+    off(evt, fn){ const arr=this._map[evt]; if(!arr) return; const i=arr.indexOf(fn); if(i>=0) arr.splice(i,1); },
+    emit(evt, payload){ (this._map[evt]||[]).slice().forEach(f=>{ try{ f(payload); }catch(e){ console.error('[bus]',evt,e);} }); }
+  };
+  console.info('[core] event bus initialized');
+}

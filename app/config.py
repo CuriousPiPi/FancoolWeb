@@ -20,7 +20,7 @@ class Config:
     MAX_CHART_ITEMS = 8
     MAX_RECENTLY_REMOVED = 20
     TOP_QUERIES_LIMIT = 10
-    CLICK_COOLDOWN_SECONDS = float(os.getenv('CLICK_COOLDOWN_SECONDS', '0.1'))
+    CLICK_COOLDOWN_SECONDS = float(os.getenv('CLICK_COOLDOWN_SECONDS', '0.5'))
     SIZE_OPTIONS = ["不限", "120", "140"]
     COLORS_DEFAULT = [
         "#1f77b4","#ff7f0e","#2ca02c","#d62728","#9467bd",

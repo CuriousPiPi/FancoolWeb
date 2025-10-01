@@ -5,6 +5,7 @@
 (function initChartModule(){
   window.__APP = window.__APP || {};
   const colorMod = window.__APP.color;
+  function getColorMod(){ return window.__APP.color; }
 
   const chartFrame = document.getElementById('chartFrame');
   let lastChartData = null;
@@ -20,6 +21,18 @@
 
   const chartMessageQueue = [];
   let chartFrameReady = false;
+  let postRetryCount = 0;
+  const MAX_POST_RETRY = 10;
+
+  function safePostMessage(msg){
+    try {
+      chartFrame.contentWindow.postMessage(msg, window.location.origin);
+      return true;
+    } catch(e){
+      console.warn('[chart] postMessage error', e);
+      return false;
+    }
+  }
 
   function initPersistedXAxisType(){
     try {
@@ -57,6 +70,14 @@
         }
       }
     });
+     setTimeout(()=>{
+      if(!chartFrameReady){
+        console.info('[chart] iframe load timeout fallback flush');
+        chartFrameReady = true;
+        flushChartQueue();
+        if (lastChartData) postChartData(lastChartData);
+      }
+    }, 1000);
   }
 
   function getChartBg(){
@@ -106,17 +127,37 @@
   function postChartData(chartData){
     lastChartData = chartData;
     if (!chartFrame || !chartFrame.contentWindow) return;
-    let prepared = colorMod.withFrontColors(chartData);
+
+    const cm = getColorMod();
+    if (!cm){
+      if (postRetryCount < MAX_POST_RETRY){
+        postRetryCount++;
+        setTimeout(()=>postChartData(chartData), 60);
+      } else {
+        console.warn('[chart] color module not ready after retries, sending raw');
+      }
+    }
+
+    let prepared;
+    try {
+      prepared = cm ? cm.withFrontColors(chartData) : chartData;
+    } catch(e){
+      console.warn('[chart] withFrontColors error, fallback raw', e);
+      prepared = chartData;
+    }
+
     if (__isShareLoaded && !__shareAxisApplied && chartData && chartData.x_axis_type){
       frontXAxisType = (chartData.x_axis_type === 'noise') ? 'noise_db' : chartData.x_axis_type;
       try { localStorage.setItem('x_axis_type', frontXAxisType); } catch(_){}
       __shareAxisApplied = true;
       prepared = { ...prepared, x_axis_type: frontXAxisType };
     }
+
+    // 过滤 & 打包
     const filtered = filterChartDataForAxis(prepared);
     const payload = {
       chartData: filtered,
-      theme: colorMod.currentThemeStr(),
+      theme: cm?.currentThemeStr ? cm.currentThemeStr() : 'light',
       chartBg: getChartBg()
     };
     if (pendingShareMeta){
@@ -127,9 +168,32 @@
     if (!chartFrameReady){
       chartMessageQueue.push(msg);
     } else {
-      chartFrame.contentWindow.postMessage(msg, window.location.origin);
+      if (!safePostMessage(msg)){
+        chartMessageQueue.push(msg);
+        setTimeout(flushChartQueue, 120);
+      }
     }
   }
+
+  if (__isShareLoaded && !window.__APP.__didScrollToChart){
+    const anchor = document.getElementById('chartFrame') || document.getElementById('chart-container') || chartFrame;
+    if (anchor && typeof anchor.scrollIntoView === 'function'){
+      anchor.scrollIntoView({ behavior:'smooth', block:'start' });
+      window.__APP.__didScrollToChart = true;
+    }
+  }
+
+  // 监听 color 模块 ready（如果 color.js 在其内部 dispatch 自定义事件，或我们在 window 上标记）
+  document.addEventListener('DOMContentLoaded', ()=>{
+    if (lastChartData && getColorMod() && postRetryCount>0){
+      postChartData(lastChartData);
+    }
+  });
+
+  // SSE / 其他模块可手动重放
+  window.addEventListener('color-module-ready', ()=>{
+    if (lastChartData) postChartData(lastChartData);
+  });
 
   function resizeChart(){
     if (!chartFrame || !chartFrame.contentWindow) return;

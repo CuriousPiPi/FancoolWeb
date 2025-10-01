@@ -744,8 +744,8 @@
         });
       }
       localStorage.setItem('activeTab_sidebar-top', tabName);
-      if(tabName==='recent-liked' && typeof window.loadRecentLikesIfNeeded==='function'){
-        window.loadRecentLikesIfNeeded();
+      if (tabName==='recent-liked'){
+        window.__APP.stateUI?.loadRecentLikesIfNeeded?.();
       }
       return;
     }
@@ -807,8 +807,8 @@
     if(pane){
       pane.querySelectorAll('.rank-panel').forEach(p=>p.classList.toggle('active', p.id===target));
     }
-    if(target==='likes-panel' && typeof window.loadLikesIfNeeded==='function'){
-      window.loadLikesIfNeeded();
+    if (target==='likes-panel'){
+      window.__APP.stateUI?.loadLikesIfNeeded?.();
     }
   });
 
@@ -1043,5 +1043,5 @@
     if(!isCollapsed && typeof window.resizeChart === 'function') window.resizeChart();
     syncTopTabsViewportHeight();
   });
-
+  
 })();
