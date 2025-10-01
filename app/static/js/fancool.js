@@ -13,3 +13,17 @@
     window.processState = window.__APP.stateUI.processState;
   }
 })();
+
+/* === F-01~F-03 Local State Integration Start === */
+const {
+  selectionStore,
+  removedStore
+} = (window.__APP.localStores || {});
+
+function fanKey(model_id, condition_id){
+  return `${model_id}_${condition_id}`;
+}
+
+// 保存上一次服务器返回的完整 fan 对象列表（包含 meta）
+let lastSelectedFans = [];
+/* === F-01~F-03 Local State Integration End === */
