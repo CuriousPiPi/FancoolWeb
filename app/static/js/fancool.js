@@ -1,10 +1,15 @@
-/* fancool.js (兼容层 Stub - Phase 1)
- * 原始逻辑已搬到 core.js。
- * 若老部署仍只引这一个脚本，会缺功能；需改为加载 core.js 等新文件。
+/* fancool.js (Compatibility Stub)
+ * 对旧部署的提示：请确保已按顺序加载：
+ * core.js -> color.js -> chart.js -> layout.js -> state-ui.js -> main.js
  */
 (function(){
-  console.info('[Fancool] 已拆分为多个模块：core.js / color.js / chart.js / layout.js / state-ui.js / main.js');
-  if (!window.__APP) {
-    console.warn('[Fancool] 警告：core.js 似乎未加载，功能可能不可用。');
+  if (!window.__APP){
+    console.warn('[Fancool] __APP 未定义，说明 core.js 尚未加载。');
+    return;
+  }
+  console.info('[Fancool] 兼容层已加载。模块化拆分已完成。');
+  // 旧全局别名（如历史脚本直接调用）
+  if (!window.processState && window.__APP.stateUI){
+    window.processState = window.__APP.stateUI.processState;
   }
 })();

@@ -575,31 +575,7 @@
       });
     });
   }
-  /* === PATCH RL-Fade: Restore recentLikes title fade === */
-  function applyRecentLikesTitleMask() {
-    const groups = document.querySelectorAll('#recentLikesList .recent-like-group');
-    groups.forEach(g => {
-      const titleWrap = g.querySelector('.group-header .title-wrap');
-      const titleBox  = titleWrap?.querySelector('.truncate');
-      if (!titleWrap || !titleBox) return;
-      // 可见标题宽度（容器宽度即为可见宽度，因溢出被裁切）
-      const w = Math.max(0, Math.ceil(titleBox.getBoundingClientRect().width));
-      titleWrap.style.setProperty('--title-w', w + 'px');
-      // 如需调渐隐长度：
-      // titleWrap.style.setProperty('--fade-w', '28px');
-    });
-  }
   
-  /* 在 rebuildRecentLikes 渲染后执行一次测量 */
-  if (typeof window.rebuildRecentLikes === 'function' && !window.__RECENT_TITLE_MASK_PATCHED__) {
-    window.__RECENT_TITLE_MASK_PATCHED__ = true;
-    const _orig = window.rebuildRecentLikes;
-    window.rebuildRecentLikes = function(list){
-      _orig(list);
-      requestAnimationFrame(applyRecentLikesTitleMask);
-    };
-  }
-
   function wrapMarqueeForExistingTables(){
     const queriesTbody=document.querySelector('#queries-panel tbody');
     const searchAirflowTbody=document.getElementById('searchAirflowTbody');
