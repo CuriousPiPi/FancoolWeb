@@ -206,7 +206,8 @@
     if(sidebar.classList.contains('collapsed')) openSidebar(); else closeSidebar();
   }
 
-  /* 预声明避免 TDZ */
+  // Predeclare these variables with default functions to avoid Temporal Dead Zone (TDZ) issues.
+  // They are assigned later in the overlay mode initializer and may be referenced before assignment.
   let overlayOpenSidebarInternal = ()=>{};
   let overlayCloseSidebarInternal = ()=>{};
 
