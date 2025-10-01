@@ -30,11 +30,24 @@
   const chartNS = window.__APP.chart || {};
   const postChartData = chartNS.postChartData || function(){};
 
+  // Local stores module
+  const localStores = window.__APP.localStores || {};
+  const selectionStore = localStores.selectionStore;
+  const removedStore = localStores.removedStore;
+  const shareMetaStore = localStores.shareMetaStore;
+  const likeStore = localStores.likeStore;
+  const colorStore = localStores.colorStore;
+  const makeKey = localStores.makeKey || function(mid, cid){ return `${mid}_${cid}`; };
+
   /* ========================================================
    * 选中集合索引
    * ====================================================== */
   let selectedMapSet = new Set();
   let selectedKeySet = new Set();
+  
+  // Track last selected fans for diff computation (F-02)
+  let lastSelectedFans = [];
+  
   function rebuildSelectedIndex(){
     selectedMapSet.clear();
     selectedKeySet.clear();
@@ -206,6 +219,25 @@
     });
     window.__APP.layout?.refreshMarquees?.();
     if (bus) bus.emit('removedFans:rebuilt', { count: list?.length||0, ts: Date.now() });
+  }
+
+  // New function to rebuild removed fans from local store (F-02)
+  function rebuildRemovedFansFromStore(){
+    if (!removedStore) {
+      console.warn('[state-ui] removedStore not available, cannot rebuild from store');
+      return;
+    }
+    const list = removedStore.list();
+    rebuildRemovedFans(list);
+  }
+
+  // Subscribe to removedStore changes (F-02)
+  if (removedStore && removedStore.onChange) {
+    removedStore.onChange(function() {
+      rebuildRemovedFansFromStore();
+    });
+    // Initialize the removed fans UI from store on load
+    rebuildRemovedFansFromStore();
   }
 
   /* ========================================================
@@ -854,6 +886,63 @@ function patchSelectedFans(data){
     for (const k of incomingKeys) if (!prevKeys.has(k)) added.push(k);
     for (const k of prevKeys) if (!incomingKeys.has(k)) removed.push(k);
 
+    // F-02: Compute diff with lastSelectedFans and update local stores
+    if (selectionStore && removedStore) {
+      // Build map of last selected fans by key for quick lookup
+      const lastFansMap = {};
+      lastSelectedFans.forEach(fan => {
+        if (fan && fan.key) {
+          lastFansMap[fan.key] = fan;
+        }
+      });
+
+      // Build map of incoming fans by key
+      const incomingFansMap = {};
+      fans.forEach(fan => {
+        if (fan && fan.key) {
+          incomingFansMap[fan.key] = fan;
+        }
+      });
+
+      // Process removed items: add to removedStore
+      removed.forEach(key => {
+        const fan = lastFansMap[key];
+        if (fan && fan.model_id && fan.condition_id) {
+          removedStore.push({
+            key: key,
+            model_id: fan.model_id,
+            condition_id: fan.condition_id,
+            brand: fan.brand || '',
+            model: fan.model || '',
+            res_type: fan.res_type || '',
+            res_loc: fan.res_loc || '',
+            removed_at: new Date().toISOString()
+          });
+        }
+      });
+
+      // Process added items: update selectionStore (store only model_id, condition_id)
+      added.forEach(key => {
+        const fan = incomingFansMap[key];
+        if (fan && fan.model_id && fan.condition_id) {
+          selectionStore.add({
+            model_id: fan.model_id,
+            condition_id: fan.condition_id
+          });
+        }
+      });
+
+      // Update selectionStore to match current state
+      // Build current selection list from incoming fans
+      const currentSelection = fans
+        .filter(f => f.model_id && f.condition_id)
+        .map(f => ({
+          model_id: f.model_id,
+          condition_id: f.condition_id
+        }));
+      selectionStore.replace(currentSelection);
+    }
+
     const diffPayload = {
       added,
       removed,
@@ -869,32 +958,23 @@ function patchSelectedFans(data){
 
     __SS.selectedFanKeys = incomingKeys;
     rebuildSelectedFans(fans);
+    
+    // Update lastSelectedFans for next diff (F-02)
+    lastSelectedFans = fans.slice();
   }
 
   return { changed, skipped: !changed, count: fans.length, added, removed };
 }
 
 
-/* ---------- Patch: recently removed ---------- */
+/* ---------- Patch: recently removed (F-01, F-02: ignore server data) ---------- */
 function patchRemovedFans(data){
-  if (!('recently_removed_fans' in data)) {
-    return { changed:false, skipped:true, count: __SS.removedFanKeys.size };
-  }
-  const list = Array.isArray(data.recently_removed_fans) ? data.recently_removed_fans : [];
-  const incomingKeys = new Set(list.map(i=>i.key).filter(Boolean));
-  const prev = __SS.removedFanKeys;
-  let changed = false;
-  if (incomingKeys.size !== prev.size) changed = true;
-  if (!changed){
-    for (const k of incomingKeys){
-      if (!prev.has(k)){ changed = true; break; }
-    }
-  }
-  if (changed){
-    __SS.removedFanKeys = incomingKeys;
-    rebuildRemovedFans(list);
-  }
-  return { changed, skipped: !changed, count: list.length };
+  // F-01: No longer consume server's recently_removed_fans
+  // The removed list is now managed entirely by local removedStore
+  // Server may still send recently_removed_fans but we ignore it
+  
+  // Always return skipped since we no longer process this from server
+  return { changed:false, skipped:true, count: removedStore ? removedStore.list().length : 0 };
 }
 
 /* ---------- Patch: share meta ---------- */
