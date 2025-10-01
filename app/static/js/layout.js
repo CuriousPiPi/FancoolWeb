@@ -1,11 +1,3 @@
-/* PATCH VERSION (P3C2+): 
- * - Adds sidebar-top snap click bridge
- * - Right subseg relocation & proper visibility toggle
- * - Splitter rails decoration
- * - Restores dynamic height sync for #sidebar-top-container (syncTopTabsViewportHeight)
- * - Fixes seg switching (queries/likes & airflow/likes)
- * - FIX (P3C2+H2): Correct top container viewport height (subtract sidebar-top nav height)
- */
 
 (function initLayoutModule(){
   console.info('[layout:init] layout module loaded');
