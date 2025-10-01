@@ -1,53 +1,8 @@
-# 风扇库后端拆分说明
-
-## 目标
-- 拆分大单文件，提升可维护性
-- 服务层与仓储解耦
-- 分享令牌加入过期控制与版本管理
-- 保持前端接口兼容（无需前端大改）
-
-## 主要模块
-- app/config.py: 配置
-- app/extensions.py: SQLAlchemy Engine
-- app/security/: UID Cookie 与分享签名
-- app/repositories/: 数据访问
-- app/services/: 业务逻辑（状态、搜索、点赞、分享、查询日志）
-- app/routes/: 蓝图（核心 / 搜索 / 点赞 / 分享 / 杂项 / UI）
-- app/background/tasks.py: 查询次数缓存线程
-- run.py: 启动
-
-## 分享令牌
-结构： base64url(JSON{v, iat, exp, data}) + HMAC 16 hex  
-默认有效期 7 天，可通过环境变量 `SHARE_TOKEN_EXPIRE_SECONDS` 调整。
-
-## 前端兼容
-所有旧端点保留：
-- /api/state /api/add_fan /api/remove_fan /api/restore_fan /api/clear_all
-- /api/search_fans
-- /api/like /api/unlike /api/recent_likes /api/top_ratings
-- /search_models /get_models /get_resistance_types /get_resistance_locations /get_resistance_locations_by_type
-- /api/query_count /api/theme /api/config
-- /api/create_share /share/<token>
-
-前端仅在想显示“分享过期”时可根据 400 返回文案提示用户。
-
-## 可选前端微调（非必须）
-在打开分享失败时展示 toast：
-```js
-// 例如检测到响应 status 400 时
-```
-
-## 测试建议
-1. 启动后访问 `/`，确认无 500
-2. 添加/移除/恢复/清空风扇
-3. 搜索、级联下拉、型号关键字搜索
-4. 点赞 / 取消点赞 / 最近点赞 / 好评榜
-5. 创建分享并用浏览器打开
-6. 查询次数展示变化（每分钟更新）
-7. 主题切换 & 会话持久化
-
-## 未来优化
-- 引入 pydantic 进行 payload 校验
-- 引入 Alembic 管理 schema
-- 增加缓存层（Redis）以降低热门榜单查询压力
-- 提供 OpenAPI 文档
+文件	职责	主要内容（从原文件迁移）	对外暴露（window.__APP 下挂载）
+js/core.js	基础工具/缓存/调度/公共函数	dom 缓存(one/all/clear)、scheduler、通用缓存cache、HTML 转义、toast & loading、throttle、safeClosest、formatScenario、logger（简单）	__APP.dom / __APP.scheduler / __APP.cache / __APP.util
+js/color.js	颜色 & 主题 & 颜色索引持久化	palette、currentThemeStr、darkToLightLinear、colorIndexMap 及 ensureColorIndexForKey / releaseColorIndexForKey（按“简化规则”但本轮先原样搬）、withFrontColors、applySidebarColors（暂保留）	__APP.color （包含：getColorForKey, ensureIndex, load/saveMap, currentPalette 等）
+js/chart.js	图表通信 & X 轴类型 & 过滤	chartFrame 监听、postChartData、filterChartDataForAxis、resizeChart、frontXAxisType 持久化逻辑、getChartBg、分享 meta 处理（pendingShareMeta）	__APP.chart（postChartData, resizeChart, setAxisType, getAxisType）
+js/layout.js	侧栏 / Overlay / 手势 / Splitter / Resizer / Tabs / Marquee / Tooltip / 焦点陷阱 / 自适应高度	overlayOpen/Close/Toggle、gesture zone、splitter（上下）、resizer（左右）、tab 激活 logic、marquee 三类、tooltip、focusTrap、adjustBottomPanelAuto、scheduleAdjust、sidebar toggle 各种逻辑	__APP.layout（toggleSidebar, scheduleAdjust, applyMarquees...） / __APP.a11y（focusTrap 等）
+js/state-ui.js	选中列表 / 最近移除 / 最近点赞 / 排行榜 / 搜索 / 点赞操作 / 表单级联	rebuildSelectedFans、rebuildRemovedFans、rebuildRecentLikes、reloadRecentLikes、searchForm 相关、ranking（好评榜）、add/remove/restore/clear all、like/unlike、级联选择联动	__APP.stateUI（各种 rebuild / load / action 函数）
+js/main.js	入口整合 & 初始数据拉取 & wiring	初始化 window.__APP 根、导入上述模块（若不用 ES module 则通过 script 顺序加载）、调用初始 fetch('/api/state')、绑定主题按钮、加载 query count、分享自动滚动、监听 postMessage（chart:ready / chart:xaxis-type-changed）	（作为入口不再额外挂）
+js/fancool.js (兼容层)	旧入口（保留）	仅负责按顺序加载上述脚本（或 import），然后暴露与原来相同的 window.__APP.modules	同名旧接口转发
