@@ -955,12 +955,14 @@
         ensureAtLeastOne('raw');
         syncButtons();
         if (lastPayload) render(lastPayload);
+        emitFitConfigChanged();  
       });
       btnFit.addEventListener('click', ()=>{
         showFitCurves = !showFitCurves;
         ensureAtLeastOne('fit');
         syncButtons();
         if (lastPayload) render(lastPayload);
+        emitFitConfigChanged(); 
       });
       syncButtons();
     }
@@ -1178,6 +1180,7 @@
         xQueryByMode[mode] = clampXDomain(xVal);
         syncBubbleInput();
         if (showFitCurves) refreshFitBubble();
+        emitPointerMoved(xQueryByMode[mode]);
       }
     }
     function onUp(){
@@ -1217,6 +1220,7 @@
       const [vx0, vx1] = getVisibleXRange();
       xQueryByMode[mode] = (vx0 + vx1) / 2;
     }
+    /*emitPointerMoved(xQueryByMode[mode]);*/  /*注释掉减少频率*/
     clampXQueryIntoVisibleRange();
     const xPixel = dataToPxX(xQueryByMode[mode]);
     ptr.style.left = xPixel + 'px';
@@ -1250,6 +1254,7 @@
     const ptr = document.getElementById('fitPointer');
     if (ptr && Number.isFinite(xPixel)) ptr.style.left = xPixel + 'px';
     if (showFitCurves) refreshFitBubble();
+    emitPointerMoved(xQueryByMode[mode]);
   }
   function onBubbleInputCommit(){
     repaintPointer();
@@ -1487,6 +1492,24 @@
     if (xQueryByMode[mode] > vmax) xQueryByMode[mode] = vmax;
   }
 
+  function emitFitConfigChanged(){
+    try {
+      window.parent.postMessage({
+        type:'chart:fit-config-changed',
+        payload:{ show_raw: showRawCurves, show_fit: showFitCurves }
+      }, window.location.origin);
+    } catch(_) {}
+  }
+  function emitPointerMoved(val){
+    const axisType = currentXModeFromPayload(lastPayload);
+    if (typeof val !== 'number' || !isFinite(val)) return;
+    try {
+      window.parent.postMessage({
+        type:'chart:pointer-moved',
+        payload:{ x_axis_type: axisType, value: val }
+      }, window.location.origin);
+    } catch(_) {}
+  }
   /* ========== 11. 消息通信 ========== */
   window.addEventListener('message', (e)=>{
     if (e.origin !== window.location.origin) return;

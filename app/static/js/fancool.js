@@ -3,6 +3,215 @@ window.APP_CONFIG = window.APP_CONFIG || { clickCooldownMs: 2000, maxItems: 0 };
 /* ==== 命名空间根 ==== */
 window.__APP = window.__APP || {};
 
+if (typeof LocalState === 'undefined') {
+  console.error('LocalState 模块未加载，请确认 local_state.js 已在 fancool.js 之前引入');
+}
+
+function refreshChartFromLocal(){
+  const selected = LocalState.getSelected();
+  const cache = LocalState.getCurveCache();
+  const cfg = LocalState.getConfig ? LocalState.getConfig() : { x_axis:'rpm' };
+  const series = [];
+  selected.forEach(it=>{
+    const k = LocalState.keyOf(it.model_id, it.condition_id);
+    const cur = cache[k];
+    if (!cur) return;
+    series.push({
+      key: k,
+      brand: it.brand,
+      model: it.model,
+      res_type: it.res_type,
+      res_loc: it.res_loc,
+      model_id: it.model_id,
+      condition_id: it.condition_id,
+      rpm: cur.rpm || [],
+      noise_db: cur.noise_db || [],
+      airflow: cur.airflow || []
+    });
+  });
+  if (typeof postChartData === 'function'){
+    postChartData({
+      x_axis_type: cfg.x_axis || 'rpm',
+      series
+    });
+  }
+}
+
+/**
+ * 添加条目（来源：排行榜按钮、搜索结果按钮、级联表单等）
+ * items: [{ model_id, condition_id, brand, model, res_type, res_loc }]
+ */
+async function addItemsAndRefresh(items) {
+  try {
+    const res = await LocalState.addItems(items);
+    if (res.added.length) {
+      refreshChartFromLocal();
+    } else {
+      // 全部是重复
+      // 可按需 toast
+    }
+  } catch (e) {
+    console.error('添加失败', e);
+  }
+}
+
+/**
+ * 移除单条
+ */
+function removeItemAndRefresh(model_id, condition_id) {
+  LocalState.removeItem(model_id, condition_id);
+  refreshChartFromLocal();
+}
+
+/**
+ * 清空所有
+ */
+function clearAllAndRefresh() {
+  LocalState.clearAll();
+  refreshChartFromLocal();
+}
+
+/* = 订阅：如果外部模块更新了 selected 或曲线缓存，也自动刷新图表和侧栏 UI = */
+LocalState.on('selected', () => {
+  rebuildSelectedSidebar();
+  refreshChartFromLocal();
+});
+LocalState.on('curves', () => {
+  refreshChartFromLocal();
+});
+
+/**
+ * 重建侧栏已选 UI（原本的 rebuildSelectedFans 可以改名或直接重用逻辑）
+ * 这里只给一个示例，实际你可直接复用旧函数的 DOM 模板，但数据来源换成 LocalState.getSelected()
+ */
+function rebuildSelectedSidebar(){
+  const wrap = document.getElementById('selectedFansList');
+  const cntEl = document.getElementById('selectedCount');
+  if (!wrap) return;
+  const list = LocalState.getSelected();
+  wrap.innerHTML = '';
+  list.forEach(item=>{
+    const key = LocalState.keyOf(item.model_id, item.condition_id);
+    const mapKey = `${item.brand}||${item.model}||${item.res_type}||${(item.res_loc || '无')}`;
+    const div = document.createElement('div');
+    div.className='fan-item flex items-center justify-between p-3 border border-gray-200 rounded-md';
+    div.dataset.fanKey = key;
+    div.setAttribute('data-map', mapKey);
+    div.innerHTML = `
+      <div class="flex items-center min-w-0">
+        <div class="w-3 h-3 rounded-full mr-2 flex-shrink-0 js-color-dot" style="background:${colorForKey(key)}"></div>
+        <div class="truncate">
+          <span class="font-medium">${escapeHtml(item.brand)} ${escapeHtml(item.model)}</span> - 
+          <span class="text-gray-600 text-sm">
+            ${item.res_loc ? escapeHtml(item.res_type)+'('+escapeHtml(item.res_loc)+')' : escapeHtml(item.res_type)}
+          </span>
+        </div>
+      </div>
+      <div class="flex items-center flex-shrink-0">
+        <button class="like-button mr-3"
+                data-model-id="${item.model_id}"
+                data-condition-id="${item.condition_id}">
+          <i class="fa-solid fa-thumbs-up ${likedKeysSet.has(item.model_id+'_'+item.condition_id)?'text-red-500':'text-gray-400'}"></i>
+        </button>
+        <button class="remove-icon text-lg js-remove-fan"
+                data-model-id="${item.model_id}"
+                data-condition-id="${item.condition_id}"
+                title="移除">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+    `;
+    wrap.appendChild(div);
+  });
+  if (cntEl) cntEl.textContent = String(list.length);
+  rebuildSelectedIndex();
+  refreshChartFromLocal();
+  applySidebarColors && applySidebarColors();
+  syncQuickActionButtons && syncQuickActionButtons();
+}
+
+document.addEventListener('click', async (e)=>{
+  // 添加（统一类 .js-add-pair）
+  const addBtn = e.target.closest('.js-add-pair');
+  if (addBtn){
+    if (needThrottle('add') && !globalThrottle()) return;
+    const mid = parseInt(addBtn.dataset.modelId);
+    const cid = parseInt(addBtn.dataset.conditionId);
+    if (!Number.isInteger(mid) || !Number.isInteger(cid)){
+      showError('缺少必要 ID');
+      return;
+    }
+    // 元信息
+    const meta = [{
+      model_id: mid,
+      condition_id: cid,
+      brand: addBtn.dataset.brand,
+      model: addBtn.dataset.model,
+      res_type: addBtn.dataset.resType,
+      res_loc: addBtn.dataset.resLoc === '无' ? '' : addBtn.dataset.resLoc
+    }];
+    const before = LocalState.getSelected().length;
+    await LocalState.add(meta);
+    const after = LocalState.getSelected().length;
+    if (after > before){
+      showSuccess('添加成功');
+      maybeAutoOpenSidebarOnAdd && maybeAutoOpenSidebarOnAdd();
+      rebuildSelectedSidebar();
+      refreshChartFromLocal();
+    } else {
+      showInfo('已存在');
+    }
+    return;
+  }
+
+  // 移除（侧栏 X 按钮）
+  const rmBtn = e.target.closest('.js-remove-fan');
+  if (rmBtn){
+    const mid = parseInt(rmBtn.dataset.modelId);
+    const cid = parseInt(rmBtn.dataset.conditionId);
+    LocalState.remove(mid, cid);
+    showSuccess('已移除');
+    rebuildSelectedSidebar();
+    refreshChartFromLocal();
+    return;
+  }
+
+  // 清空（本地）
+  if (e.target.id === 'clearAllBtnLocal'){
+    if (!LocalState.getSelected().length){
+      showInfo('当前无数据');
+      return;
+    }
+    if (!confirm('确认清空所有已选曲线？')) return;
+    LocalState.clearAll();
+    rebuildSelectedSidebar();
+    refreshChartFromLocal();
+    showSuccess('已清空');
+    return;
+  }
+
+  // 旧的 js-list-remove（表格里“已在图表”→ 移除）
+  const quickRemove = e.target.closest('.js-list-remove');
+  if (quickRemove && quickRemove.classList.contains('btn-add')){
+    const mid = parseInt(quickRemove.dataset.modelId);
+    const cid = parseInt(quickRemove.dataset.conditionId);
+    if (Number.isInteger(mid) && Number.isInteger(cid)){
+      LocalState.remove(mid, cid);
+      showSuccess('已移除');
+      rebuildSelectedSidebar();
+      refreshChartFromLocal();
+      syncQuickActionButtons();
+    }
+    return;
+  }
+});
+
+/* 页面加载后先刷新一次 UI（LocalState 初始化时会自动加载曲线） */
+document.addEventListener('DOMContentLoaded', () => {
+  rebuildSelectedSidebar();
+  refreshChartFromLocal();
+});
+
 /* ==== P1-4 DOM 缓存与工具 ==== */
 (function initDomCache(){
   const cache = Object.create(null);
@@ -1429,14 +1638,14 @@ function rebuildSelectedIndex(){
 }
 rebuildSelectedIndex();
 
-function buildQuickBtnHTML(addType, brand, model, resType, resLoc){
+function buildQuickBtnHTML(addType, brand, model, resType, resLoc, modelId, conditionId){
   const raw = (resLoc ?? '');
-  const normResLoc = (String(raw).trim() === '') ? '无' : raw; // 统一“空”->“无”
+  const normResLoc = (String(raw).trim() === '') ? '无' : raw;
   const mapKey = `${escapeHtml(brand)}||${escapeHtml(model)}||${escapeHtml(resType)}||${escapeHtml(normResLoc)}`;
   const isDup = selectedMapSet.has(mapKey);
-  const mode = isDup?'remove':'add';
-  const title = isDup?'从图表移除':'添加到图表';
-  const icon = isDup?'<i class="fa-solid fa-xmark"></i>':'<i class="fa-solid fa-plus"></i>';
+  const mode = isDup ? 'remove' : 'add';
+  const title = isDup ? '从图表移除' : '添加到图表';
+  const icon = isDup ? '<i class="fa-solid fa-xmark"></i>' : '<i class="fa-solid fa-plus"></i>';
   let cls;
   if (isDup) cls='js-list-remove';
   else if (addType==='search') cls='js-search-add';
@@ -1444,14 +1653,16 @@ function buildQuickBtnHTML(addType, brand, model, resType, resLoc){
   else if (addType==='ranking') cls='js-ranking-add';
   else cls='js-likes-add';
   return `
-    <button class="btn-add ${cls} tooltip-btn"
+    <button class="btn-add ${cls} tooltip-btn js-add-pair"
             title="${title}"
             data-mode="${mode}"
             data-add-type="${addType}"
             data-brand="${escapeHtml(brand)}"
             data-model="${escapeHtml(model)}"
             data-res-type="${escapeHtml(resType)}"
-            data-res-loc="${escapeHtml(normResLoc)}">
+            data-res-loc="${escapeHtml(normResLoc)}"
+            data-model-id="${modelId ?? ''}"
+            data-condition-id="${conditionId ?? ''}">
       ${icon}
     </button>`;
 }
@@ -1493,87 +1704,12 @@ function syncQuickActionButtons(){
   });
 }
 
-/* =========================================================
-   Rebuild 选中 / 移除列表
-   ========================================================= */
+/* 
 const selectedListEl = $('#selectedFansList');
-const removedListEl  = $('#recentlyRemovedList');
 const selectedCountEl = $('#selectedCount');
 const clearAllContainer = $('#clearAllContainer');
 const clearAllBtn = $('#clearAllBtn');
-
-function rebuildSelectedFans(fans){
-  selectedListEl.innerHTML='';
-  ensureColorIndicesForSelected(fans||[]);
-  if (!fans || fans.length===0){
-    selectedCountEl.textContent='0';
-    clearAllContainer?.classList.add('hidden');
-    rebuildSelectedIndex();
-    requestAnimationFrame(window.applySidebarColors);
-    requestAnimationFrame(prepareSidebarMarquee);
-    scheduleAdjust();
-    return;
-  }
-  fans.forEach(f=>{
-    const keyStr = `${f.model_id}_${f.condition_id}`;
-    const isLiked = likedKeysSet.has(keyStr);
-    const div = document.createElement('div');
-    div.className='fan-item flex items-center justify-between p-3 border border-gray-200 rounded-md';
-    div.dataset.fanKey = f.key;
-    const normLoc = (f.res_loc && String(f.res_loc).trim() !== '') ? f.res_loc : '无';
-    div.dataset.map = `${f.brand}||${f.model}||${f.res_type}||${normLoc}`;
-    div.innerHTML=`
-      <div class="flex items-center min-w-0">
-        <div class="w-3 h-3 rounded-full mr-2 flex-shrink-0 js-color-dot"></div>
-        <div class="truncate">
-          <span class="font-medium">${escapeHtml(f.brand)} ${escapeHtml(f.model)}</span> - 
-          <span class="text-gray-600 text-sm">${formatScenario(f.res_type, f.res_loc)}</span>
-        </div>
-      </div>
-      <div class="flex items-center flex-shrink-0">
-        <button class="like-button mr-3" data-fan-key="${f.key}" data-model-id="${f.model_id}" data-condition-id="${f.condition_id}">
-          <i class="fa-solid fa-thumbs-up ${isLiked?'text-red-500':'text-gray-400'}"></i>
-        </button>
-        <button class="remove-icon text-lg js-remove-fan" data-fan-key="${f.key}" title="移除">
-          <i class="fa-solid fa-xmark"></i>
-        </button>
-      </div>`;
-    selectedListEl.appendChild(div);
-    const dot = div.querySelector('.js-color-dot');
-    if (dot) dot.style.backgroundColor = colorForKey(f.key);
-  });
-  selectedCountEl.textContent = fans.length.toString();
-  clearAllContainer?.classList.remove('hidden');
-  rebuildSelectedIndex();
-  requestAnimationFrame(prepareSidebarMarquee);
-  scheduleAdjust();
-}
-
-function rebuildRemovedFans(list){
-  removedListEl.innerHTML='';
-  if (!list || list.length===0){
-    removedListEl.innerHTML='<p class="text-gray-500 text-center py-6 empty-removed">暂无最近移除的风扇</p>';
-    requestAnimationFrame(prepareSidebarMarquee);
-    return;
-  }
-  list.forEach(item=>{
-    if (selectedKeySet.has(item.key)) return;
-    const div = document.createElement('div');
-    div.className='fan-item flex items-center justify-between p-3 border border-gray-200 rounded-md';
-    div.dataset.fanKey = item.key;
-    div.innerHTML=`
-      <div class="truncate">
-        <span class="font-medium">${escapeHtml(item.brand)} ${escapeHtml(item.model)}</span> - 
-        <span class="text-gray-600 text-sm">${formatScenario(item.res_type, item.res_loc)}</span>
-      </div>
-      <button class="restore-icon text-lg js-restore-fan" data-fan-key="${item.key}" title="恢复至图表">
-        <i class="fa-solid fa-rotate-left"></i>
-      </button>`;
-    removedListEl.appendChild(div);
-  });
-  requestAnimationFrame(syncTopTabsViewportHeight);
-  requestAnimationFrame(prepareSidebarMarquee);
-}
+*/
 
 /* =========================================================
    统一状态处理
@@ -1586,65 +1722,6 @@ let __isShareLoaded = (function(){
   } catch(_) { return false; }
 })();
 let __shareAxisApplied = false;
-
-function processState(data, successMsg){
-  const prevSelectedKeys = new Set(selectedKeySet);
-
-  if (data.error_message){
-     hideLoading('op'); showError(data.error_message); 
-    } else { 
-    if (successMsg) showSuccess(successMsg); 
-      hideLoading('op'); 
-      autoCloseOpLoading();  
-    }
-
-  let pendingChart = null;
-  if ('chart_data' in data) pendingChart = data.chart_data;
-
-  /* 新增：如果 share_meta 在本次返回，优先处理颜色索引映射 */
-  if ('share_meta' in data && data.share_meta) {
-    applyServerStatePatchColorIndices(data.share_meta);
-  }
-
-  if ('like_keys' in data) likedKeysSet = new Set(data.like_keys||[]);
-
-  if ('selected_fans' in data) {
-    const incomingKeys = new Set((data.selected_fans || []).map(f => f.key).filter(Boolean));
-    try {
-      prevSelectedKeys.forEach(k => { if (!incomingKeys.has(k)) releaseColorIndexForKey(k); });
-    } catch(_) {}
-
-    /* 不再在这里“重排”颜色，如果分享携带了 color_indices 则已经写入 colorIndexMap。
-       若需要确保唯一仍可调用 assignUniqueIndicesForSelection */
-    assignUniqueIndicesForSelection(data.selected_fans);
-    rebuildSelectedFans(data.selected_fans);
-  }
-
-  if ('recently_removed_fans' in data) rebuildRemovedFans(data.recently_removed_fans);
-
-  if ('share_meta' in data && data.share_meta) {
-    pendingShareMeta = {
-      show_raw_curves: data.share_meta.show_raw_curves,
-      show_fit_curves: data.share_meta.show_fit_curves,
-      pointer_x_rpm: data.share_meta.pointer_x_rpm,
-      pointer_x_noise_db: data.share_meta.pointer_x_noise_db,
-      legend_hidden_keys: data.share_meta.legend_hidden_keys
-      // color_indices 已提前处理
-    };
-
-    if (__isShareLoaded && !__shareAxisApplied && data.chart_data && data.chart_data.x_axis_type) {
-      frontXAxisType = (data.chart_data.x_axis_type === 'noise') ? 'noise_db' : data.chart_data.x_axis_type;
-      try { localStorage.setItem('x_axis_type', frontXAxisType); } catch(_){}
-      __shareAxisApplied = true;
-    }
-  }
-
-  if (pendingChart) postChartData(pendingChart);
-
-  syncQuickActionButtons();
-  wrapMarqueeForExistingTables();
-  scheduleAdjust();
-}
 
 /* =========================================================
    POST 助手
@@ -1717,13 +1794,6 @@ function applyRatingTable(data){
     const rankCell = medal?`<i class="fa-solid fa-medal ${medal} text-2xl"></i>`:`<span class="font-medium">${rank}</span>`;
     const locRaw = r.resistance_location_zh || '';
     const scen = formatScenario(r.resistance_type_zh, locRaw);
-    const locForKey = locRaw || '全部';
-    const mapKey = `${escapeHtml(r.brand_name_zh)}||${escapeHtml(r.model_name)}||${escapeHtml(r.resistance_type_zh)}||${escapeHtml(locForKey)}`;
-    const isDup = selectedMapSet.has(mapKey);
-    const btnMode = isDup?'remove':'add';
-    const btnClass = isDup?'js-list-remove':'js-rating-add';
-    const btnTitle = isDup?'从图表移除':'添加到图表';
-    const btnIcon  = isDup?'<i class="fa-solid fa-xmark"></i>':'<i class="fa-solid fa-plus"></i>';
     html+=`
       <tr class="hover:bg-gray-50">
         <td class="rank-cell">${rankCell}</td>
@@ -1732,18 +1802,13 @@ function applyRatingTable(data){
         <td class="nowrap marquee-cell"><span class="marquee-inner">${escapeHtml(r.size)}x${escapeHtml(r.thickness)}</span></td>
         <td class="nowrap marquee-cell"><span class="marquee-inner">${scen}</span></td>
         <td class="text-blue-600 font-medium">${escapeHtml(r.like_count)}</td>
-        <td>
-          <button class="btn-add ${btnClass} tooltip-btn"
-                  title="${btnTitle}"
-                  data-mode="${btnMode}"
-                  data-add-type="rating"
-                  data-brand="${escapeHtml(r.brand_name_zh)}"
-                  data-model="${escapeHtml(r.model_name)}"
-                  data-res-type="${escapeHtml(r.resistance_type_zh)}"
-                  data-res-loc="${escapeHtml(locForKey)}">
-            ${btnIcon}
-          </button>
-        </td>
+        <td>${buildQuickBtnHTML('rating',
+                                 r.brand_name_zh,
+                                 r.model_name,
+                                 r.resistance_type_zh,
+                                 locRaw,
+                                 r.model_id,
+                                 r.condition_id)}</td>
       </tr>`;
   });
   tbody.innerHTML=html;
@@ -1787,7 +1852,13 @@ function fillSearchTable(tbody, list){
         <td class="nowrap marquee-cell"><span class="marquee-inner">${scenLabel}</span></td>
         <td class="text-blue-600 font-medium text-sm">${Number(r.max_airflow).toFixed(1)}</td>
         <td class="text-blue-600 font-medium">${r.like_count ?? 0}</td>
-        <td>${buildQuickBtnHTML('search', brand, model, resType, resLocRaw)}</td>
+        <td>${buildQuickBtnHTML('search',
+                                 brand,
+                                 model,
+                                 resType,
+                                 resLocRaw,
+                                 r.model_id,
+                                 r.condition_id)}</td>
       </tr>`;
   }).join('');
   prepareMarqueeCells(tbody, [0,1,2,3]);
@@ -2111,120 +2182,8 @@ document.addEventListener('click', async e=>{
 
     return;
   }
-
-  /* 快速删除（按钮状态是 remove) */
-  const quickRemove = safeClosest(e.target, '.js-list-remove');
-  if (quickRemove){
-    const { brand, model, resType, resLoc } = quickRemove.dataset;
-    const keyStr = `${unescapeHtml(brand)}||${unescapeHtml(model)}||${unescapeHtml(resType)}||${unescapeHtml(resLoc)}`;
-    const targetRow = window.__APP.dom.all('#selectedFansList .fan-item')
-      .find(div=>div.getAttribute('data-map') === keyStr);
-    if (!targetRow){ showInfo('该数据已不在图表中'); syncQuickActionButtons(); return; }
-    const key = targetRow.getAttribute('data-fan-key');
-    if (!key){ showError('未找到可移除的条目'); return; }
-    showLoading('op','移除中...');
-    try {
-      const data = await apiPost('/api/remove_fan',{ fan_key:key });
-      processState(data,'已移除');
-      scheduleAdjust();
-    } catch(err){ hideLoading('op'); showError('移除失败: '+err.message); }
-    return;
-  }
-
-  /* 快速添加 (ranking/search/rating/likes) */
-  const picker = ['.js-ranking-add','.js-search-add','.js-rating-add','.js-likes-add'];
-  for (const sel of picker){
-    // 原有委托监听内：
-    // ...
-    const btn = safeClosest(e.target, sel);
-    if (btn){
-      const key = mapKeyFromDataset(btn.dataset);
-      if (selectedMapSet.has(key)){ showInfo('该数据已添加'); syncQuickActionButtons(); return; }
-      if (!ensureCanAdd()) return;
-      showLoading('op','添加中...');
-      try {
-        const { brand, model, resType, resLoc } = btn.dataset;
-        const rl = unescapeHtml(resLoc);
-        const resLocToSend = (rl === '无') ? '' : rl;  // 空值 -> ''
-        const data = await apiPost('/api/add_fan',{
-          brand: unescapeHtml(brand),
-          model: unescapeHtml(model),
-          res_type: unescapeHtml(resType),
-          res_loc: resLocToSend
-        });
-        processState(data,'添加成功');
-        scheduleAdjust();
-        if (data && data.success) maybeAutoOpenSidebarOnAdd();
-      } catch(err){ hideLoading('op'); showError('添加失败: '+err.message); }
-      return;
-    }
-  }
-
-  /* 从已选列表移除 */
-  const removeBtn = safeClosest(e.target, '.js-remove-fan');
-  if (removeBtn){
-    showLoading('op','移除中...');
-    try {
-      const data = await apiPost('/api/remove_fan',{ fan_key: removeBtn.dataset.fanKey });
-      processState(data,'已移除');
-      scheduleAdjust();
-    } catch(err){ hideLoading('op'); showError('移除失败: '+err.message); }
-    return;
-  }
-
-  /* 恢复 */
-  const restoreBtn = safeClosest(e.target,'.js-restore-fan');
-  if (restoreBtn){
-    const fanKey = restoreBtn.dataset.fanKey;
-    if (selectedKeySet.has(fanKey)){
-      const row = restoreBtn.closest('.fan-item');
-      if (row) row.remove();
-      showInfo('该数据已在图表中，已从最近移除列表移除');
-      return;
-    }
-    showLoading('op','恢复中...');
-    try {
-      const data = await apiPost('/api/restore_fan',{ fan_key: fanKey });
-      processState(data,'已恢复');
-      scheduleAdjust();
-    } catch(err){ hideLoading('op'); showError('恢复失败: '+err.message); }
-    return;
-  }
-
-  /* 清空确认交互 */
-  if (e.target.id === 'clearAllBtn'){
-    const state = e.target.getAttribute('data-state') || 'normal';
-    if (state === 'normal'){
-      clearAllBtn.setAttribute('data-state','confirming');
-      clearAllBtn.innerHTML = `
-        <div class="clear-confirm-wrapper">
-          <button id="confirmClearAll" class="bg-red-600 text-white hover:bg-red-700">确认</button>
-          <button id="cancelClearAll" class="bg-gray-400 text-white hover:bg-gray-500">取消</button>
-        </div>`;
-      scheduleAdjust();
-    }
-    return;
-  }
-  if (e.target.id === 'cancelClearAll'){
-    clearAllBtn.setAttribute('data-state','normal');
-    clearAllBtn.textContent='移除所有';
-    scheduleAdjust();
-    return;
-  }
-  if (e.target.id === 'confirmClearAll'){
-    showLoading('op','清空中...');
-    try {
-      const data = await apiPost('/api/clear_all',{});
-      processState(data,'已全部移除');
-    } catch(err){ hideLoading('op'); showError('清空失败: '+err.message); }
-    finally {
-      clearAllBtn.setAttribute('data-state','normal');
-      clearAllBtn.textContent='移除所有';
-      scheduleAdjust();
-    }
-    return;
-  }
 });
+
 
 /* =========================================================
    添加表单提交
@@ -2235,34 +2194,67 @@ if (fanForm){
     const brand = brandSelect.value.trim();
     const model = modelSelect.value.trim();
     const res_type = resTypeSelect.value.trim();
-    let res_loc = resLocSelect.value.trim();
+    let   res_loc  = resLocSelect.value.trim();
 
     if (!brand || !model){ showError('请先选择品牌与型号'); return; }
     if (!res_type){ showError('请选择风阻类型'); return; }
 
-    // 空载：固定使用“无”
-    if (res_type === '空载') {
-      res_loc = '无';
-    }
+    // 空载强制无位置
+    if (res_type === '空载') res_loc = '无';
+    if (!res_loc) res_loc = '全部';
 
-    if (!res_loc) res_loc='全部'; // 非空载场景仍允许“全部”表示不筛位置
-
-    // 既不是类型=全部，也不是位置=全部 才做精确重复校验
-    if (res_type !== '全部' && res_loc !== '全部'){
+    // 精确组合去重：仅当不是 “全部”
+    if (res_type !== '全部' && res_loc !== '全部') {
       const mapKey = `${brand}||${model}||${res_type}||${res_loc}`;
       if (selectedMapSet.has(mapKey)){ showInfo('该数据已添加'); return; }
     }
 
-    if (!ensureCanAdd()) return;
     showLoading('op','添加中...');
-    try {
-      // 提交前把“无”转成空串，后端据此做空值筛选
-      const res_loc_payload = (res_loc === '无') ? '' : res_loc;
-      const data = await apiPost('/api/add_fan',{ brand, model, res_type, res_loc: res_loc_payload });
-      processState(data, data.error_message?'':'添加成功');
-      scheduleAdjust();
-      if (data && data.success) maybeAutoOpenSidebarOnAdd();
-    } catch(err){ hideLoading('op'); showError('添加失败: '+err.message); }
+    try{
+      const payload = {
+        brand,
+        model,
+        res_type,          // 后端自行放宽 “全部”
+        res_loc            // “全部” 亦放宽，“无” 表示无位置
+      };
+      const resp = await fetch('/api/pairs_by_filters', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+      }).then(r=>r.json());
+
+      if (!resp.success){
+        hideLoading('op');
+        showError(resp.error || resp.error_message || '添加失败');
+        return;
+      }
+
+      const list = resp.list || [];
+      if (!list.length){
+        hideLoading('op');
+        showInfo('没有匹配的数据组合');
+        return;
+      }
+
+      const before = LocalState.getSelected().length;
+      await LocalState.add(list.map(r=>({
+        model_id: r.model_id,
+        condition_id: r.condition_id,
+        brand: r.brand,
+        model: r.model,
+        res_type: r.res_type,
+        res_loc: r.res_loc
+      })));
+      const after = LocalState.getSelected().length;
+      hideLoading('op');
+      const added = after - before;
+      showSuccess(added ? `添加成功（新增 ${added} 条）` : '全部已存在');
+      rebuildSelectedSidebar();
+      refreshChartFromLocal();
+    }catch(err){
+      hideLoading('op');
+      showError('添加异常: '+err.message);
+    }
   });
 }
 
@@ -2617,33 +2609,6 @@ function scheduleAdjust(){
     window.adjustBottomPanelAuto && window.adjustBottomPanelAuto();
   });
 }
-
-/* =========================================================
-   初始数据获取
-   ========================================================= */
-fetch('/api/state')
-  .then(r=>r.json())
-  .then(d=>processState(d,''))
-  .catch(()=>{});
-
-/* 初始右侧子段显示状态 */
-updateRightSubseg(localStorage.getItem('activeTab_right-panel') || 'top-queries');
-
-(function autoScrollToChartOnShare(){
-  try {
-    const usp = new URLSearchParams(window.location.search);
-    if (usp.get('share_loaded') === '1') {
-      window.addEventListener('load', () => {
-        setTimeout(() => {
-          const el = document.getElementById('chart-settings');
-            if (el) {
-              el.scrollIntoView({ behavior:'smooth', block:'center' });
-            }
-        }, 120);
-      });
-    }
-  } catch(_) {}
-})();
 
 /* =========================================================
    添加表单选项提交后补充
@@ -3072,7 +3037,6 @@ window.__APP.modules = {
     if (type === 'chart:ready') {
       chartFrameReady = true;
       flushChartQueue();
-      // 若队列为空但已有 lastChartData（例如 ready 之前没有触发过 postChartData），补发一次
       if (lastChartData && !chartMessageQueue.length){
         postChartData(lastChartData);
       }
@@ -3081,10 +3045,28 @@ window.__APP.modules = {
 
     if (type === 'chart:xaxis-type-changed') {
       const next = (payload?.x_axis_type === 'noise') ? 'noise_db' : (payload?.x_axis_type || 'rpm');
-      if (next !== frontXAxisType) {
-        frontXAxisType = next;
-        try { localStorage.setItem('x_axis_type', frontXAxisType); } catch(_) {}
-        if (lastChartData) postChartData(lastChartData);
+      try {
+        LocalState.saveCfgPatch({ x_axis: next });
+      } catch(_){}
+      if (lastChartData) postChartData(lastChartData);
+    }
+
+    if (type === 'chart:fit-config-changed'){
+      // payload: { show_raw:boolean, show_fit:boolean }
+      LocalState.saveCfgPatch({
+        show_raw: !!payload.show_raw,
+        show_fit: !!payload.show_fit
+      });
+    }
+
+    if (type === 'chart:pointer-moved'){
+      // payload: { x_axis_type:'rpm'|'noise_db', value:number }
+      if (payload && typeof payload.value === 'number'){
+        if (payload.x_axis_type === 'rpm'){
+          LocalState.saveCfgPatch({ pointer_x_rpm: payload.value });
+        } else if (payload.x_axis_type === 'noise_db'){
+          LocalState.saveCfgPatch({ pointer_x_noise_db: payload.value });
+        }
       }
     }
   });

@@ -283,69 +283,69 @@ def share_view(token):
     return redirect(url_for('index', share_loaded=1))
 
 
-@app.route('/api/state')
-def api_state():
-    return jsonify(assemble_state())
-
-
-@app.route('/api/add_fan', methods=['POST'])
-def api_add_fan():
-    data = request.get_json(force=True) or {}
-    brand = (data.get('brand') or '').strip()
-    model = (data.get('model') or '').strip()
-    res_type = (data.get('res_type') or '').strip()
-    res_loc_raw = data.get('res_loc')
-    res_loc = '' if res_loc_raw is None else str(res_loc_raw).strip()
-    if not brand or not model:
-        return jsonify(assemble_state({'error_message': '缺少品牌或型号'}))
-    if not res_type:
-        return jsonify(assemble_state({'error_message': '请选择风阻类型（或选择 全部）'}))
-    res_type_filter = None if res_type == '全部' else res_type
-    res_loc_filter = None if res_loc == '全部' else res_loc
-    result = handle_add_logic_inputs_ready(brand, model, res_type_filter, res_loc_filter)
-    success = not bool(result.get('error_message'))
-    return jsonify(assemble_state({**result, 'success': success}))
-
-
-@app.route('/api/remove_fan', methods=['POST'])
-def api_remove_fan():
-    data = request.get_json(force=True) or {}
-    fk = data.get('fan_key')
-    if not fk:
-        return jsonify(assemble_state({'error_message': '缺少 fan_key'}))
-    if not remove_fan_from_session(fk):
-        return jsonify(assemble_state({'error_message': '风扇不存在'}))
-    return jsonify(assemble_state())
-
-
-@app.route('/api/restore_fan', methods=['POST'])
-def api_restore_fan():
-    data = request.get_json(force=True) or {}
-    fk = data.get('fan_key')
-    if not fk:
-        return jsonify(assemble_state({'error_message': '缺少 fan_key'}))
-    rem = session.get('recently_removed_fans', {})
-    if fk not in rem:
-        return jsonify(assemble_state({'error_message': '该项不在最近移除列表'}))
-    if len(get_selected_dict()) >= MAX_CHART_ITEMS:
-        return jsonify(assemble_state({'error_message': f'已达到最大显示限制({MAX_CHART_ITEMS})'}))
-    info = rem[fk]['info']
-    if is_duplicate_in_session(info):
-        remove_fan_from_recently_removed(fk)
-        return jsonify(assemble_state({'error_message': '该数据已在图表中'}))
-    add_fan_to_session(info)
-    remove_fan_from_recently_removed(fk)
-    return jsonify(assemble_state())
-
-
-@app.route('/api/clear_all', methods=['POST'])
-def api_clear_all():
-    sel = get_selected_dict()
-    for k, v in list(sel.items()):
-        add_to_recently_removed(v['info'])
-    session.pop('selected_fans', None)
-    session.modified = True
-    return jsonify(assemble_state())
+#@app.route('/api/state')
+#def api_state():
+#    return jsonify(assemble_state())
+#
+#
+#@app.route('/api/add_fan', methods=['POST'])
+#def api_add_fan():
+#    data = request.get_json(force=True) or {}
+#    brand = (data.get('brand') or '').strip()
+#    model = (data.get('model') or '').strip()
+#    res_type = (data.get('res_type') or '').strip()
+#    res_loc_raw = data.get('res_loc')
+#    res_loc = '' if res_loc_raw is None else str(res_loc_raw).strip()
+#    if not brand or not model:
+#        return jsonify(assemble_state({'error_message': '缺少品牌或型号'}))
+#    if not res_type:
+#        return jsonify(assemble_state({'error_message': '请选择风阻类型（或选择 全部）'}))
+#    res_type_filter = None if res_type == '全部' else res_type
+#    res_loc_filter = None if res_loc == '全部' else res_loc
+#    result = handle_add_logic_inputs_ready(brand, model, res_type_filter, res_loc_filter)
+#    success = not bool(result.get('error_message'))
+#    return jsonify(assemble_state({**result, 'success': success}))
+#
+#
+#@app.route('/api/remove_fan', methods=['POST'])
+#def api_remove_fan():
+#    data = request.get_json(force=True) or {}
+#    fk = data.get('fan_key')
+#    if not fk:
+#        return jsonify(assemble_state({'error_message': '缺少 fan_key'}))
+#    if not remove_fan_from_session(fk):
+#        return jsonify(assemble_state({'error_message': '风扇不存在'}))
+#    return jsonify(assemble_state())
+#
+#
+#@app.route('/api/restore_fan', methods=['POST'])
+#def api_restore_fan():
+#    data = request.get_json(force=True) or {}
+#    fk = data.get('fan_key')
+#    if not fk:
+#        return jsonify(assemble_state({'error_message': '缺少 fan_key'}))
+#    rem = session.get('recently_removed_fans', {})
+#    if fk not in rem:
+#        return jsonify(assemble_state({'error_message': '该项不在最近移除列表'}))
+#    if len(get_selected_dict()) >= MAX_CHART_ITEMS:
+#        return jsonify(assemble_state({'error_message': f'已达到最大显示限制({MAX_CHART_ITEMS})'}))
+#    info = rem[fk]['info']
+#    if is_duplicate_in_session(info):
+#        remove_fan_from_recently_removed(fk)
+#        return jsonify(assemble_state({'error_message': '该数据已在图表中'}))
+#    add_fan_to_session(info)
+#    remove_fan_from_recently_removed(fk)
+#    return jsonify(assemble_state())
+#
+#
+#@app.route('/api/clear_all', methods=['POST'])
+#def api_clear_all():
+#    sel = get_selected_dict()
+#    for k, v in list(sel.items()):
+#        add_to_recently_removed(v['info'])
+#    session.pop('selected_fans', None)
+#    session.modified = True
+#    return jsonify(assemble_state())
 
 
 @app.route('/')
@@ -370,8 +370,7 @@ def index():
         colors=["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd", "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"],
         click_cooldown_ms=100
     )
-
-
+  
 if __name__ == '__main__':
     app.logger.setLevel(logging.INFO)
     app.run(host='0.0.0.0', port=5001, debug=True, use_reloader=False)

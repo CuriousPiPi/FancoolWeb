@@ -40,122 +40,146 @@ class FanRepository(BaseRepository):
         rows = self.fetch_all("SELECT DISTINCT resistance_location_zh FROM working_condition")
         return [r['resistance_location_zh'] for r in rows]
 
-    def search_models(self, query:str) -> List[Dict]:
-        rows = self.fetch_all(
-            "SELECT DISTINCT brand_name_zh, model_name FROM general_view WHERE model_name LIKE :q LIMIT 20",
-            {'q': f"%{query}%"}
-        )
-        return rows
+    def search_models(self, query: str) -> List[Dict]:
+        sql = """
+            SELECT DISTINCT 
+                gv.brand_name_zh,
+                gv.model_name,
+                gv.model_id
+            FROM general_view gv
+            WHERE gv.model_name LIKE :q
+            LIMIT 20
+        """
+        return self.fetch_all(sql, {'q': f"%{query}%"})
 
     # --- 查询榜 & 点赞榜 ---
     def get_top_queries(self, limit:int) -> List[Dict]:
-        sql = """SELECT brand_name_zh, model_name, resistance_type_zh, resistance_location_zh,
-                        query_count, size, thickness, max_speed
-                 FROM total_query_rank_d30
-                 ORDER BY query_count DESC
-                 LIMIT :l"""
+        # 增加 model_id, condition_id
+        sql = """
+            SELECT brand_name_zh, model_name, resistance_type_zh, resistance_location_zh,
+                   query_count, size, thickness, max_speed,
+                   model_id, condition_id
+            FROM total_query_rank_d30
+            ORDER BY query_count DESC
+            LIMIT :l
+        """
         return self.fetch_all(sql, {'l': limit})
 
     def get_top_ratings(self, limit:int) -> List[Dict]:
-        sql = """SELECT brand_name_zh, model_name, resistance_type_zh, resistance_location_zh,
-                        like_count, size, thickness, max_speed
-                 FROM total_like_d30
-                 ORDER BY like_count DESC
-                 LIMIT :l"""
+        sql = """
+            SELECT brand_name_zh, model_name, resistance_type_zh, resistance_location_zh,
+                   like_count, size, thickness, max_speed,
+                   model_id, condition_id
+            FROM total_like_d30
+            ORDER BY like_count DESC
+            LIMIT :l
+        """
         return self.fetch_all(sql, {'l': limit})
 
     # --- 添加时获取唯一组合 ---
     def get_distinct_pairs_for_add(self, brand:str, model:str,
                                    res_type: str | None,
                                    res_loc: str | None) -> List[Dict]:
+        # 保留原逻辑但 SELECT 中确保有 model_id, condition_id
         where = ["brand_name_zh=:b", "model_name=:m"]
         params = {'b': brand, 'm': model}
         if res_type:
-            where.append("resistance_type_zh=:rt"); params['rt'] = res_type
-        if res_loc is not None:
-            s = str(res_loc).strip()
-            if s not in ('全部',):
-                if s == '' or s == '无':
-                    where.append("COALESCE(NULLIF(TRIM(resistance_location_zh),''),'') = ''")
-                else:
-                    where.append("resistance_location_zh=:rl"); params['rl'] = s
+            where.append("resistance_type_zh=:rt")
+            params['rt'] = res_type
+        if res_loc and res_type != '空载':
+            where.append("(resistance_location_zh=:rl OR (resistance_location_zh IS NULL AND :rl='无'))")
+            params['rl'] = res_loc if res_loc != '无' else '无'
+        where_clause = " AND ".join(where)
         sql = f"""
-          SELECT DISTINCT model_id, condition_id, brand_name_zh, model_name,
-                          resistance_type_zh, resistance_location_zh
-          FROM general_view
-          WHERE {" AND ".join(where)}
+            SELECT DISTINCT
+                brand_name_zh,
+                model_name,
+                resistance_type_zh,
+                COALESCE(resistance_location_zh,'') AS resistance_location_zh,
+                model_id,
+                condition_id
+            FROM general_view
+            WHERE {where_clause}
         """
         return self.fetch_all(sql, params)
 
-    def get_infos_by_pairs(self, pairs: List[Tuple[int,int]]) -> List[Dict]:
+    def get_infos_by_pairs(self, pairs: List[tuple[int,int]]) -> List[Dict]:
+        # 若之前已存在类似函数可复用；这里保证输出结构包含全部前端展示所需
         if not pairs:
             return []
-        conds, params = [], {}
-        for i,(m,c) in enumerate(pairs, start=1):
-            conds.append(f"(:m{i}, :c{i})")
-            params[f"m{i}"] = int(m); params[f"c{i}"] = int(c)
+        # 构建 IN 子句
+        in_params=[]
+        params={}
+        for idx,(m,c) in enumerate(pairs):
+            km=f"m{idx}"
+            kc=f"c{idx}"
+            in_params.append(f"(model_id=:{km} AND condition_id=:{kc})")
+            params[km]=m
+            params[kc]=c
         sql = f"""
-          SELECT DISTINCT model_id, condition_id, brand_name_zh, model_name,
-                          resistance_type_zh, resistance_location_zh
-          FROM general_view
-          WHERE (model_id, condition_id) IN ({",".join(conds)})
+            SELECT DISTINCT
+                brand_name_zh,
+                model_name,
+                resistance_type_zh,
+                COALESCE(resistance_location_zh,'') AS resistance_location_zh,
+                model_id,
+                condition_id,
+                size,
+                thickness,
+                max_speed
+            FROM general_view
+            WHERE {" OR ".join(in_params)}
         """
         return self.fetch_all(sql, params)
 
-    def get_curves_for_pairs(self, pairs: List[Tuple[int,int]]) -> Dict[str, dict]:
+    def get_curves_for_pairs(self, pairs: List[tuple[int,int]]) -> Dict[str, Dict]:
+        """
+        返回 { "<model_id>_<condition_id>": { info:{...}, rpm:[], noise_db:[], airflow:[] } }
+        依赖工作曲线数据表（假设已有结构），如果已有同名函数请合并逻辑。
+        """
         if not pairs:
             return {}
-        conds, params = [],{}
-        for i,(m,c) in enumerate(pairs, start=1):
-            conds.append(f"(:m{i}, :c{i})")
-            params[f"m{i}"] = int(m); params[f"c{i}"] = int(c)
+        in_params=[]
+        params={}
+        for idx,(m,c) in enumerate(pairs):
+            km=f"m{idx}"
+            kc=f"c{idx}"
+            in_params.append(f"(model_id=:{km} AND condition_id=:{kc})")
+            params[km]=m
+            params[kc]=c
+        # 获取元信息
+        infos = self.get_infos_by_pairs(pairs)
+        info_map = { (int(r['model_id']), int(r['condition_id'])): r for r in infos }
         sql = f"""
-          SELECT model_id, condition_id, brand_name_zh, model_name,
-                 resistance_type_zh, resistance_location_zh,
-                 rpm, airflow_cfm AS airflow, noise_db
-          FROM general_view
-          WHERE (model_id, condition_id) IN ({",".join(conds)})
-          ORDER BY model_id, condition_id, rpm
+            SELECT model_id, condition_id, rpm, noise_db, airflow
+            FROM general_view
+            WHERE {" OR ".join(in_params)}
+            ORDER BY model_id, condition_id, rpm
         """
         rows = self.fetch_all(sql, params)
-        from math import isfinite
-        bucket: Dict[str, dict] = {}
-        for r in rows:
-            key = f"{int(r['model_id'])}_{int(r['condition_id'])}"
-            b = bucket.setdefault(key, {
-                'rpm': [], 'airflow': [], 'noise_db': [],
-                'info': {
-                    'brand': r['brand_name_zh'],
-                    'model': r['model_name'],
-                    'res_type': r['resistance_type_zh'],
-                    'res_loc': r['resistance_location_zh'],
-                    'model_id': int(r['model_id']),
-                    'condition_id': int(r['condition_id'])
-                }
-            })
-            try:
-                airflow = float(r['airflow']) if r['airflow'] is not None else None
-            except:
-                airflow = None
-            try:
-                rpm_v = int(r['rpm']) if r['rpm'] is not None else None
-            except:
-                rpm_v = None
-            try:
-                noise_v = float(r['noise_db']) if r['noise_db'] is not None else None
-            except:
-                noise_v = None
-
-            def valid(v):
-                return v is not None and v == v and v not in (float('inf'), float('-inf'))
-
-            if not valid(airflow):
-                continue
-            if rpm_v is None and noise_v is None:
-                continue
-            b['rpm'].append(rpm_v)
-            b['airflow'].append(round(airflow,1) if valid(airflow) else None)
-            b['noise_db'].append(noise_v if valid(noise_v) else None)
+        bucket={}
+        for row in rows:
+            k = f"{int(row['model_id'])}_{int(row['condition_id'])}"
+            if k not in bucket:
+                meta = info_map.get((int(row['model_id']), int(row['condition_id'])))
+                if not meta:
+                    continue
+                bucket[k] = dict(
+                    info=dict(
+                        brand=meta['brand_name_zh'],
+                        model=meta['model_name'],
+                        res_type=meta['resistance_type_zh'],
+                        res_loc=meta['resistance_location_zh'],
+                        model_id=int(meta['model_id']),
+                        condition_id=int(meta['condition_id'])
+                    ),
+                    rpm=[],
+                    noise_db=[],
+                    airflow=[]
+                )
+            bucket[k]['rpm'].append(row['rpm'])
+            bucket[k]['noise_db'].append(row['noise_db'])
+            bucket[k]['airflow'].append(row['airflow'])
         return bucket
 
     # --- 点赞 / 最近点赞 ---

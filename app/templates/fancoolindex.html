@@ -381,6 +381,8 @@
                             <button class="btn-add js-ranking-add tooltip-btn"
                                     title="添加到图表"
                                     data-add-type="ranking"
+                                    data-model-id="{{ query.model_id }}"
+                                    data-condition-id="{{ query.condition_id }}"
                                     data-brand="{{ query.brand_name_zh }}"
                                     data-model="{{ query.model_name }}"
                                     data-res-type="{{ query.resistance_type_zh }}"
@@ -498,6 +500,7 @@ window.APP_CONFIG = {
   maxItems: {{ max_chart_items }}
 };
 </script>
+<script src="{{ url_for('static', filename='js/local_state.js') }}"></script>
 <script src="{{ url_for('static', filename='js/fancool.js') }}"></script>
 </body>
 </html>
