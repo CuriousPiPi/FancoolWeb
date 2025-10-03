@@ -125,7 +125,6 @@ function rebuildSelectedSidebar(){
   });
   if (cntEl) cntEl.textContent = String(list.length);
   rebuildSelectedIndex();
-  refreshChartFromLocal();
   applySidebarColors && applySidebarColors();
   syncQuickActionButtons && syncQuickActionButtons();
 }
