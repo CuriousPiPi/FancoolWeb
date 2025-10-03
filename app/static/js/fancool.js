@@ -2,6 +2,7 @@
 window.APP_CONFIG = window.APP_CONFIG || { clickCooldownMs: 2000, maxItems: 0 };
 /* ==== 命名空间根 ==== */
 window.__APP = window.__APP || {};
+window.CURRENT_USER_ID = "{{ user_id|default('') }}";
 
 if (typeof LocalState === 'undefined') {
   console.error('LocalState 模块未加载，请确认 local_state.js 已在 fancool.js 之前引入');
@@ -77,7 +78,15 @@ LocalState.on('selected', () => {
   refreshChartFromLocal();
 });
 LocalState.on('curves', () => {
+  const cc = cache || LocalState.getCurveCache();
+  Object.values(cc).forEach(s => {
+    if (s && s.is_like) {
+      likedKeysSet.add(`${s.model_id}_${s.condition_id}`);
+    }
+  });
   refreshChartFromLocal();
+  // 重新渲染侧栏点赞颜色
+  rebuildSelectedSidebar();
 });
 
 /**
@@ -94,6 +103,7 @@ function rebuildSelectedSidebar(){
     const key = LocalState.pairKey(item.model_id, item.condition_id);
     const mapKey = `${item.brand}||${item.model}||${item.res_type}||${(item.res_loc || '无')}`;
     const div = document.createElement('div');
+    const liked = likedKeysSet.has(item.model_id + '_' + item.condition_id);
     div.className='fan-item flex items-center justify-between p-3 border border-gray-200 rounded-md';
     div.dataset.fanKey = key;
     div.setAttribute('data-map', mapKey);
@@ -111,7 +121,7 @@ function rebuildSelectedSidebar(){
         <button class="like-button mr-3"
                 data-model-id="${item.model_id}"
                 data-condition-id="${item.condition_id}">
-          <i class="fa-solid fa-thumbs-up ${likedKeysSet.has(item.model_id+'_'+item.condition_id)?'text-red-500':'text-gray-400'}"></i>
+          <i class="fa-solid fa-thumbs-up ${liked ? 'text-red-500':'text-gray-400'}"></i>
         </button>
         <button class="remove-icon text-lg js-remove-fan"
                 data-model-id="${item.model_id}"

@@ -147,7 +147,10 @@
     const resp = await fetch('/api/curves_by_pairs', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ pairs: pairs.map(p => ({ model_id:p.model_id, condition_id:p.condition_id })) })
+      body: JSON.stringify({
+        user_id: (window.CURRENT_USER_ID || ''),
+        pairs: pairs.map(p => ({ model_id:p.model_id, condition_id:p.condition_id })) 
+        })
     }).then(r=>r.json());
     if (!resp.success) throw new Error(resp.error || '曲线接口失败');
     (resp.series || []).forEach(s => { _curveCache[s.key] = s; });

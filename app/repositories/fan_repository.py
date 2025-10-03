@@ -191,7 +191,7 @@ class FanRepository(BaseRepository):
 
     def unlike(self, user_id:str, model_id:int, condition_id:int):
         sql = """UPDATE rate_logs SET is_valid=0, update_date=NOW()
-                 WHERE user_identifier=:u AND model_id=:m AND condition_id=:c"""
+                 WHERE rate_id=1 AND user_identifier=:u AND model_id=:m AND condition_id=:c"""
         self.exec_write(sql, {'u': user_id, 'm': model_id, 'c': condition_id})
 
     def get_user_likes_full(self, user_id:str, limit:int|None=None) -> List[Dict]:
@@ -199,13 +199,38 @@ class FanRepository(BaseRepository):
         SELECT user_identifier, model_id, condition_id, brand_name_zh, model_name,
                resistance_type_zh, resistance_location_zh, max_speed, size, thickness
         FROM user_likes_view
-        WHERE user_identifier=:u
+        WHERE rate_id=1 AND user_identifier=:u
         """
         rows = self.fetch_all(sql, {'u': user_id})
         return rows if limit is None else rows[:limit]
 
     def get_user_like_keys(self, user_id:str) -> List[str]:
         return [f"{int(r['model_id'])}_{int(r['condition_id'])}" for r in self.get_user_likes_full(user_id)]
+    
+    def get_like_flags_for_pairs(self, user_id: str, pairs: list[tuple[int,int]]) -> dict[tuple[int,int], int]:
+       """
+       返回 {(model_id, condition_id): 1/0}
+       只标记 is_valid=1, rate_id=1 的点赞
+       """
+       if not user_id or not pairs:
+           return {}
+       conds = []
+       params = {'u': user_id}
+       for i, (m, c) in enumerate(pairs):
+           params[f"m{i}"] = int(m)
+           params[f"c{i}"] = int(c)
+           conds.append(f"(model_id=:m{i} AND condition_id=:c{i})")
+       sql = f"""
+           SELECT model_id, condition_id
+           FROM rate_logs
+           WHERE user_identifier=:u AND is_valid=1 AND rate_id=1
+             AND ({' OR '.join(conds)})
+       """
+       rows = self.fetch_all(sql, params)
+       out = {}
+       for r in rows:
+           out[(int(r['model_id']), int(r['condition_id']))] = 1
+       return out
 
     # --- 搜索 ---
     def search_fans_by_condition(self, res_type:str, res_loc:str|None,
@@ -263,3 +288,4 @@ class FanRepository(BaseRepository):
     def get_query_count_distinct_batch(self) -> int:
         row = self.fetch_one("SELECT COUNT(DISTINCT batch_id) AS c FROM query_logs")
         return int(row['c']) if row else 0
+    

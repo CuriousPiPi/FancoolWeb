@@ -58,10 +58,17 @@ def api_curves_by_pairs():
     """
     try:
         body = request.get_json(force=True) or {}
+        user_id = (body.get('user_id') or '').strip()
         pairs = _parse_pairs(body.get('pairs'))
         if not pairs:
             return jsonify({"success": True, "series": []})
         bucket = _repo.get_curves_for_pairs(pairs)
+        like_map = {}
+        if user_id:
+            try:
+                like_map = _repo.get_like_flags_for_pairs(user_id, pairs)
+            except Exception:
+                like_map = {}
         series = []
         for key, pack in bucket.items():
             info = pack["info"]
@@ -75,7 +82,8 @@ def api_curves_by_pairs():
                 "condition_id": info["condition_id"],
                 "rpm": pack["rpm"],
                 "noise_db": pack["noise_db"],
-                "airflow": pack["airflow"]
+                "airflow": pack["airflow"],
+                "is_like": 1 if like_map.get((info["model_id"], info["condition_id"])) else 0
             })
         return jsonify({"success": True, "series": series})
     except Exception as e:
