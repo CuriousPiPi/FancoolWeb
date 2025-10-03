@@ -151,7 +151,7 @@ class FanRepository(BaseRepository):
         infos = self.get_infos_by_pairs(pairs)
         info_map = { (int(r['model_id']), int(r['condition_id'])): r for r in infos }
         sql = f"""
-            SELECT model_id, condition_id, rpm, noise_db, airflow
+            SELECT model_id, condition_id, rpm, noise_db, airflow_cfm AS airflow
             FROM general_view
             WHERE {" OR ".join(in_params)}
             ORDER BY model_id, condition_id, rpm
