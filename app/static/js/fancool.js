@@ -13,7 +13,7 @@ function refreshChartFromLocal(){
   const cfg = LocalState.getConfig ? LocalState.getConfig() : { x_axis:'rpm' };
   const series = [];
   selected.forEach(it=>{
-    const k = LocalState.keyOf(it.model_id, it.condition_id);
+    const k = LocalState.pairKey(it.model_id, it.condition_id);
     const cur = cache[k];
     if (!cur) return;
     series.push({
@@ -91,7 +91,7 @@ function rebuildSelectedSidebar(){
   const list = LocalState.getSelected();
   wrap.innerHTML = '';
   list.forEach(item=>{
-    const key = LocalState.keyOf(item.model_id, item.condition_id);
+    const key = LocalState.pairKey(item.model_id, item.condition_id);
     const mapKey = `${item.brand}||${item.model}||${item.res_type}||${(item.res_loc || '无')}`;
     const div = document.createElement('div');
     div.className='fan-item flex items-center justify-between p-3 border border-gray-200 rounded-md';
@@ -151,7 +151,7 @@ document.addEventListener('click', async (e)=>{
       res_loc: addBtn.dataset.resLoc === '无' ? '' : addBtn.dataset.resLoc
     }];
     const before = LocalState.getSelected().length;
-    await LocalState.add(meta);
+    await LocalState.addItems(meta);
     const after = LocalState.getSelected().length;
     if (after > before){
       showSuccess('添加成功');
@@ -169,7 +169,7 @@ document.addEventListener('click', async (e)=>{
   if (rmBtn){
     const mid = parseInt(rmBtn.dataset.modelId);
     const cid = parseInt(rmBtn.dataset.conditionId);
-    LocalState.remove(mid, cid);
+    LocalState.removeItem(mid, cid);
     showSuccess('已移除');
     rebuildSelectedSidebar();
     refreshChartFromLocal();
@@ -196,7 +196,7 @@ document.addEventListener('click', async (e)=>{
     const mid = parseInt(quickRemove.dataset.modelId);
     const cid = parseInt(quickRemove.dataset.conditionId);
     if (Number.isInteger(mid) && Number.isInteger(cid)){
-      LocalState.remove(mid, cid);
+      LocalState.removeItem(mid, cid);
       showSuccess('已移除');
       rebuildSelectedSidebar();
       refreshChartFromLocal();
@@ -1057,7 +1057,7 @@ function rebuildRecentLikes(list){
                     data-condition-id="${escapeHtml(s.cid||'')}">
               <i class="fa-solid fa-thumbs-up text-red-500"></i>
             </button>
-            ${buildQuickBtnHTML('likes', g.brand, g.model, s.rt, s.rl)}
+            ${buildQuickBtnHTML('likes', g.brand, g.model, s.rt, s.rl, s.mid, s.cid)}
           </div>
         </div>`;
     }).join('');
@@ -2237,7 +2237,7 @@ if (fanForm){
       }
 
       const before = LocalState.getSelected().length;
-      await LocalState.add(list.map(r=>({
+      await LocalState.addItems(list.map(r=>({
         model_id: r.model_id,
         condition_id: r.condition_id,
         brand: r.brand,
@@ -3046,14 +3046,14 @@ window.__APP.modules = {
     if (type === 'chart:xaxis-type-changed') {
       const next = (payload?.x_axis_type === 'noise') ? 'noise_db' : (payload?.x_axis_type || 'rpm');
       try {
-        LocalState.saveCfgPatch({ x_axis: next });
+        LocalState.saveConfig({ x_axis: next });
       } catch(_){}
       if (lastChartData) postChartData(lastChartData);
     }
 
     if (type === 'chart:fit-config-changed'){
       // payload: { show_raw:boolean, show_fit:boolean }
-      LocalState.saveCfgPatch({
+      LocalState.saveConfig({
         show_raw: !!payload.show_raw,
         show_fit: !!payload.show_fit
       });
@@ -3063,9 +3063,9 @@ window.__APP.modules = {
       // payload: { x_axis_type:'rpm'|'noise_db', value:number }
       if (payload && typeof payload.value === 'number'){
         if (payload.x_axis_type === 'rpm'){
-          LocalState.saveCfgPatch({ pointer_x_rpm: payload.value });
+          LocalState.saveConfig({ pointer_x_rpm: payload.value });
         } else if (payload.x_axis_type === 'noise_db'){
-          LocalState.saveCfgPatch({ pointer_x_noise_db: payload.value });
+          LocalState.saveConfig({ pointer_x_noise_db: payload.value });
         }
       }
     }
