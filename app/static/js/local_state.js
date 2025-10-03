@@ -84,7 +84,7 @@
     window.LocalState.getConfig = cfgGet;
     window.LocalState.saveCfgPatch = cfgPatch;
   }
-  
+
   // ============== 工具函数 ==============
   function pairKey(model_id, condition_id){
     return `${model_id}_${condition_id}`;
@@ -108,6 +108,12 @@
     writeLS(LS_KEYS.cfg, _cfg);
     notify('cfg', getConfig());
   }
+  function saveCfgPatch(patch){
+      if (!patch || typeof patch !== 'object') return;
+      _cfg = { ..._cfg, ...patch };   // 与 saveConfig 类似
+      writeLS(LS_KEYS.cfg, _cfg);
+      notify('cfg', getConfig());
+    }
   function saveColors(next){
     _colors = { ...next };
     writeLS(LS_KEYS.colors, _colors);
@@ -210,6 +216,7 @@
     getHiddenKeys,
     // 写
     saveConfig,
+    saveCfgPatch,
     saveHidden,
     ensureColorIndex,
     releaseColorIndex,

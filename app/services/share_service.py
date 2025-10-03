@@ -2,7 +2,6 @@ from typing import List, Tuple
 from flask import session, current_app
 from app.repositories.fan_repository import FanRepository
 from app.security.share_signer import sign_share, verify_share
-from app.services.state_service import add_fan_to_session, fan_key_from_info
 
 repo = FanRepository()
 

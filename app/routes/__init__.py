@@ -5,7 +5,6 @@ from .like import bp as like_bp
 from .share import bp as share_bp
 from .misc import bp as misc_bp
 from app.repositories.fan_repository import FanRepository
-from app.services.state_service import assemble_state
 from flask import current_app
 
 ui = Blueprint('ui', __name__)
@@ -31,7 +30,7 @@ def index():
 
     return render_template('fancoolindex.html',
                            brands=brands, models=[], res_types=[], res_locs=[],
-                           selected_fans=assemble_state().get('selected_fans', []),
+                           #selected_fans=assemble_state().get('selected_fans', []),
                            top_queries=top_queries, top_ratings=top_ratings,
                            all_res_types=all_res_types, all_res_locs=all_res_locs,
                            search_results=[],
