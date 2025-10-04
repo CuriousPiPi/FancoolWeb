@@ -73,6 +73,84 @@ window.__APP.scheduler = (function(){
   return { write };
 })();
 
+/* ==== 工具：通用延迟/防抖调度器 ==== */
+function createDelayed(fn, delay){
+  let timer = null;
+  return function(){
+    clearTimeout(timer);
+    timer = setTimeout(fn, delay);
+  };
+}
+
+/* ==== 工具：Snap 分页初始化（复用 left-panel / sidebar-top） ==== */
+function initSnapTabScrolling(opts){
+  const {
+    containerId,
+    group,                // tab-nav data-tab-group 值
+    persistKey,           // localStorage 键（可为空：不持久化）
+    vertical = false,     // 预留：当前未用
+    onActiveChange,       // function(tabName)
+    clickScrollBehavior = 'smooth'
+  } = opts || {};
+  const container = document.getElementById(containerId);
+  const nav = document.querySelector(`.tab-nav[data-tab-group="${group}"]`);
+  if (!container || !nav) return;
+  const tabs = Array.from(nav.querySelectorAll('.tab-nav-item'));
+  if (!tabs.length) return;
+
+  function go(idx, smooth=true){
+    const w = vertical ? container.clientHeight : container.clientWidth;
+    container.scrollTo({ [vertical?'top':'left']: w * idx, behavior: smooth?clickScrollBehavior:'auto' });
+  }
+
+  function activateIdx(idx, smooth=true, fromScroll=false){
+    idx = Math.max(0, Math.min(idx, tabs.length-1));
+    tabs.forEach((t,i)=>t.classList.toggle('active', i===idx));
+    const tabName = tabs[idx]?.dataset.tab;
+    if (!fromScroll) go(idx, smooth);
+    if (persistKey && tabName) {
+      try { localStorage.setItem(persistKey, tabName); } catch(_){}
+    }
+    if (typeof onActiveChange === 'function' && tabName){
+      onActiveChange(tabName);
+    }
+  }
+
+  nav.addEventListener('click', e=>{
+    const item = e.target.closest('.tab-nav-item');
+    if (!item) return;
+    const idx = tabs.indexOf(item);
+    if (idx < 0) return;
+    activateIdx(idx, true, false);
+  });
+
+  // 滚动同步（简易防抖）
+  container.addEventListener('scroll', ()=>{
+    clearTimeout(container._snapTimer);
+    container._snapTimer = setTimeout(()=>{
+      const w = vertical ? (container.clientHeight || 1) : (container.clientWidth || 1);
+      const idx = Math.round( (vertical?container.scrollTop:container.scrollLeft) / w );
+      activateIdx(idx, false, true);
+    }, 80);
+  });
+
+  // 初始索引：优先本地存储（若允许），否则看 HTML active，再回退 0
+  let initIdx = 0;
+  if (persistKey){
+    try {
+      const saved = localStorage.getItem(persistKey);
+      if (saved){
+        const found = tabs.findIndex(t=>t.dataset.tab === saved);
+        if (found >= 0) initIdx = found;
+      }
+    } catch(_){}
+  } else {
+    const activeIdx = tabs.findIndex(t=>t.classList.contains('active'));
+    if (activeIdx >= 0) initIdx = activeIdx;
+  }
+  requestAnimationFrame(()=>activateIdx(initIdx, false, false));
+}
+
 /* ==== P1-7 通用缓存 (内存+TTL) ==== */
 window.__APP.cache = (function(){
   const store = new Map();
@@ -1094,38 +1172,7 @@ function loadRecentLikesIfNeeded(){
    顶部 / 左 / 右三个 Tab 管理（Sidebar 顶部用 Scroll Snap）
    ========================================================= */
 function activateTab(group, tabName, animate = false) {
-  if (group === 'sidebar-top') {
-    const nav = document.querySelector('.tab-nav[data-tab-group="sidebar-top"]');
-    if (nav) {
-      nav.querySelectorAll('.tab-nav-item').forEach(it => {
-        it.classList.toggle('active', it.dataset.tab === tabName);
-      });
-    }
-    if (tabName === 'recent-liked') loadRecentLikesIfNeeded();
-    return;
-  }
-
-  // 新增：left-panel 使用横向滚动（Scroll Snap）
-  if (group === 'left-panel') {
-    const nav = document.querySelector('.tab-nav[data-tab-group="left-panel"]');
-    const container = document.getElementById('left-panel-container');
-    if (!nav || !container) return;
-
-    const items = [...nav.querySelectorAll('.tab-nav-item')];
-    let idx = items.findIndex(i => i.dataset.tab === tabName);
-    if (idx < 0) {
-      idx = 0;
-      tabName = items[0]?.dataset.tab || '';
-    }
-    items.forEach((it, i) => it.classList.toggle('active', i === idx));
-
-    const left = container.clientWidth * idx;
-    if (animate) container.scrollTo({ left, behavior: 'smooth' });
-    else container.scrollLeft = left;
-
-    localStorage.setItem('activeTab_left-panel', tabName);
-    return; // 不再走通用 transform 逻辑
-  }
+  if (group === 'sidebar-top' || group === 'left-panel') return;
 
   // 其余（如 right-panel）沿用原 transform 方案
   const nav = document.querySelector(`.tab-nav[data-tab-group="${group}"]`);
@@ -1154,8 +1201,6 @@ function activateTab(group, tabName, animate = false) {
   }
 
   if (group === 'right-panel') updateRightSubseg(tabName);
-  if (group === 'sidebar-top' && tabName === 'recent-liked') loadRecentLikesIfNeeded();
-  if (group === 'sidebar-top') requestAnimationFrame(() => requestAnimationFrame(syncTopTabsViewportHeight));
 }
 
 document.addEventListener('click',(e)=>{
@@ -2228,31 +2273,6 @@ if (modelSearchInput && searchSuggestions){
 /* =========================================================
    点赞 / 快速按钮操作 / 恢复 / 清空
    ========================================================= */
-
-// === PATCH: 点赞 & 最近点赞 延迟刷新调度 ===
-let recentLikesRefreshTimer = null;
-const RECENT_LIKES_REFRESH_DELAY = 650;   // 可调：合并多次点赞后再刷新列表
-let topRatingsRefreshTimer = null;
-const TOP_RATINGS_REFRESH_DELAY = 800;
-
-// 统一调度最近点赞刷新（仅当最近点赞面板曾经加载过再做刷新）
-function scheduleRecentLikesRefresh() {
-  if (!recentLikesLoaded) return; // 未加载过，不必刷新
-  clearTimeout(recentLikesRefreshTimer);
-  recentLikesRefreshTimer = setTimeout(() => {
-    reloadRecentLikes();
-  }, RECENT_LIKES_REFRESH_DELAY);
-}
-
-// 同理：好评榜（likesTabLoaded 为 true 后才刷新）
-function scheduleTopRatingsRefresh() {
-  if (!likesTabLoaded) return;
-  clearTimeout(topRatingsRefreshTimer);
-  topRatingsRefreshTimer = setTimeout(() => {
-    reloadTopRatings(false);
-  }, TOP_RATINGS_REFRESH_DELAY);
-}
-
 // 批量更新所有出现该 (model_id, condition_id) 的点赞图标
 function updateLikeIcons(modelId, conditionId, isLiked){
   window.__APP.dom.all(`.like-button[data-model-id="${modelId}"][data-condition-id="${conditionId}"]`)
@@ -2264,6 +2284,16 @@ function updateLikeIcons(modelId, conditionId, isLiked){
     });
 }
 
+const RECENT_LIKES_REFRESH_DELAY = 650;
+const TOP_RATINGS_REFRESH_DELAY = 800;
+const scheduleRecentLikesRefresh = (function(){
+  const debounced = createDelayed(()=>{ if (recentLikesLoaded) reloadRecentLikes(); }, RECENT_LIKES_REFRESH_DELAY);
+  return function(){ debounced(); };
+})();
+const scheduleTopRatingsRefresh = (function(){
+  const debounced = createDelayed(()=>{ if (likesTabLoaded) reloadTopRatings(false); }, TOP_RATINGS_REFRESH_DELAY);
+  return function(){ debounced(); };
+})();
 
 document.addEventListener('click', async e=>{
   /* 点赞 / 取消 */
@@ -2670,24 +2700,27 @@ function prepareSidebarMarquee(){
   });
 }
 prepareSidebarMarquee();
-const SIDEBAR_SCROLL_SPEED=60;
-function startSidebarMarquee(row){
-  const container = row.querySelector('.truncate');
-  const inner = row.querySelector('.sidebar-marquee-inner');
+const SIDEBAR_SCROLL_SPEED=60
+function startSingleMarquee(row, containerSel, innerSel, speed){
+  const container = row.querySelector(containerSel);
+  const inner = row.querySelector(innerSel);
   if (!container || !inner) return;
   const delta = inner.scrollWidth - container.clientWidth;
   if (delta > 6){
-    const duration = (delta / SIDEBAR_SCROLL_SPEED).toFixed(2);
-    inner.style.transition=`transform ${duration}s linear`;
-    inner.style.transform=`translateX(-${delta}px)`;
+    const duration = (delta / speed).toFixed(2);
+    inner.style.transition = `transform ${duration}s linear`;
+    inner.style.transform = `translateX(-${delta}px)`;
   }
 }
-function stopSidebarMarquee(row){
-  const inner = row.querySelector('.sidebar-marquee-inner');
+function stopSingleMarquee(row, innerSel){
+  const inner = row.querySelector(innerSel);
   if (!inner) return;
   inner.style.transition='transform .35s ease';
   inner.style.transform='translateX(0)';
 }
+function startSidebarMarquee(row){ startSingleMarquee(row, '.truncate', '.sidebar-marquee-inner', SIDEBAR_SCROLL_SPEED); }
+function stopSidebarMarquee(row){ stopSingleMarquee(row, '.sidebar-marquee-inner'); }
+
 document.addEventListener('mouseenter',(e)=>{
   const row = safeClosest(e.target, '#sidebar .fan-item');
   if (!row) return;
@@ -2713,24 +2746,8 @@ function prepareRecentLikesMarquee(){
 }
 
 const RECENT_LIKES_SCROLL_SPEED = 60; // px/s，与其它区块一致
-
-function startRecentLikesMarquee(row){
-  const container = row.querySelector('.scenario-text');
-  const inner = row.querySelector('.recent-marquee-inner');
-  if (!container || !inner) return;
-  const delta = inner.scrollWidth - container.clientWidth;
-  if (delta > 6){
-    const duration = (delta / RECENT_LIKES_SCROLL_SPEED).toFixed(2);
-    inner.style.transition = `transform ${duration}s linear`;
-    inner.style.transform  = `translateX(-${delta}px)`;
-  }
-}
-function stopRecentLikesMarquee(row){
-  const inner = row.querySelector('.recent-marquee-inner');
-  if (!inner) return;
-  inner.style.transition = 'transform .35s ease';
-  inner.style.transform  = 'translateX(0)';
-}
+function startRecentLikesMarquee(row){ startSingleMarquee(row, '.scenario-text', '.recent-marquee-inner', RECENT_LIKES_SCROLL_SPEED); }
+function stopRecentLikesMarquee(row){ stopSingleMarquee(row, '.recent-marquee-inner'); }
 
 // 委托监听：进入行开始左移，离开行复位
 document.addEventListener('mouseenter', (e)=>{
@@ -3076,117 +3093,20 @@ window.addEventListener('resize', ()=> { if (!isCollapsed) resizeChart(); });
 /* =========================================================
    顶部 Scroll Snap 分页（仅处理存储/回滚）
    ========================================================= */
-   (function initSidebarTopSnap(){
-  const container = document.getElementById('sidebar-top-container');
-  const nav = document.querySelector('.tab-nav[data-tab-group="sidebar-top"]');
-  if (!container || !nav) return;
-
-  const tabs = Array.from(nav.querySelectorAll('.tab-nav-item'));
-
-  function go(idx){
-    const w = container.clientWidth;
-    container.scrollTo({ left: w * idx, behavior: 'smooth' });
-  }
-
-  nav.addEventListener('click', e => {
-    const item = e.target.closest('.tab-nav-item');
-    if (!item) return;
-    const idx = tabs.indexOf(item);
-    if (idx < 0) return;
-    go(idx);
-    tabs.forEach((t,i)=>t.classList.toggle('active', i===idx));
-  });
-
-  container.addEventListener('scroll', () => {
-    clearTimeout(container._snapTimer);
-    container._snapTimer = setTimeout(() => {
-      const w = container.clientWidth || 1;
-      const idx = Math.round(container.scrollLeft / w);
-      tabs.forEach((t,i)=>t.classList.toggle('active', i===idx))
-    }, 80);
-  });
-
-  let idx = tabs.findIndex(t=>t.classList.contains('active'));
-  if (idx < 0) idx = 0;
-  requestAnimationFrame(() => {
-    container.scrollLeft = container.clientWidth * idx;
-    tabs.forEach((t,i)=>t.classList.toggle('active', i===idx));
-  });
-})();
-
-(function initLeftPanelSnap() {
-  const container = document.getElementById('left-panel-container');
-  const nav = document.querySelector('.tab-nav[data-tab-group="left-panel"]');
-  if (!container || !nav) return;
-
-  const tabs = Array.from(nav.querySelectorAll('.tab-nav-item'));
-
-  function go(idx) {
-    const w = container.clientWidth || 1;
-    container.scrollTo({ left: w * idx, behavior: 'smooth' });
-  }
-
-  // 点击页签 -> 滑动到对应页
-  nav.addEventListener('click', e => {
-    const item = e.target.closest('.tab-nav-item');
-    if (!item) return;
-    const idx = tabs.indexOf(item);
-    if (idx < 0) return;
-    go(idx);
-    tabs.forEach((t, i) => t.classList.toggle('active', i === idx));
-    localStorage.setItem('activeTab_left-panel', item.dataset.tab);
-  });
-
-  // 滑动时根据 scrollLeft 同步激活态与记忆
-  container.addEventListener('scroll', () => {
-    clearTimeout(container._snapTimer);
-    container._snapTimer = setTimeout(() => {
-      const w = container.clientWidth || 1;
-      const idx = Math.round(container.scrollLeft / w);
-      tabs.forEach((t, i) => t.classList.toggle('active', i === idx));
-      const activeTab = tabs[idx]?.dataset.tab;
-      if (activeTab) localStorage.setItem('activeTab_left-panel', activeTab);
-    }, 80);
-  });
-
-  // 初始定位到上次的页签
-  const saved = localStorage.getItem('activeTab_left-panel');
-  let idx = 0;
-  if (saved) {
-    const found = tabs.findIndex(t => t.dataset.tab === saved);
-    if (found >= 0) idx = found;
-  }
-  requestAnimationFrame(() => {
-    container.scrollLeft = container.clientWidth * idx;
-    tabs.forEach((t, i) => t.classList.toggle('active', i === idx));
-  });
-})();
-
-(function initTopSnapLazyLoadOnScroll(){
-  const container = document.getElementById('sidebar-top-container');
-  const nav = document.querySelector('.tab-nav[data-tab-group="sidebar-top"]');
-  if (!container || !nav) return;
-
-  const tabs = Array.from(nav.querySelectorAll('.tab-nav-item'));
-  const tabNameByIndex = i => tabs[i]?.dataset.tab;
-  let debounceTimer = null;
-
-  function finalize() {
-    const w = container.clientWidth || 1;
-    const idx = Math.round(container.scrollLeft / w);
-    const tabName = tabNameByIndex(idx);
-    if (tabName === 'recent-liked' && typeof loadRecentLikesIfNeeded === 'function') {
-      loadRecentLikesIfNeeded();
-    }
-  }
-
-  container.addEventListener('scroll', () => {
-    if (debounceTimer) clearTimeout(debounceTimer);
-    debounceTimer = setTimeout(finalize, 90);
-  });
-
-  requestAnimationFrame(() => finalize());
-})();
+ /* 统一 Snap 分页初始化 */
+ initSnapTabScrolling({
+   containerId: 'sidebar-top-container',
+   group: 'sidebar-top',
+   persistKey: null,                 // 不持久化
+   onActiveChange: (tab)=> {
+     if (tab === 'recent-liked') loadRecentLikesIfNeeded();
+   }
+ });
+ initSnapTabScrolling({
+   containerId: 'left-panel-container',
+   group: 'left-panel',
+   persistKey: 'activeTab_left-panel'
+ });
 
 /* ==== P2-8 A11y: 焦点陷阱工具 ==== */
 const a11yFocusTrap = (function(){
