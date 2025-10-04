@@ -294,7 +294,7 @@
     scrollbar-color: var(--border-color) var(--bg-secondary);
   }    
   #bottom-panel { transition:flex-basis .35s ease, height .35s ease; }
-
+  #top-panel .tab-content-container { min-height:0 !important; }
 
   /* 分隔条：上下 1px 细线，避免被相邻内容“吃边”*/
   #sidebar-splitter {
@@ -970,6 +970,48 @@
     }
     .right-panel-card > nav.tab-nav.with-subseg { margin-bottom: 4px; }
     .right-panel-card .rank-content-box { padding-top: 0; }
+  }
+
+  /* ========== 被侧栏挤压（自适应 class）时的“窄屏”布局，与上面 media 块保持一致 ========== */
+  .right-panel-card.rp-narrow > nav.tab-nav.with-subseg {
+    flex-wrap: wrap;
+    row-gap: 8px;
+    column-gap: 10px;
+    align-items: flex-start;
+  }
+  .right-panel-card.rp-narrow > nav.tab-nav.with-subseg .flex-1 {
+    display: none;
+  }
+  .right-panel-card.rp-narrow > nav.tab-nav.with-subseg .tab-nav-item {
+    flex: 1 1 calc(50% - 10px);
+    text-align: center;
+    padding: .55rem .8rem;
+    font-size: 15px;
+  }
+  .right-panel-card.rp-narrow .right-subseg {
+    order: 3;
+    flex: 1 1 100%;
+    width: 100%;
+    display: flex;
+    justify-content: center;
+    margin-top: 2px;
+  }
+  .right-panel-card.rp-narrow .rank-content-box { padding-top: 0; }
+
+  /* ========= 主内容区被压缩时强制竖排（自适应 JS 添加 .force-col） ========= */
+  .force-col {
+    flex-direction: column !important;
+  }
+  .force-col > * {
+    width: 100% !important;
+    max-width: 100% !important;
+    transition:width .25s, flex .25s;
+  }
+  /* 防止原 lg:w-1/3 / lg:w-2/3 在大屏仍然生效 */
+  @media (min-width:1024px){
+    .force-col > * {
+      width: 100% !important;
+    }
   }
 
 /* 最近点赞头部：标题单行，右侧 meta 固定在第一行右侧 */

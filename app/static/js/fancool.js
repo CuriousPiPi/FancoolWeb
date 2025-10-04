@@ -1101,7 +1101,7 @@ function activateTab(group, tabName, animate = false) {
         it.classList.toggle('active', it.dataset.tab === tabName);
       });
     }
-    localStorage.setItem('activeTab_sidebar-top', tabName);
+    /*localStorage.setItem('activeTab_sidebar-top', tabName);*/
     if (tabName === 'recent-liked') loadRecentLikesIfNeeded();
     return;
   }
@@ -1167,11 +1167,12 @@ document.addEventListener('click',(e)=>{
   if (!group) return;
   activateTab(group, item.dataset.tab, true);
 });
+/*
 ['left-panel','right-panel','sidebar-top'].forEach(group=>{
   const saved = localStorage.getItem('activeTab_'+group);
   activateTab(group, saved || document.querySelector(`.tab-nav[data-tab-group="${group}"] .tab-nav-item`)?.dataset.tab || '', false);
 });
-
+*/
 /* ===== 顶部可视高度同步 ===== */
 function computeTopPaneViewportHeight(){
   const scroller = document.querySelector('#top-panel .sidebar-panel-content');
@@ -1718,6 +1719,7 @@ function rebuildSelectedFans(fans){
     requestAnimationFrame(window.applySidebarColors);
     requestAnimationFrame(prepareSidebarMarquee);
     scheduleAdjust();
+    syncQuickActionButtons && syncQuickActionButtons();
     return;
   }
   fans.forEach(f=>{
@@ -1754,6 +1756,7 @@ function rebuildSelectedFans(fans){
   requestAnimationFrame(prepareSidebarMarquee);
   scheduleAdjust();
   reconcileActiveColorIndices();
+  syncQuickActionButtons && syncQuickActionButtons();
 }
 
 function rebuildRemovedFans(list){
@@ -1962,6 +1965,12 @@ function loadLikesIfNeeded(){
   showLoading('rating-refresh','加载好评榜...');
   reloadTopRatings(false).finally(()=>hideLoading('rating-refresh'));
 }
+
+ document.addEventListener('DOMContentLoaded', () => {
+   // 若已经由其它逻辑加载则不会重复；_rtPending / likesTabLoaded 控制幂等
+   reloadTopRatings(false).catch(()=>{});
+ });
+
 
 /* =========================================================
    搜索（缓存 + 后台刷新）
@@ -2523,9 +2532,18 @@ if (fanForm){
       if (newPairs.length === 0){
         hideLoading('op'); showInfo('全部已存在，无新增'); return;
       }
-      if (!ensureCanAdd(newPairs.length)){
-        hideLoading('op');
-        return;
+        // === 新增：更详细的超上限提示（仅按型号批量添加场景） ===
+      const maxLimit = FRONT_MAX_ITEMS;
+      if (maxLimit) {
+        const curr = LocalState.getSelected().length;
+        const planned = newPairs.length;
+        const totalAfter = curr + planned;
+        if (totalAfter > maxLimit) {
+          const needRemove = totalAfter - maxLimit;
+          hideLoading('op');
+          showInfo(`计划新增 ${planned} 组，将超出上限 ${maxLimit} 组。请先移除至少 ${needRemove} 组后再尝试。`);
+          return;
+        }
       }
       const addedSummary = LocalState.addPairs(pairs);
       await logNewPairs(addedSummary.addedDetails);
@@ -2902,6 +2920,51 @@ document.addEventListener('click',(e)=>{
   });
 })();
 
+  /* =========================================================
+     主容器宽度自适应和重排
+     ========================================================= */
+  (function initRightPanelResponsiveWrap(){
+    const card = document.querySelector('.right-panel-card');
+    if (!card || !('ResizeObserver' in window)) return;
+    const APPLY_W = 640; // 小于该宽度时视为“窄”，与 <=600px 媒体查询布局一致
+    const ro = new ResizeObserver(entries=>{
+      for (const entry of entries){
+        const w = entry.contentRect.width;
+        if (w < APPLY_W) {
+          card.classList.add('rp-narrow');
+        } else {
+          card.classList.remove('rp-narrow');
+        }
+      }
+    });
+    ro.observe(card);
+  })();
+
+  (function initMainPanelsAdaptiveStack(){
+  if (!('ResizeObserver' in window)) return;
+  const container = document.getElementById('main-panels');
+  if (!container) return;
+
+  const THRESHOLD = 800; // 触发竖排阈值，可按需调整
+
+  function apply(width){
+    if (width < THRESHOLD) {
+      container.classList.add('force-col');
+    } else {
+      container.classList.remove('force-col');
+    }
+  }
+
+  apply(container.getBoundingClientRect().width);
+
+  const ro = new ResizeObserver(entries=>{
+    for (const entry of entries){
+      apply(entry.contentRect.width);
+    }
+  });
+  ro.observe(container);
+})();
+
 /* =========================================================
    scheduleAdjust (P0-3 节流版)
    ========================================================= */
@@ -2927,6 +2990,7 @@ function scheduleAdjust(){
   rebuildRemovedFans(LocalState.getRecentlyRemoved());
   applySidebarColors();
   refreshChartFromLocal(false);
+  syncQuickActionButtons && syncQuickActionButtons();
 })();
 
 async function primeSelectedLikeStatus(){
@@ -3029,7 +3093,7 @@ window.addEventListener('resize', ()=> { if (!isCollapsed) resizeChart(); });
     if (idx < 0) return;
     go(idx);
     tabs.forEach((t,i)=>t.classList.toggle('active', i===idx));
-    localStorage.setItem('activeTab_sidebar-top', item.dataset.tab);
+    /*localStorage.setItem('activeTab_sidebar-top', item.dataset.tab);*/
   });
 
   container.addEventListener('scroll', () => {
@@ -3041,13 +3105,13 @@ window.addEventListener('resize', ()=> { if (!isCollapsed) resizeChart(); });
     }, 80);
   });
 
-  // 初始定位
+  /*
   const saved = localStorage.getItem('activeTab_sidebar-top');
   let idx = 0;
   if (saved) {
     const found = tabs.findIndex(t => t.dataset.tab === saved);
     if (found >= 0) idx = found;
-  }
+  }*/
   requestAnimationFrame(() => {
     container.scrollLeft = container.clientWidth * idx;
     tabs.forEach((t,i)=>t.classList.toggle('active', i===idx));
