@@ -134,8 +134,14 @@ class FanRepository(BaseRepository):
 
     def get_curves_for_pairs(self, pairs: List[tuple[int,int]]) -> Dict[str, Dict]:
         """
-        返回 { "<model_id>_<condition_id>": { info:{...}, rpm:[], noise_db:[], airflow:[] } }
-        依赖工作曲线数据表（假设已有结构），如果已有同名函数请合并逻辑。
+        返回:
+        {
+          "<mid>_<cid>": {
+             info:{ brand, model, res_type, res_loc, model_id, condition_id },
+             rpm:[...], noise_db:[...], airflow:[...]
+          }, ...
+        }
+        所有数组元素均为 float，无法转换的值跳过该点（保持三列长度一致的前提下只要 rpm 存在）。
         """
         if not pairs:
             return {}
@@ -147,9 +153,11 @@ class FanRepository(BaseRepository):
             in_params.append(f"(model_id=:{km} AND condition_id=:{kc})")
             params[km]=m
             params[kc]=c
-        # 获取元信息
+
+        # 先取元信息
         infos = self.get_infos_by_pairs(pairs)
         info_map = { (int(r['model_id']), int(r['condition_id'])): r for r in infos }
+
         sql = f"""
             SELECT model_id, condition_id, rpm, noise_db, airflow_cfm AS airflow
             FROM general_view
@@ -157,41 +165,65 @@ class FanRepository(BaseRepository):
             ORDER BY model_id, condition_id, rpm
         """
         rows = self.fetch_all(sql, params)
-        bucket={}
+
+        def to_float(v):
+            if v is None: return None
+            try:
+                f = float(v)
+                if f != f:  # NaN
+                    return None
+                return f
+            except Exception:
+                return None
+
+        bucket: Dict[str, Dict] = {}
         for row in rows:
-            k = f"{int(row['model_id'])}_{int(row['condition_id'])}"
-            if k not in bucket:
-                meta = info_map.get((int(row['model_id']), int(row['condition_id'])))
-                if not meta:
-                    continue
-                bucket[k] = dict(
+            mid = int(row['model_id'])
+            cid = int(row['condition_id'])
+            key = f"{mid}_{cid}"
+
+            meta = info_map.get((mid, cid))
+            if not meta:
+                continue
+
+            if key not in bucket:
+                bucket[key] = dict(
                     info=dict(
                         brand=meta['brand_name_zh'],
                         model=meta['model_name'],
                         res_type=meta['resistance_type_zh'],
                         res_loc=meta['resistance_location_zh'],
-                        model_id=int(meta['model_id']),
-                        condition_id=int(meta['condition_id'])
+                        model_id=mid,
+                        condition_id=cid
                     ),
                     rpm=[],
                     noise_db=[],
                     airflow=[]
                 )
-            bucket[k]['rpm'].append(row['rpm'])
-            bucket[k]['noise_db'].append(row['noise_db'])
-            bucket[k]['airflow'].append(row['airflow'])
+
+            r = to_float(row['rpm'])
+            n = to_float(row['noise_db'])
+            a = to_float(row['airflow'])
+
+            # 关键：只有 rpm 是有效数字才加入该点（防止长度错位）
+            if r is None:
+                continue
+            bucket[key]['rpm'].append(r)
+            bucket[key]['noise_db'].append(n if n is not None else None)
+            bucket[key]['airflow'].append(a if a is not None else None)
+
         return bucket
 
     # --- 点赞 / 最近点赞 ---
     def like(self, user_id:str, model_id:int, condition_id:int):
-        sql = """INSERT INTO rate_logs (user_identifier, model_id, condition_id, is_valid)
-                 VALUES (:u,:m,:c,1)
+        sql = """INSERT INTO rate_logs (user_identifier, model_id, condition_id, rate_id, is_valid)
+                 VALUES (:u,:m,:c,1,1)
                  ON DUPLICATE KEY UPDATE is_valid=1, update_date=NOW()"""
         self.exec_write(sql, {'u': user_id, 'm': model_id, 'c': condition_id})
 
     def unlike(self, user_id:str, model_id:int, condition_id:int):
         sql = """UPDATE rate_logs SET is_valid=0, update_date=NOW()
-                 WHERE rate_id=1 AND user_identifier=:u AND model_id=:m AND condition_id=:c"""
+                 WHERE user_identifier=:u AND model_id=:m AND condition_id=:c AND rate_id=1"""
         self.exec_write(sql, {'u': user_id, 'm': model_id, 'c': condition_id})
 
     def get_user_likes_full(self, user_id:str, limit:int|None=None) -> List[Dict]:
@@ -199,7 +231,7 @@ class FanRepository(BaseRepository):
         SELECT user_identifier, model_id, condition_id, brand_name_zh, model_name,
                resistance_type_zh, resistance_location_zh, max_speed, size, thickness
         FROM user_likes_view
-        WHERE rate_id=1 AND user_identifier=:u
+        WHERE user_identifier=:u
         """
         rows = self.fetch_all(sql, {'u': user_id})
         return rows if limit is None else rows[:limit]
@@ -208,29 +240,29 @@ class FanRepository(BaseRepository):
         return [f"{int(r['model_id'])}_{int(r['condition_id'])}" for r in self.get_user_likes_full(user_id)]
     
     def get_like_flags_for_pairs(self, user_id: str, pairs: list[tuple[int,int]]) -> dict[tuple[int,int], int]:
-       """
-       返回 {(model_id, condition_id): 1/0}
-       只标记 is_valid=1, rate_id=1 的点赞
-       """
-       if not user_id or not pairs:
-           return {}
-       conds = []
-       params = {'u': user_id}
-       for i, (m, c) in enumerate(pairs):
-           params[f"m{i}"] = int(m)
-           params[f"c{i}"] = int(c)
-           conds.append(f"(model_id=:m{i} AND condition_id=:c{i})")
-       sql = f"""
-           SELECT model_id, condition_id
-           FROM rate_logs
-           WHERE user_identifier=:u AND is_valid=1 AND rate_id=1
-             AND ({' OR '.join(conds)})
-       """
-       rows = self.fetch_all(sql, params)
-       out = {}
-       for r in rows:
-           out[(int(r['model_id']), int(r['condition_id']))] = 1
-       return out
+        """
+        返回 {(model_id, condition_id): 1/0}
+        只标记 is_valid=1, rate_id=1 的点赞
+        """
+        if not user_id or not pairs:
+            return {}
+        conds = []
+        params = {'u': user_id}
+        for i, (m, c) in enumerate(pairs):
+            params[f"m{i}"] = int(m)
+            params[f"c{i}"] = int(c)
+            conds.append(f"(model_id=:m{i} AND condition_id=:c{i})")
+        sql = f"""
+            SELECT model_id, condition_id
+            FROM rate_logs
+            WHERE user_identifier=:u AND is_valid=1 AND rate_id=1
+              AND ({' OR '.join(conds)})
+        """
+        rows = self.fetch_all(sql, params)
+        out = {}
+        for r in rows:
+            out[(int(r['model_id']), int(r['condition_id']))] = 1
+        return out
 
     # --- 搜索 ---
     def search_fans_by_condition(self, res_type:str, res_loc:str|None,

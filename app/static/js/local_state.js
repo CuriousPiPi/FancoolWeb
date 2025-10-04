@@ -143,45 +143,58 @@
 
   // ============== 曲线数据加载 ==============
   async function fetchCurvesForPairs(pairs){
-    if (!pairs.length) return [];
-    const resp = await fetch('/api/curves_by_pairs', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
+      if (!pairs.length) return [];
+      const payload = {
         user_id: (window.CURRENT_USER_ID || ''),
-        pairs: pairs.map(p => ({ model_id:p.model_id, condition_id:p.condition_id })) 
-        })
-    }).then(r=>r.json());
-    if (!resp.success) throw new Error(resp.error || '曲线接口失败');
-    (resp.series || []).forEach(s => { _curveCache[s.key] = s; });
-    notify('curves', getCurveCache());
-    return resp.series || [];
-  }
+        pairs: pairs.map(p => ({ model_id: p.model_id, condition_id: p.condition_id }))
+      };
+      const resp = await fetch('/api/curves_by_pairs', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body: JSON.stringify(payload)
+      }).then(r=>{
+        if (!r.ok) throw new Error('HTTP '+r.status);
+        return r.json();
+      });
+      if (!resp.success) throw new Error(resp.error || '曲线接口失败');
+      (resp.series || []).forEach(s => {
+        _curveCache[s.key] = {
+          ...s,
+          is_like: s.is_like ? 1 : 0
+        };
+      });
+      notify('curves', getCurveCache());
+      return resp.series || [];
+    }
 
   // ============== 批量添加 ==============
   async function addItems(items){
-    // items: [{model_id, condition_id, brand, model, res_type, res_loc}]
-    if (!Array.isArray(items) || !items.length) return { added: [], skipped: [] };
-    const existingKeys = new Set(_selected.map(p => pairKey(p.model_id, p.condition_id)));
-    const toAdd = [];
-    const newPairs = [];
-    items.forEach(it => {
-      const key = pairKey(it.model_id, it.condition_id);
-      if (!existingKeys.has(key)){
-        toAdd.push({ ...it });
-        existingKeys.add(key);
-        newPairs.push({ model_id: it.model_id, condition_id: it.condition_id });
+      if (!Array.isArray(items) || !items.length) return { added: [], skipped: [] };
+      const existingKeys = new Set(_selected.map(p => pairKey(p.model_id, p.condition_id)));
+      const toAdd = [];
+      const newPairs = [];
+      items.forEach(it => {
+        const key = pairKey(it.model_id, it.condition_id);
+        if (!existingKeys.has(key)){
+          toAdd.push({ ...it });
+          existingKeys.add(key);
+          newPairs.push({ model_id: it.model_id, condition_id: it.condition_id });
+        }
+      });
+      if (toAdd.length){
+        saveSelected(_selected.concat(toAdd));
+        try {
+          await fetchCurvesForPairs(newPairs);
+        } catch (e){
+          // 曲线失败不回滚选中，前端可视层再处理
+          console.warn('fetchCurvesForPairs error', e);
+        }
       }
-    });
-    if (toAdd.length){
-      saveSelected(_selected.concat(toAdd));
-      await fetchCurvesForPairs(newPairs);
+      return {
+        added: toAdd,
+        skipped: items.length - toAdd.length
+      };
     }
-    return {
-      added: toAdd,
-      skipped: items.length - toAdd.length
-    };
-  }
 
   // ============== 移除 ==============
   function removeItem(model_id, condition_id){

@@ -1,5 +1,8 @@
 from flask import Blueprint, request, jsonify, current_app
 from typing import List, Tuple, Dict
+import logging
+
+logging.getLogger().setLevel(logging.INFO)
 
 # 直接使用仓库层（原先 core.py 依赖 state_service 的逻辑全部移除）
 from app.repositories.fan_repository import FanRepository
@@ -29,9 +32,9 @@ def _parse_pairs(raw) -> List[Tuple[int, int]]:
 @bp.route('/api/curves_by_pairs', methods=['POST'])
 def api_curves_by_pairs():
     """
-    无状态曲线数据接口
-    请求体:
+    请求:
       {
+        "user_id": "xxx",        # 可空
         "pairs": [
           {"model_id": 1, "condition_id": 10},
           ...
@@ -51,39 +54,46 @@ def api_curves_by_pairs():
             "condition_id": 10,
             "rpm": [...],
             "noise_db": [...],
-            "airflow": [...]
+            "airflow": [...],
+            "is_like": 0|1
           }, ...
         ]
       }
     """
     try:
         body = request.get_json(force=True) or {}
-        user_id = (body.get('user_id') or '').strip()
+        user_id = (request.cookies.get('uid') or '').strip()
         pairs = _parse_pairs(body.get('pairs'))
+
         if not pairs:
             return jsonify({"success": True, "series": []})
+
         bucket = _repo.get_curves_for_pairs(pairs)
+
         like_map = {}
         if user_id:
             try:
                 like_map = _repo.get_like_flags_for_pairs(user_id, pairs)
             except Exception:
                 like_map = {}
+
         series = []
         for key, pack in bucket.items():
             info = pack["info"]
+            mid = info["model_id"]
+            cid = info["condition_id"]
             series.append({
                 "key": key,
                 "brand": info["brand"],
                 "model": info["model"],
                 "res_type": info["res_type"],
                 "res_loc": info["res_loc"],
-                "model_id": info["model_id"],
-                "condition_id": info["condition_id"],
+                "model_id": mid,
+                "condition_id": cid,
                 "rpm": pack["rpm"],
                 "noise_db": pack["noise_db"],
                 "airflow": pack["airflow"],
-                "is_like": 1 if like_map.get((info["model_id"], info["condition_id"])) else 0
+                "is_like": 1 if like_map.get((mid, cid)) else 0
             })
         return jsonify({"success": True, "series": series})
     except Exception as e:

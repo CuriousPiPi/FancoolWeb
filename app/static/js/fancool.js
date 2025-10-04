@@ -2,23 +2,23 @@
 window.APP_CONFIG = window.APP_CONFIG || { clickCooldownMs: 2000, maxItems: 0 };
 /* ==== 命名空间根 ==== */
 window.__APP = window.__APP || {};
-window.CURRENT_USER_ID = "{{ user_id|default('') }}";
 
 if (typeof LocalState === 'undefined') {
   console.error('LocalState 模块未加载，请确认 local_state.js 已在 fancool.js 之前引入');
 }
 
 function refreshChartFromLocal(){
+  if (typeof LocalState === 'undefined') return;
   const selected = LocalState.getSelected();
   const cache = LocalState.getCurveCache();
   const cfg = LocalState.getConfig ? LocalState.getConfig() : { x_axis:'rpm' };
   const series = [];
   selected.forEach(it=>{
-    const k = LocalState.pairKey(it.model_id, it.condition_id);
-    const cur = cache[k];
+    const key = (LocalState.pairKey || LocalState.keyOf)(it.model_id, it.condition_id);
+    const cur = cache[key];
     if (!cur) return;
     series.push({
-      key: k,
+      key,
       brand: it.brand,
       model: it.model,
       res_type: it.res_type,
@@ -77,16 +77,16 @@ LocalState.on('selected', () => {
   rebuildSelectedSidebar();
   refreshChartFromLocal();
 });
-LocalState.on('curves', () => {
-  const cc = cache || LocalState.getCurveCache();
+LocalState.on('curves', (curveCache) => {
+  const cc = curveCache || LocalState.getCurveCache();
   Object.values(cc).forEach(s => {
     if (s && s.is_like) {
       likedKeysSet.add(`${s.model_id}_${s.condition_id}`);
     }
   });
-  refreshChartFromLocal();
-  // 重新渲染侧栏点赞颜色
   rebuildSelectedSidebar();
+  refreshChartFromLocal();
+  syncAllLikeIcons && syncAllLikeIcons();
 });
 
 /**
@@ -140,7 +140,6 @@ function rebuildSelectedSidebar(){
 }
 
 document.addEventListener('click', async (e)=>{
-  // 添加（统一类 .js-add-pair）
   const addBtn = e.target.closest('.js-add-pair');
   if (addBtn){
     if (needThrottle('add') && !globalThrottle()) return;
@@ -150,7 +149,6 @@ document.addEventListener('click', async (e)=>{
       showError('缺少必要 ID');
       return;
     }
-    // 元信息
     const meta = [{
       model_id: mid,
       condition_id: cid,
@@ -159,57 +157,43 @@ document.addEventListener('click', async (e)=>{
       res_type: addBtn.dataset.resType,
       res_loc: addBtn.dataset.resLoc === '无' ? '' : addBtn.dataset.resLoc
     }];
-    const before = LocalState.getSelected().length;
-    await LocalState.addItems(meta);
-    const after = LocalState.getSelected().length;
-    if (after > before){
-      showSuccess('添加成功');
-      maybeAutoOpenSidebarOnAdd && maybeAutoOpenSidebarOnAdd();
-      rebuildSelectedSidebar();
-      refreshChartFromLocal();
-    } else {
-      showInfo('已存在');
+    try{
+      const before = LocalState.getSelected().length;
+      const res = await (LocalState.addItems ? LocalState.addItems(meta) : LocalState.add(meta));
+      const after = LocalState.getSelected().length;
+      if (res && res.added && res.added.length){
+        showSuccess('添加成功');
+        maybeAutoOpenSidebarOnAdd && maybeAutoOpenSidebarOnAdd();
+      } else if (after > before){
+        showSuccess('添加成功');
+      } else {
+        showInfo('已存在');
+      }
+    }catch(err){
+      showError('添加失败: '+err.message);
     }
     return;
   }
 
-  // 移除（侧栏 X 按钮）
   const rmBtn = e.target.closest('.js-remove-fan');
   if (rmBtn){
     const mid = parseInt(rmBtn.dataset.modelId);
     const cid = parseInt(rmBtn.dataset.conditionId);
-    LocalState.removeItem(mid, cid);
-    showSuccess('已移除');
-    rebuildSelectedSidebar();
-    refreshChartFromLocal();
-    return;
-  }
-
-  // 清空（本地）
-  if (e.target.id === 'clearAllBtnLocal'){
-    if (!LocalState.getSelected().length){
-      showInfo('当前无数据');
-      return;
+    if (Number.isInteger(mid) && Number.isInteger(cid)){
+      (LocalState.removeItem ? LocalState.removeItem(mid, cid) : LocalState.remove(mid, cid));
+      showSuccess('已移除');
     }
-    if (!confirm('确认清空所有已选曲线？')) return;
-    LocalState.clearAll();
-    rebuildSelectedSidebar();
-    refreshChartFromLocal();
-    showSuccess('已清空');
     return;
   }
 
-  // 旧的 js-list-remove（表格里“已在图表”→ 移除）
   const quickRemove = e.target.closest('.js-list-remove');
   if (quickRemove && quickRemove.classList.contains('btn-add')){
     const mid = parseInt(quickRemove.dataset.modelId);
     const cid = parseInt(quickRemove.dataset.conditionId);
     if (Number.isInteger(mid) && Number.isInteger(cid)){
-      LocalState.removeItem(mid, cid);
+      (LocalState.removeItem ? LocalState.removeItem(mid, cid) : LocalState.remove(mid, cid));
       showSuccess('已移除');
-      rebuildSelectedSidebar();
-      refreshChartFromLocal();
-      syncQuickActionButtons();
+      syncQuickActionButtons && syncQuickActionButtons();
     }
     return;
   }
@@ -2193,6 +2177,17 @@ document.addEventListener('click', async e=>{
   }
 });
 
+function syncAllLikeIcons(){
+  document.querySelectorAll('.like-button').forEach(btn=>{
+    const mid = btn.dataset.modelId;
+    const cid = btn.dataset.conditionId;
+    const ic = btn.querySelector('i');
+    if (!ic) return;
+    const liked = likedKeysSet.has(mid+'_'+cid);
+    ic.classList.toggle('text-red-500', liked);
+    ic.classList.toggle('text-gray-400', !liked);
+  });
+}
 
 /* =========================================================
    添加表单提交
