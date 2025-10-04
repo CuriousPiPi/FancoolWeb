@@ -1101,7 +1101,6 @@ function activateTab(group, tabName, animate = false) {
         it.classList.toggle('active', it.dataset.tab === tabName);
       });
     }
-    /*localStorage.setItem('activeTab_sidebar-top', tabName);*/
     if (tabName === 'recent-liked') loadRecentLikesIfNeeded();
     return;
   }
@@ -1167,12 +1166,17 @@ document.addEventListener('click',(e)=>{
   if (!group) return;
   activateTab(group, item.dataset.tab, true);
 });
-/*
-['left-panel','right-panel','sidebar-top'].forEach(group=>{
-  const saved = localStorage.getItem('activeTab_'+group);
-  activateTab(group, saved || document.querySelector(`.tab-nav[data-tab-group="${group}"] .tab-nav-item`)?.dataset.tab || '', false);
-});
-*/
+
+ (function initTabDefaults(){
+   ['left-panel','right-panel'].forEach(group=>{
+     const saved = localStorage.getItem('activeTab_'+group);
+     const fallback = document.querySelector(`.tab-nav[data-tab-group="${group}"] .tab-nav-item`)?.dataset.tab || '';
+     activateTab(group, saved || fallback, false);
+   });
+   const sidebarTopActive = document.querySelector('.tab-nav[data-tab-group="sidebar-top"] .tab-nav-item.active')?.dataset.tab;
+   if (sidebarTopActive) activateTab('sidebar-top', sidebarTopActive, false);
+ })();
+
 /* ===== 顶部可视高度同步 ===== */
 function computeTopPaneViewportHeight(){
   const scroller = document.querySelector('#top-panel .sidebar-panel-content');
@@ -2572,9 +2576,7 @@ if (fanForm){
 /* =========================================================
    选中数量与上限判断
    ========================================================= */
-function currentSelectedCount(){
-  return selectedKeySet.size || parseInt(selectedCountEl?.textContent||'0',10);
-}
+
 function ensureCanAdd(plannedNewCount = 1){
   // plannedNewCount: 计划新增（去重后）数量
   if (!FRONT_MAX_ITEMS) return true;
@@ -3041,7 +3043,7 @@ async function primeSelectedLikeStatus(){
 }
 
 /* 初始右侧子段显示状态 */
-updateRightSubseg(localStorage.getItem('activeTab_right-panel') || 'top-queries');
+updateRightSubseg('top-queries');
 
 (function autoScrollToChartOnShare(){
   try {
@@ -3093,7 +3095,6 @@ window.addEventListener('resize', ()=> { if (!isCollapsed) resizeChart(); });
     if (idx < 0) return;
     go(idx);
     tabs.forEach((t,i)=>t.classList.toggle('active', i===idx));
-    /*localStorage.setItem('activeTab_sidebar-top', item.dataset.tab);*/
   });
 
   container.addEventListener('scroll', () => {
@@ -3101,17 +3102,12 @@ window.addEventListener('resize', ()=> { if (!isCollapsed) resizeChart(); });
     container._snapTimer = setTimeout(() => {
       const w = container.clientWidth || 1;
       const idx = Math.round(container.scrollLeft / w);
-      tabs.forEach((t,i)=>t.classList.toggle('active', i===idx));
+      tabs.forEach((t,i)=>t.classList.toggle('active', i===idx))
     }, 80);
   });
 
-  /*
-  const saved = localStorage.getItem('activeTab_sidebar-top');
-  let idx = 0;
-  if (saved) {
-    const found = tabs.findIndex(t => t.dataset.tab === saved);
-    if (found >= 0) idx = found;
-  }*/
+  let idx = tabs.findIndex(t=>t.classList.contains('active'));
+  if (idx < 0) idx = 0;
   requestAnimationFrame(() => {
     container.scrollLeft = container.clientWidth * idx;
     tabs.forEach((t,i)=>t.classList.toggle('active', i===idx));
