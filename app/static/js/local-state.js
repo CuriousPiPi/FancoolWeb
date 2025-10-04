@@ -1,31 +1,137 @@
 /* local-state.js
- * 统一维护前端本地状态（选中条目 / 最近移除 / 颜色索引 / X轴模式 / UI偏好等）
- * 所有后端不再记录的“会话性状态”都迁移到这里。
+ * 统一维护前端本地状态（选中条目 / 最近移除 / 颜色索引 / X轴模式 / UI偏好 / 点赞集合+指纹 等）。
+ * 所有后端不再记录的“会话/缓存性状态”都迁移到这里。
  */
 (function(global){
   const LS_KEYS = {
-    SELECTED: 'fc_selected_v1',            // Array<SelectedItem>
-    REMOVED: 'fc_removed_v1',              // Array<RemovedItem>
-    COLOR_MAP: 'colorIndexMap_v1',         // { key -> colorIndex }
-    X_AXIS: 'x_axis_type',                 // 'rpm' | 'noise_db'
-    PREFS: 'fc_prefs_v1'                   // 预留综合偏好 (legendHidden, pointers, etc.)
+    SELECTED: 'fc_selected_v1',
+    REMOVED:  'fc_removed_v1',
+    COLOR_MAP:'colorIndexMap_v1',
+    X_AXIS:   'x_axis_type',
+    PREFS:    'fc_prefs_v1',
+    LIKES:    'fc_likes_v1'        // 新增：点赞集合持久化（数组）
   };
-  
+
   const MAX_RECENTLY_REMOVED = 50;
   const DEFAULT_X_AXIS = 'rpm';
 
   function readJSON(k,f){ try{ const r=localStorage.getItem(k); return r?JSON.parse(r):f; }catch{return f;} }
   function writeJSON(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch{} }
 
-  // 内部缓存（加载后常驻内存）
+  // ========== 旧有本地状态 ==========
   let selected = readJSON(LS_KEYS.SELECTED, []);
-  let removed  = readJSON(LS_KEYS.REMOVED, []);
+  let removed  = readJSON(LS_KEYS.REMOVED,  []);
   let colorMap = readJSON(LS_KEYS.COLOR_MAP, {});
-  let prefs    = readJSON(LS_KEYS.PREFS, { legend_hidden_keys:[], pointer:{rpm:null, noise_db:null}});
-  let xAxisType= (()=>{
+  let prefs    = readJSON(LS_KEYS.PREFS,    { legend_hidden_keys:[], pointer:{rpm:null, noise_db:null}});
+  let xAxisType= (()=> {
     const v=(localStorage.getItem(LS_KEYS.X_AXIS)||'').trim();
     return (v==='rpm'||v==='noise_db'||v==='noise')?(v==='noise'?'noise_db':v):DEFAULT_X_AXIS;
   })();
+
+  // ========== 点赞集合 + 指纹（LIKES FP MIGRATION） ==========
+  // 说明：
+  // 1. 持久化结构：localStorage.fc_likes_v1 = ["mid_cid", ...]
+  // 2. localFP 每次增删/全量替换后重算
+  // 3. serverFP 来自服务端 fp 字段（不持久化；也可持久化但目前无必要）
+  // 4. compare()：用于第二阶段判断是否完整；本阶段只是提供调试与统一入口
+  const persistedLikeArray = readJSON(LS_KEYS.LIKES, []);
+  let _liked = new Set(Array.isArray(persistedLikeArray)?persistedLikeArray:[]);
+  let _serverFP = null;
+  let _serverFPTs = 0;
+
+  const LIKESET_DEFAULT_MAX_AGE_MS = 5 * 60 * 1000; // 5 分钟（供 needRefresh 默认）
+  const FNV_OFFSET_64 = 0xcbf29ce484222325n;
+  const FNV_PRIME_64  = 0x100000001b3n;
+  const MASK_64       = 0xffffffffffffffffn;
+
+  let _localFP = { c:0, x:'0000000000000000', s:'0000000000000000' };
+
+  function _hash64(str){
+    let h = FNV_OFFSET_64;
+    for (let i=0;i<str.length;i++){
+      h ^= BigInt(str.charCodeAt(i));
+      h = (h * FNV_PRIME_64) & MASK_64;
+    }
+    return h;
+  }
+  function _recomputeLocalFP(){
+    let c=0; let xor_v=0n; let sum_v=0n;
+    _liked.forEach(k=>{
+      const hv = _hash64(k);
+      xor_v ^= hv;
+      sum_v = (sum_v + hv) & MASK_64;
+      c++;
+    });
+    _localFP = {
+      c,
+      x: xor_v.toString(16).padStart(16,'0'),
+      s: sum_v.toString(16).padStart(16,'0')
+    };
+  }
+  _recomputeLocalFP();
+
+  function _persistLikes(){
+    // 存储为数组，空间估算：1000条 * ~10~14字节 ≈ <15KB，远低于 10MB
+    writeJSON(LS_KEYS.LIKES, Array.from(_liked));
+  }
+
+const likesAPI = {
+  setAll(arr){
+    _liked = new Set(Array.isArray(arr)?arr:[]);
+    _recomputeLocalFP();
+    _persistLikes();
+  },
+  add(key){
+    if (!_liked.has(key)){
+      _liked.add(key);
+      _recomputeLocalFP();
+      _persistLikes();
+    }
+  },
+  remove(key){
+    if (_liked.has(key)){
+      _liked.delete(key);
+      _recomputeLocalFP();
+      _persistLikes();
+    }
+  },
+  has: (key)=>_liked.has(key),
+  getAll: ()=>Array.from(_liked),
+  getCount: ()=>_liked.size,
+  getLocalFP: ()=>({ ..._localFP }),
+  getServerFP: ()=>(_serverFP ? { ..._serverFP } : null),
+  updateServerFP(fp){
+    if (fp && typeof fp === 'object' && 'c' in fp && 'x' in fp && 's' in fp){
+      _serverFP = { c:fp.c, x:fp.x, s:fp.s };
+      _serverFPTs = Date.now();
+    }
+  },
+  compare(){
+    const equal = !!(_serverFP &&
+      _serverFP.c === _localFP.c &&
+      _serverFP.x === _localFP.x &&
+      _serverFP.s === _localFP.s);
+    return { equal, server: _serverFP ? { ..._serverFP } : null, local:{ ..._localFP } };
+  },
+  logCompare(){
+    try { console.debug('[LocalState.likes] fingerprint compare:', likesAPI.compare()); } catch(_){}
+  },
+  // === 新增：同步状态与刷新判定 ===
+  isSynced(){
+    const c = likesAPI.compare();
+    return c.equal;
+  },
+  needRefresh(maxAgeMs = LIKESET_DEFAULT_MAX_AGE_MS){
+    if (!_serverFP) return true;
+    if (!likesAPI.isSynced()) return true;
+    if (!_serverFPTs) return true;
+    return (Date.now() - _serverFPTs) > maxAgeMs;
+  },
+  shouldSkipStatus(maxAgeMs = LIKESET_DEFAULT_MAX_AGE_MS){
+    // “完全一致 + 未超过时限”即可跳过 /api/like_status
+    return likesAPI.isSynced() && !likesAPI.needRefresh(maxAgeMs);
+  }
+};
 
   // ---- 颜色索引分配 ----
   function ensureColorIndex(key){
@@ -45,7 +151,6 @@
     }
   }
   function reassignUniqueIndices(){
-    // 确保唯一，占位稳定：仅在缺失或冲突时重排
     const counts = new Map();
     selected.forEach(it=>{
       const idx = colorMap[it.key];
@@ -75,17 +180,14 @@
   function makeKey(m,c){ return `${Number(m)}_${Number(c)}`; }
   function persistAll(){
     writeJSON(LS_KEYS.SELECTED, selected);
-    writeJSON(LS_KEYS.REMOVED, removed);
+    writeJSON(LS_KEYS.REMOVED,  removed);
     writeJSON(LS_KEYS.COLOR_MAP, colorMap);
-    writeJSON(LS_KEYS.PREFS, prefs);
+    writeJSON(LS_KEYS.PREFS,    prefs);
     try{ localStorage.setItem(LS_KEYS.X_AXIS, xAxisType);}catch{}
   }
-  function persistColorMap(){
-    writeJSON(LS_KEYS.COLOR_MAP, colorMap);
-  }
-  function persistPrefs(){
-    writeJSON(LS_KEYS.PREFS, prefs);
-  }
+  function persistColorMap(){ writeJSON(LS_KEYS.COLOR_MAP, colorMap); }
+  function persistPrefs(){ writeJSON(LS_KEYS.PREFS, prefs); }
+
   function dispatchChange(reason, extra){
     window.dispatchEvent(new CustomEvent('localstate:changed',{
       detail:Object.assign({reason, selectedCount:selected.length}, extra||{})
@@ -95,21 +197,13 @@
 
   // ---- 最近移除去重逻辑 ----
   function addOrUpdateRemoved(info){
-    /**
-     * info: { key, model_id, condition_id, brand, model, res_type, res_loc }
-     * 若 key 已存在：更新 removed_time 到当前并移到最前；不存在则作为新条目加到最前。
-     * 最终 removed 按 removed_time DESC（我们直接通过操作数组保证）。
-     */
     if (!info || !info.key) return;
     const now = new Date().toISOString();
     const idx = removed.findIndex(r=>r.key===info.key);
     if (idx >= 0){
-      // 更新时间并移到最前
       const rec = removed[idx];
       rec.removed_time = now;
-      // 删除原位置
       removed.splice(idx,1);
-      // 插到最前
       removed.unshift(rec);
     } else {
       removed.unshift({
@@ -128,12 +222,9 @@
     }
   }
 
-  // ---- 核心 API ----
+  // ---- 核心公开 API（原有） ----
   function getSelected(){ return selected.slice(); }
-  function getRecentlyRemoved(){
-    // removed 已按时间倒序维护；返回拷贝
-    return removed.slice();
-  }
+  function getRecentlyRemoved(){ return removed.slice(); }
   function getXAxisType(){ return xAxisType; }
   function setXAxisType(t){
     const norm = (t==='noise')?'noise_db':t;
@@ -177,7 +268,7 @@
     if (idx<0) return false;
     const info=selected[idx];
     selected.splice(idx,1);
-    addOrUpdateRemoved(info); // 使用去重逻辑
+    addOrUpdateRemoved(info);
     persistAll();
     dispatchChange('remove',{ key });
     return true;
@@ -193,7 +284,6 @@
       return { ok:false, reason:'already_selected' };
     }
     const rec=removed[rIdx];
-    // 去掉（彻底移出 removed）
     removed.splice(rIdx,1);
     selected.push({
       key: rec.key,
@@ -212,7 +302,6 @@
 
   function clearAll(){
     const snapshot = selected.slice();
-    // 逐个放入 removed（去重+最新时间）
     snapshot.forEach(it=> addOrUpdateRemoved(it));
     selected=[];
     persistAll();
@@ -228,22 +317,15 @@
     }
   }
 
-  function getColorIndexMap(){
-    return Object.assign({}, colorMap);
-  }
-
-  function getSelectionPairs(){
-    return selected.map(s=>({ model_id: s.model_id, condition_id: s.condition_id }));
-  }
+  function getColorIndexMap(){ return Object.assign({}, colorMap); }
+  function getSelectionPairs(){ return selected.map(s=>({ model_id: s.model_id, condition_id: s.condition_id })); }
 
   function setLegendHiddenKeys(keys){
     prefs.legend_hidden_keys = Array.isArray(keys)?keys.slice():[];
     persistPrefs();
     dispatchChange('legend_hidden',{});
   }
-  function getLegendHiddenKeys(){
-    return (prefs.legend_hidden_keys||[]).slice();
-  }
+  function getLegendHiddenKeys(){ return (prefs.legend_hidden_keys||[]).slice(); }
 
   function setPointer(mode, value){
     if (!prefs.pointer) prefs.pointer = { rpm:null, noise_db:null };
@@ -257,10 +339,10 @@
     return prefs.pointer[mode];
   }
 
-  // 统一导出
-  const api={
+  // ---- 导出 ----
+  const api = {
     getSelected: ()=>selected.slice(),
-    getRecentlyRemoved: ()=> removed.slice(),  // 已经按时间排序
+    getRecentlyRemoved: ()=> removed.slice(),
     addPairs,
     removeKey,
     restoreKey,
@@ -275,7 +357,8 @@
     setPointer:(mode,v)=>setPointer(mode,v),
     getPointer:(mode)=>getPointer(mode),
     getSelectionPairs:()=> getSelectionPairs(),
-    persistAll
+    persistAll,
+    likes: likesAPI            // 新增点赞与指纹子模块
   };
 
   global.LocalState = api;

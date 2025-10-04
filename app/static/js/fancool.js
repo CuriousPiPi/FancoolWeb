@@ -2,7 +2,27 @@
 window.APP_CONFIG = window.APP_CONFIG || { clickCooldownMs: 2000, maxItems: 0 };
 /* ==== 命名空间根 ==== */
 window.__APP = window.__APP || {};
-const FRONT_MAX_ITEMS = 8;
+
+/* 在最前阶段就写入上限标签，避免闪烁 */
+(function initMaxItemsLabel(){
+  function apply(){
+    const el = document.getElementById('maxItemsLabel');
+    if (el && !el.dataset._inited){
+      el.textContent = FRONT_MAX_ITEMS;
+      el.dataset._inited = '1';
+    }
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', apply, { once:true });
+  } else {
+    apply();
+  }
+})();
+
+const FRONT_MAX_ITEMS = (window.APP_CONFIG && window.APP_CONFIG.maxItems) || 8;
+const LIKESET_VERIFY_MAX_AGE_MS = 5 * 60 * 1000;      // 5 分钟指纹过期
+const PERIODIC_VERIFY_INTERVAL_MS = 3 * 60 * 1000;    // 3 分钟后台触发一次检查
+const LIKE_FULL_FETCH_THRESHOLD = 2;
 
 (async function fetchAppConfig(){
   try {
@@ -360,6 +380,29 @@ const $ = (s) => window.__APP.dom.one(s);
 /* =========================================================
    工具函数 / Toast / Throttle / HTML 转义
    ========================================================= */
+// === (新增) 后台周期校验函数 ===
+function verifyLikeFingerprintIfStale(){
+  try {
+    if (!LocalState.likes.needRefresh(LIKESET_VERIFY_MAX_AGE_MS)) return;
+    // 发送空 pairs（后端会返回 fp + 空 liked_keys）
+    fetch('/api/like_status', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ pairs: [] })
+    })
+      .then(r=>r.json())
+      .then(d=>{
+        if (d && d.success && d.fp){
+          LocalState.likes.updateServerFP(d.fp);
+          LocalState.likes.logCompare();
+        }
+      })
+      .catch(()=>{});
+  } catch(_){}
+}
+// 初始化定时器（放在 DOMContentLoaded 后也可，这里直接放即可）
+setInterval(verifyLikeFingerprintIfStale, PERIODIC_VERIFY_INTERVAL_MS);
+
 const toastContainerId = 'toastContainer';
 function ensureToastRoot() {
   let r = document.getElementById(toastContainerId);
@@ -606,7 +649,6 @@ function assignUniqueIndicesForSelection(fans){
 
 const chartFrame = $('#chartFrame');
 let lastChartData = null;
-let likedKeysSet = new Set();
 let frontXAxisType = 'rpm';
 
 const chartMessageQueue = [];
@@ -845,6 +887,43 @@ function updateRightSubseg(activeTab){
 let recentLikesLoaded = false;
 let recentLikesLoadedCount = 0;
 const recentLikesListEl = $('#recentLikesList');
+
+function needFullLikeKeyFetch() {
+  const fp = LocalState.likes.getServerFP && LocalState.likes.getServerFP();
+  if (!fp) return false;                               // 没有服务端指纹无法判断
+  if (fp.c >= LIKE_FULL_FETCH_THRESHOLD) return false; // 点赞数达到或超过阈值不走全量
+  // 触发条件：指纹不同步 或 shouldSkipStatus 为 false（即不能跳过校验）
+  if (!LocalState.likes.isSynced() || !LocalState.likes.shouldSkipStatus(LIKESET_VERIFY_MAX_AGE_MS)) {
+    return true;
+  }
+  return false;
+}
+
+/* 新增：全量获取用户所有点赞键（仅 keys + 指纹） */
+function fetchAllLikeKeys(){
+  if (fetchAllLikeKeys._pending) return;
+  fetchAllLikeKeys._pending = true;
+  fetch('/api/like_keys')
+    .then(r=>r.json())
+    .then(d=>{
+      if (!d.success) return;
+      if (Array.isArray(d.like_keys)){
+        LocalState.likes.setAll(d.like_keys);
+        // 刷新所有已出现的点赞图标
+        d.like_keys.forEach(k=>{
+          const [m,c] = k.split('_');
+          if (m && c) updateLikeIcons(m, c, true);
+        });
+      }
+      if (d.fp){
+        LocalState.likes.updateServerFP(d.fp);
+      }
+      LocalState.likes.logCompare();
+    })
+    .catch(()=>{})
+    .finally(()=>{ fetchAllLikeKeys._pending = false; });
+}
+
 function rebuildRecentLikes(list){
   const wrap = recentLikesListEl;
   if (!wrap) return;
@@ -909,35 +988,16 @@ function rebuildRecentLikes(list){
   requestAnimationFrame(prepareRecentLikesMarquee);
 }
 
-/*
-async function ensureLikeStatus(modelId, conditionId){
-  const keyStr = `${modelId}_${conditionId}`;
-  if (likedKeysSet.has(keyStr)) return true;
-
-  try {
-    const resp = await fetch('/api/like_status', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ pairs: [{ model_id: Number(modelId), condition_id: Number(conditionId) }] })
-    });
-    if (!resp.ok) return false;
-    const data = await resp.json();
-    if (!data.success) return false;
-    const list = Array.isArray(data.liked_keys) ? data.liked_keys : [];
-    if (list.includes(keyStr)) {
-      likedKeysSet.add(keyStr);
-      updateLikeIcons(modelId, conditionId, true);
-      return true;
-    }
-  } catch(_){}
-  return false;
-}*/
-
 async function ensureLikeStatusBatch(pairs){
   if (!Array.isArray(pairs) || !pairs.length) return;
 
+  // 小集合短路：若满足条件直接全量
+  if (needFullLikeKeyFetch()) {
+    fetchAllLikeKeys();
+    return;
+  }
+
   const limit = window.APP_CONFIG.recentLikesLimit || 50;
-  // 去重后过滤已知
   const need = [];
   const seen = new Set();
   for (const p of pairs){
@@ -946,15 +1006,24 @@ async function ensureLikeStatusBatch(pairs){
     const cid = Number(p.condition_id);
     if (!Number.isInteger(mid) || !Number.isInteger(cid)) continue;
     const key = `${mid}_${cid}`;
-    if (likedKeysSet.has(key)) continue;
+    if (LocalState.likes.has(key)) continue;
     if (seen.has(key)) continue;
     seen.add(key);
     need.push({ model_id: mid, condition_id: cid });
   }
   if (!need.length) return;
 
-  // 如果最近点赞列表已加载且数量 < limit，说明没有截断 -> 所有 need 都视为未点赞，直接返回
   if (recentLikesLoaded && recentLikesLoadedCount < limit) {
+    return;
+  }
+
+  if (LocalState.likes.shouldSkipStatus(LIKESET_VERIFY_MAX_AGE_MS)) {
+    return;
+  }
+
+  // 再次检查（防止在等待中指纹刚被其他操作刷新）
+  if (needFullLikeKeyFetch()) {
+    fetchAllLikeKeys();
     return;
   }
 
@@ -967,22 +1036,19 @@ async function ensureLikeStatusBatch(pairs){
     if (!resp.ok) return;
     const data = await resp.json();
     if (!data.success) return;
+
+    if (data.fp) { LocalState.likes.updateServerFP(data.fp); LocalState.likes.logCompare(); }
+
     const list = Array.isArray(data.liked_keys) ? data.liked_keys : [];
     if (!list.length) return;
-    for (const k of list){
-      if (!likedKeysSet.has(k)){
-        likedKeysSet.add(k);
+    list.forEach(k=>{
+      if (!LocalState.likes.has(k)){
+        LocalState.likes.add(k);
         const [m,c] = k.split('_');
         if (m && c) updateLikeIcons(m, c, true);
       }
-    }
+    });
   } catch(_) {}
-}
-
-// 向后兼容单条（可逐步删除）
-async function ensureLikeStatus(modelId, conditionId){
-  await ensureLikeStatusBatch([{ model_id: Number(modelId), condition_id: Number(conditionId) }]);
-  return likedKeysSet.has(`${modelId}_${conditionId}`);
 }
 
 function reloadRecentLikes(){
@@ -991,16 +1057,17 @@ function reloadRecentLikes(){
     .then(r=>r.json())
     .then(d=>{
       if (!d.success){ showError('获取最近点赞失败'); return; }
+      if (d.fp){ LocalState.likes.updateServerFP(d.fp); LocalState.likes.logCompare(); }
       const list = d.data || [];
       recentLikesLoaded = true;
       recentLikesLoadedCount = list.length;
 
       let changed = false;
       list.forEach(it=>{
-        if (it.model_id != null && it.condition_id != null) {
+        if (it.model_id != null && it.condition_id != null){
           const k = `${it.model_id}_${it.condition_id}`;
-          if (!likedKeysSet.has(k)){
-            likedKeysSet.add(k);
+          if (!LocalState.likes.has(k)){
+            LocalState.likes.add(k);
             changed = true;
           }
         }
@@ -1655,7 +1722,7 @@ function rebuildSelectedFans(fans){
   }
   fans.forEach(f=>{
     const keyStr = `${f.model_id}_${f.condition_id}`;
-    const isLiked = likedKeysSet.has(keyStr);
+    const isLiked = LocalState.likes.has(keyStr);
     const div = document.createElement('div');
     div.className='fan-item flex items-center justify-between p-3 border border-gray-200 rounded-md';
     div.dataset.fanKey = f.key;
@@ -1729,50 +1796,46 @@ let __shareAxisApplied = false;
 
 function processState(data, successMsg){
   const prevSelectedKeys = new Set(selectedKeySet);
-
   if (data.error_message){
-     hideLoading('op'); showError(data.error_message); 
-    } else { 
-    if (successMsg) showSuccess(successMsg); 
-      hideLoading('op'); 
-      autoCloseOpLoading();  
-    }
+    hideLoading('op'); showError(data.error_message);
+  } else {
+    if (successMsg) showSuccess(successMsg);
+    hideLoading('op'); autoCloseOpLoading();
+  }
 
   let pendingChart = null;
   if ('chart_data' in data) pendingChart = data.chart_data;
 
-  /* 新增：如果 share_meta 在本次返回，优先处理颜色索引映射 */
-  if ('share_meta' in data && data.share_meta) {
+  if ('share_meta' in data && data.share_meta){
     applyServerStatePatchColorIndices(data.share_meta);
   }
 
-  if ('like_keys' in data) likedKeysSet = new Set(data.like_keys||[]);
+  if ('like_keys' in data){
+    LocalState.likes.setAll(data.like_keys || []);
+  }
+  if (data.fp){ LocalState.likes.updateServerFP(data.fp); LocalState.likes.logCompare(); }
 
-  if ('selected_fans' in data) {
-    const incomingKeys = new Set((data.selected_fans || []).map(f => f.key).filter(Boolean));
+  if ('selected_fans' in data){
+    const incomingKeys = new Set((data.selected_fans||[]).map(f=>f.key).filter(Boolean));
     try {
-      prevSelectedKeys.forEach(k => { if (!incomingKeys.has(k)) releaseColorIndexForKey(k); });
-    } catch(_) {}
-
-    /* 不再在这里“重排”颜色，如果分享携带了 color_indices 则已经写入 colorIndexMap。
-       若需要确保唯一仍可调用 assignUniqueIndicesForSelection */
+      prevSelectedKeys.forEach(k=>{ if (!incomingKeys.has(k)) releaseColorIndexForKey(k); });
+    }catch(_){}
     assignUniqueIndicesForSelection(data.selected_fans);
     rebuildSelectedFans(data.selected_fans);
   }
+  if ('recently_removed_fans' in data){
+    rebuildRemovedFans(data.recently_removed_fans);
+  }
 
-  if ('recently_removed_fans' in data) rebuildRemovedFans(data.recently_removed_fans);
-
-  if ('share_meta' in data && data.share_meta) {
+  if ('share_meta' in data && data.share_meta){
     pendingShareMeta = {
       show_raw_curves: data.share_meta.show_raw_curves,
       show_fit_curves: data.share_meta.show_fit_curves,
       pointer_x_rpm: data.share_meta.pointer_x_rpm,
       pointer_x_noise_db: data.share_meta.pointer_x_noise_db,
       legend_hidden_keys: data.share_meta.legend_hidden_keys
-      // color_indices 已提前处理
     };
-
-    if (__isShareLoaded && !__shareAxisApplied && data.chart_data && data.chart_data.x_axis_type) {
+    if (__isShareLoaded && !__shareAxisApplied && data.chart_data && data.chart_data.x_axis_type){
       frontXAxisType = (data.chart_data.x_axis_type === 'noise') ? 'noise_db' : data.chart_data.x_axis_type;
       try { localStorage.setItem('x_axis_type', frontXAxisType); } catch(_){}
       __shareAxisApplied = true;
@@ -1780,7 +1843,6 @@ function processState(data, successMsg){
   }
 
   if (pendingChart) postChartData(pendingChart);
-
   syncQuickActionButtons();
   wrapMarqueeForExistingTables();
   scheduleAdjust();
@@ -2193,63 +2255,58 @@ function updateLikeIcons(modelId, conditionId, isLiked){
 document.addEventListener('click', async e=>{
   /* 点赞 / 取消 */
   const likeBtn = safeClosest(e.target, '.like-button');
-  if (likeBtn) {
+  if (likeBtn){
     if (needThrottle('like') && !globalThrottle()) return;
     const modelId = likeBtn.dataset.modelId;
     const conditionId = likeBtn.dataset.conditionId;
     if (!modelId || !conditionId) { showError('缺少点赞标识'); return; }
 
-    // 当前状态（按钮内 <i>）
     const icon = likeBtn.querySelector('i');
     const prevLiked = icon.classList.contains('text-red-500');
     const nextLiked = !prevLiked;
     const url = prevLiked ? '/api/unlike' : '/api/like';
-
-    // 1) 乐观更新（立刻切换 UI ）
-    updateLikeIcons(modelId, conditionId, nextLiked);
-
-    // 2) 维护本地 likedKeysSet（乐观）
     const keyStr = `${modelId}_${conditionId}`;
-    if (nextLiked) likedKeysSet.add(keyStr); else likedKeysSet.delete(keyStr);
 
-    // 3) 不再 showLoading（避免频繁 Toast），改为轻量提示（可选）
-    // showInfo(nextLiked ? '点赞中...' : '取消点赞中...');
+    // 乐观更新
+    updateLikeIcons(modelId, conditionId, nextLiked);
+    if (nextLiked) LocalState.likes.add(keyStr); else LocalState.likes.remove(keyStr);
 
-    // 4) 发请求
     fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ model_id: modelId, condition_id: conditionId })
     })
-      .then(r => r.json())
-      .then(d => {
-        if (!d.success) {
-          // 回滚 UI
+      .then(r=>r.json())
+      .then(d=>{
+        if (!d.success){
+          // 回滚
             updateLikeIcons(modelId, conditionId, prevLiked);
-            if (prevLiked) likedKeysSet.add(keyStr); else likedKeysSet.delete(keyStr);
-            showError(d.error_message || '点赞操作失败');
-            return;
+          if (prevLiked) LocalState.likes.add(keyStr); else LocalState.likes.remove(keyStr);
+          showError(d.error || d.error_message || '操作失败');
+          return;
         }
-        // 以服务端回传为准更新 likedKeysSet（防止并发误差）
-        if (Array.isArray(d.like_keys)) {
-          likedKeysSet = new Set(d.like_keys);
-          // 统一再刷新一次对应图标（确保与服务器最终一致）
-          const finalLiked = likedKeysSet.has(keyStr);
-          updateLikeIcons(modelId, conditionId, finalLiked);
+        // 服务端仅返回 fp
+        if (d.fp){
+          LocalState.likes.updateServerFP(d.fp);
+          LocalState.likes.logCompare();
+        }
+        // 再次保证本单键图标与本地集合一致
+        const finalLiked = LocalState.likes.has(keyStr);
+        updateLikeIcons(modelId, conditionId, finalLiked);
+
+        // 若当前指纹仍不同步 或 shouldSkipStatus() 为 false，且点赞总数较小 => 全量 keys 同步
+        if (d.fp && ( (!LocalState.likes.isSynced()) || !LocalState.likes.shouldSkipStatus() ) && d.fp.c < LIKE_FULL_FETCH_THRESHOLD){
+          fetchAllLikeKeys();
         }
 
-        // 不再立即 reloadRecentLikes / reloadTopRatings
-        // 改为延迟合并刷新（如果对应面板已加载过）
         scheduleRecentLikesRefresh();
         scheduleTopRatingsRefresh();
-
         showSuccess(prevLiked ? '已取消点赞' : '已点赞');
       })
-      .catch(err => {
-        // 网络错误回滚
+      .catch(err=>{
         updateLikeIcons(modelId, conditionId, prevLiked);
-        if (prevLiked) likedKeysSet.add(keyStr); else likedKeysSet.delete(keyStr);
-        showError('网络错误：' + err.message);
+        if (prevLiked) LocalState.likes.add(keyStr); else LocalState.likes.remove(keyStr);
+        showError('网络错误：'+err.message);
       });
 
     return;
@@ -2876,8 +2933,28 @@ async function primeSelectedLikeStatus(){
   try {
     const pairs = LocalState.getSelectionPairs();
     if (!pairs.length) return;
-    const need = pairs.filter(p => !likedKeysSet.has(`${p.model_id}_${p.condition_id}`));
-    if (!need.length) return;
+
+    // 若需小集合全量
+    if (needFullLikeKeyFetch()) {
+      fetchAllLikeKeys();
+      return;
+    }
+
+    if (LocalState.likes.shouldSkipStatus(LIKESET_VERIFY_MAX_AGE_MS)) {
+      return;
+    }
+
+    const need = pairs.filter(p => !LocalState.likes.has(`${p.model_id}_${p.condition_id}`));
+    if (!need.length && LocalState.likes.isSynced()) {
+      return;
+    }
+
+    // 再次防抖判断
+    if (needFullLikeKeyFetch()) {
+      fetchAllLikeKeys();
+      return;
+    }
+
     const resp = await fetch('/api/like_status', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -2886,11 +2963,12 @@ async function primeSelectedLikeStatus(){
     if (!resp.ok) return;
     const data = await resp.json();
     if (!data.success) return;
+    if (data.fp){ LocalState.likes.updateServerFP(data.fp); LocalState.likes.logCompare(); }
     const list = data.liked_keys || [];
     if (!Array.isArray(list) || !list.length) return;
     list.forEach(k=>{
-      if (!likedKeysSet.has(k)){
-        likedKeysSet.add(k);
+      if (!LocalState.likes.has(k)){
+        LocalState.likes.add(k);
         const [m,c] = k.split('_');
         if (m && c) updateLikeIcons(m, c, true);
       }

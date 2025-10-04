@@ -9,20 +9,19 @@
       const theme = savedTheme || (systemPrefersDark ? 'dark' : 'light');
       document.documentElement.setAttribute('data-theme', theme);
     })();
+    /* 可在此修改全局最大曲线条目数（默认 8） */
+    window.APP_CONFIG = window.APP_CONFIG || {};
+    window.APP_CONFIG.maxItems = 8;
   </script>
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
   <title>风扇库</title>
 
-  <!-- Tailwind -->
   <script src="https://cdn.tailwindcss.com"></script>
-
-  <!-- Font Awesome 6.5.2 -->
   <link rel="stylesheet"
         href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.2/css/all.min.css"
         integrity="sha512-SnH5WK+bZxgPHs44uWIX+LLJAJ9/2PkPKZ5QiAj6Ta86w+fsb2TkcmfRyVX3pBnMFcV7oQPJkl9QevSCWr3W6A=="
         crossorigin="anonymous" referrerpolicy="no-referrer">
-
   <link rel="stylesheet" href="{{ url_for('static', filename='css/fancool.css') }}">
 </head>
 <body class="bg-gray-50 min-h-screen">
@@ -30,7 +29,7 @@
 
   <!-- 左上角浮动侧栏按钮 -->
   <button id="sidebar-toggle" class="sidebar-fab-toggle" aria-label="展开侧栏" title="展开/收起侧栏">
-  <span class="icon-sidebar" aria-hidden="true"></span>
+    <span class="icon-sidebar" aria-hidden="true"></span>
   </button>
 
   <!-- Sidebar -->
@@ -53,29 +52,7 @@
             <!-- 最近移除 -->
             <div class="tab-pane" id="recent-removed-pane">
               <div id="recentlyRemovedList" class="space-y-2">
-                {% if session.recently_removed_fans and session.recently_removed_fans|length > 0 %}
-                  {% set recently_removed_list = session.recently_removed_fans.items()|list %}
-                  {% set recently_removed_sorted = recently_removed_list|sort(attribute='1.removed_time', reverse=true) %}
-                  {% for key, fan_data in recently_removed_sorted %}
-                  <div class="fan-item flex items-center justify-between p-3 border border-gray-200 rounded-md" data-fan-key="{{ key }}">
-                    <div class="truncate">
-                      <span class="font-medium">{{ fan_data.info.brand }} {{ fan_data.info.model }}</span> - 
-                      <span class="text-gray-600 text-sm">
-                        {% if fan_data.info.res_loc %}
-                          {{ fan_data.info.res_type }}({{ fan_data.info.res_loc }})
-                        {% else %}
-                          {{ fan_data.info.res_type }}
-                        {% endif %}
-                      </span>
-                    </div>
-                    <button class="restore-icon text-lg js-restore-fan tooltip-btn" data-fan-key="{{ key }}" title="恢复至图表">
-                      <i class="fa-solid fa-rotate-left"></i>
-                    </button>
-                  </div>
-                  {% endfor %}
-                {% else %}
-                  <p class="text-gray-500 text-center py-6 empty-removed">暂无最近移除的风扇</p>
-                {% endif %}
+                <p class="text-gray-500 text-center py-6 empty-removed">暂无最近移除的风扇</p>
               </div>
             </div>
             <!-- 最近点赞 -->
@@ -91,16 +68,12 @@
     </div>
 
     <div id="sidebar-splitter">
-      <!-- 轨道：把手两侧的“条状实体”，中间留空 -->
       <svg class="splitter-rails" width="100%" height="12px" viewBox="0 0 100 12" preserveAspectRatio="none" aria-hidden="true">
-        <!-- 上：左段 / 右段 -->
-        <line id="sr-top-left"    x1="0" y1="0.5" x2="0" y2="0.5" stroke="var(--border-color)" stroke-width="1" vector-effect="non-scaling-stroke"></line>
-        <line id="sr-top-right"   x1="0" y1="0.5" x2="0" y2="0.5" stroke="var(--border-color)" stroke-width="1" vector-effect="non-scaling-stroke"></line>
-        <!-- 下：左段 / 右段 -->
-        <line id="sr-bot-left"    x1="0" y1="11.5" x2="0" y2="11.5" stroke="var(--border-color)" stroke-width="1" vector-effect="non-scaling-stroke"></line>
-        <line id="sr-bot-right"   x1="0" y1="11.5" x2="0" y2="11.5" stroke="var(--border-color)" stroke-width="1" vector-effect="non-scaling-stroke"></line>
+        <line id="sr-top-left"  x1="0" y1="0.5"  x2="0" y2="0.5"  stroke="var(--border-color)" stroke-width="1" vector-effect="non-scaling-stroke"></line>
+        <line id="sr-top-right" x1="0" y1="0.5"  x2="0" y2="0.5"  stroke="var(--border-color)" stroke-width="1" vector-effect="non-scaling-stroke"></line>
+        <line id="sr-bot-left"  x1="0" y1="11.5" x2="0" y2="11.5" stroke="var(--border-color)" stroke-width="1" vector-effect="non-scaling-stroke"></line>
+        <line id="sr-bot-right" x1="0" y1="11.5" x2="0" y2="11.5" stroke="var(--border-color)" stroke-width="1" vector-effect="non-scaling-stroke"></line>
       </svg>
-    
       <button id="sidebar-splitter-handle"
               class="splitter-handle"
               type="button"
@@ -112,41 +85,14 @@
     <!-- 下半区 -->
     <div id="bottom-panel" class="sidebar-panel">
       <div class="sidebar-panel-content">
-        <h2 class="text-lg font-semibold mb-3">已添加的数据 (<span id="selectedCount">{{ selected_fans|length }}</span>/{{ max_chart_items }})</h2>
+        <h2 class="text-lg font-semibold mb-3">
+          已添加的数据 (<span id="selectedCount">0</span>/<span id="maxItemsLabel"></span>)
+        </h2>
         <div id="selectedFansList" class="space-y-2">
-          {% for fan in selected_fans %}
-          <div class="fan-item flex items-center justify-between p-3 border border-gray-200 rounded-md"
-               data-fan-key="{{ fan.key }}"
-               data-map="{{ fan.brand }}||{{ fan.model }}||{{ fan.res_type }}||{{ fan.res_loc or '无' }}">
-            <div class="flex items-center min-w-0">
-              <div class="w-3 h-3 rounded-full mr-2 flex-shrink-0 js-color-dot"></div>
-              <div class="truncate">
-                <span class="font-medium">{{ fan.brand }} {{ fan.model }}</span> - 
-                <span class="text-gray-600 text-sm">
-                  {% if fan.res_loc %}
-                    {{ fan.res_type }}({{ fan.res_loc }})
-                  {% else %}
-                    {{ fan.res_type }}
-                  {% endif %}
-                </span>
-              </div>
-            </div>
-            <div class="flex items-center flex-shrink-0">
-              <button class="like-button mr-3"
-                      data-fan-key="{{ fan.key }}"
-                      data-model-id="{{ fan.model_id }}"
-                      data-condition-id="{{ fan.condition_id }}">
-                <i class="fa-solid fa-thumbs-up text-gray-400"></i>
-              </button>
-              <button class="remove-icon text-lg js-remove-fan" data-fan-key="{{ fan.key }}" title="移除">
-                <i class="fa-solid fa-xmark"></i>
-              </button>
-            </div>
-          </div>
-          {% endfor %}
+          <!-- 初始为空，JS 构建 -->
         </div>
       </div>
-      <div class="sticky-footer text-center {% if not selected_fans %}hidden{% endif %}" id="clearAllContainer">
+      <div class="sticky-footer text-center hidden" id="clearAllContainer">
         <button id="clearAllBtn" class="w-full ui-btn secondary" style="font-size: 16px;">
           移除所有
         </button>
@@ -178,144 +124,147 @@
             <div class="tab-nav-item active" data-tab="add-by-model">按型号添加</div>
             <div class="tab-nav-item" data-tab="filter-by-scenario">按负载场景筛选</div>
           </nav>
-            <div class="tab-content-container" id="left-panel-container">
-              <div class="tab-content-wrapper" id="left-panel-wrapper">
-                <!-- 按型号添加 -->
-                <div class="tab-pane" id="add-by-model-pane">
-                  <form id="fanForm" class="form-grid">
-                    <div class="form-row">
-                      <label class="block text-sm font-medium">输入型号直接搜索</label>
-                      <div class="relative">
-                        <input type="text" id="modelSearchInput" class="ui-field w-full border-gray-300" placeholder="输入型号关键字...">
-                        <div id="searchSuggestions" class="absolute z-10 hidden bg-white border border-gray-300 rounded-md shadow-lg max-h-60 overflow-y-auto w-full mt-1"></div>
-                      </div>
-                    </div>
+          <div class="tab-content-container" id="left-panel-container">
+            <div class="tab-content-wrapper" id="left-panel-wrapper">
 
-                    <div class="form-row">
-                      <label class="block text-sm font-medium">品牌</label>
-                      <select id="brandSelect" class="ui-field w-full border-gray-300">
-                        <option value="">-- 选择品牌 --</option>
-                        {% for brand in brands %}
-                          <option value="{{ brand }}">{{ brand }}</option>
-                        {% endfor %}
-                      </select>
+              <!-- 按型号添加 -->
+              <div class="tab-pane" id="add-by-model-pane">
+                <form id="fanForm" class="form-grid">
+                  <div class="form-row">
+                    <label class="block text-sm font-medium">输入型号直接搜索</label>
+                    <div class="relative">
+                      <input type="text" id="modelSearchInput" class="ui-field w-full border-gray-300" placeholder="输入型号关键字...">
+                      <div id="searchSuggestions" class="absolute z-10 hidden bg-white border border-gray-300 rounded-md shadow-lg max-h-60 overflow-y-auto w-full mt-1"></div>
                     </div>
+                  </div>
 
-                    <div class="form-row">
-                      <label class="block text-sm font-medium">型号</label>
-                      <select id="modelSelect" class="ui-field w-full border-gray-300" disabled>
-                        <option value="">-- 选择型号 --</option>
-                      </select>
-                      <div id="modelLoading" class="text-sm text-gray-500 mt-1 hidden">加载中...</div>
-                    </div>
+                  <div class="form-row">
+                    <label class="block text-sm font-medium">品牌</label>
+                    <select id="brandSelect" class="ui-field w-full border-gray-300">
+                      <option value="">-- 选择品牌 --</option>
+                      {% for brand in brands %}
+                        <option value="{{ brand }}">{{ brand }}</option>
+                      {% endfor %}
+                    </select>
+                  </div>
 
-                    <div class="form-row">
-                      <label class="block text-sm font-medium">风阻类型</label>
-                      <select id="resTypeSelect" class="ui-field w-full border-gray-300" disabled>
-                        <option value="">-- 选择风阻类型 --</option>
-                        <option value="全部">全部</option>
-                      </select>
-                      <div id="resTypeLoading" class="text-sm text-gray-500 mt-1 hidden">加载中...</div>
-                    </div>
+                  <div class="form-row">
+                    <label class="block text-sm font-medium">型号</label>
+                    <select id="modelSelect" class="ui-field w-full border-gray-300" disabled>
+                      <option value="">-- 选择型号 --</option>
+                    </select>
+                    <div id="modelLoading" class="text-sm text-gray-500 mt-1 hidden">加载中...</div>
+                  </div>
 
-                    <div class="form-row">
-                      <label class="block text-sm font-medium">风阻位置</label>
-                      <select id="resLocSelect" class="ui-field w-full border-gray-300" disabled>
-                        <option value="">-- 选择风阻位置 --</option>
-                        <option value="全部">全部</option>
-                      </select>
-                      <div id="resLocLoading" class="text-sm text-gray-500 mt-1 hidden">加载中...</div>
-                    </div>
+                  <div class="form-row">
+                    <label class="block text-sm font-medium">风阻类型</label>
+                    <select id="resTypeSelect" class="ui-field w-full border-gray-300" disabled>
+                      <option value="">-- 选择风阻类型 --</option>
+                      <option value="全部">全部</option>
+                    </select>
+                    <div id="resTypeLoading" class="text-sm text-gray-500 mt-1 hidden">加载中...</div>
+                  </div>
 
-                    <div class="form-row">
-                      <button type="submit" class="w-full ui-btn success" style="font-size: 16px;">添加至图表</button>
-                    </div>
-                  </form>
-                </div>
+                  <div class="form-row">
+                    <label class="block text-sm font-medium">风阻位置</label>
+                    <select id="resLocSelect" class="ui-field w-full border-gray-300" disabled>
+                      <option value="">-- 选择风阻位置 --</option>
+                      <option value="全部">全部</option>
+                    </select>
+                    <div id="resLocLoading" class="text-sm text-gray-500 mt-1 hidden">加载中...</div>
+                  </div>
 
-                <!-- 按负载场景筛选 -->
-                <div class="tab-pane" id="filter-by-scenario-pane">
-                  <form id="searchForm" class="form-grid">
-                    <div class="form-row">
-                      <label class="block text-sm font-medium">风阻类型</label>
-                      <select name="search_res_type" class="ui-field w-full border-gray-300">
-                        <option value="">-- 选择风阻类型 --</option>
-                        {% for type in all_res_types %}
-                          <option value="{{ type }}" {% if search_res_type == type %}selected{% endif %}>{{ type }}</option>
-                        {% endfor %}
-                      </select>
-                    </div>
-
-                    <div class="form-row">
-                      <label class="block text-sm font-medium">风阻位置</label>
-                      <select name="search_res_loc" class="ui-field w-full border-gray-300">
-                        <option value="">-- 选择风阻位置 --</option>
-                        {% for loc in all_res_locs %}
-                          <option value="{{ loc }}" {% if search_res_loc == loc %}selected{% endif %}>{{ loc }}</option>
-                        {% endfor %}
-                      </select>
-                    </div>
-
-                    <div class="form-row">
-                      <label class="block text-sm font-medium">尺寸(mm)</label>
-                      <select name="size_filter" class="ui-field w-full border-gray-300">
-                        {% for size in size_options %}
-                          <option value="{{ size }}" {% if size_filter == size %}selected{% endif %}>{{ size }}{% if size != "不限" %}{% endif %}</option>
-                        {% endfor %}
-                      </select>
-                    </div>
-
-                    <div class="form-row">
-                      <label class="block text-sm font-medium">风扇厚度(mm)</label>
-                      <div class="flex items-center gap-3">
-                        <input type="number" name="thickness_min" value="{{ thickness_min }}" min="1" max="99" class="ui-field w-1/2 border-gray-300" required>
-                        <span class="text-gray-600">-</span>
-                        <input type="number" name="thickness_max" value="{{ thickness_max }}" min="1" max="99" class="ui-field w-1/2 border-gray-300" required>
-                      </div>
-                    </div>
-
-                    <div class="form-row">
-                      <div class="grid grid-cols-2 gap-3">
-                        <div>
-                          <label class="block text-sm font-medium flex items-center">
-                            限制条件
-                            <button
-                              type="button"
-                              class="ml-1 cursor-help text-gray-400 hover:text-gray-600 focus:outline-none"
-                              data-tooltip="限制条件指在设定的转速或噪音限制下取最佳测试成绩。如：限制转速3000RPM，则意为取3000及以下转速最高风量。选择“无(全速)”将在搜索结果中显示风扇全速运行时的风量数据。"
-                              aria-label="限制条件说明"
-                            >
-                              <i class="fa-solid fa-circle-info text-xs"></i>
-                            </button>
-                          </label>
-                          <select name="sort_by" id="sortBySelect" class="ui-field w-full border-gray-300">
-                            <option value="none" {% if sort_by == 'none' %}selected{% endif %}>无(全速)</option>
-                            <option value="rpm" {% if sort_by == 'rpm' %}selected{% endif %}>转速(RPM)</option>
-                            <option value="noise" {% if sort_by == 'noise' %}selected{% endif %}>噪音(dB)</option>
-                          </select>
-                        </div>
-                        <div>
-                          <label class="block text-sm font-medium">限制值</label>
-                           <input type="number" inputmode="numeric" step="1" min="1" max="9999" name="sort_value" id="sortValueInput" value="{{ sort_value }}" class="ui-field w-full border-gray-300" {% if sort_by == 'none' %}disabled{% endif %}>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div class="form-row">
-                      <button type="submit" class="w-full ui-btn" style="font-size: 16px;">搜索风扇</button>
-                    </div>
-                  </form>
-                </div>
+                  <div class="form-row">
+                    <button type="submit" class="w-full ui-btn success" style="font-size: 16px;">添加至图表</button>
+                  </div>
+                </form>
               </div>
+
+              <!-- 按负载场景筛选 -->
+              <div class="tab-pane" id="filter-by-scenario-pane">
+                <form id="searchForm" class="form-grid">
+                  <div class="form-row">
+                    <label class="block text-sm font-medium">风阻类型</label>
+                    <select name="search_res_type" class="ui-field w-full border-gray-300">
+                      <option value="">-- 选择风阻类型 --</option>
+                      {% for type in all_res_types %}
+                        <option value="{{ type }}">{{ type }}</option>
+                      {% endfor %}
+                    </select>
+                  </div>
+
+                  <div class="form-row">
+                    <label class="block text-sm font-medium">风阻位置</label>
+                    <select name="search_res_loc" class="ui-field w-full border-gray-300">
+                      <option value="">-- 选择风阻位置 --</option>
+                      {% for loc in all_res_locs %}
+                        <option value="{{ loc }}">{{ loc }}</option>
+                      {% endfor %}
+                    </select>
+                  </div>
+
+                  <div class="form-row">
+                    <label class="block text-sm font-medium">尺寸(mm)</label>
+                    <select name="size_filter" class="ui-field w-full border-gray-300">
+                      {% for size in size_options %}
+                        <option value="{{ size }}">{{ size }}</option>
+                      {% endfor %}
+                    </select>
+                  </div>
+
+                  <div class="form-row">
+                    <label class="block text-sm font-medium">风扇厚度(mm)</label>
+                    <div class="flex items-center gap-3">
+                      <input type="number" name="thickness_min" value="25" min="1" max="99" class="ui-field w-1/2 border-gray-300" required>
+                      <span class="text-gray-600">-</span>
+                      <input type="number" name="thickness_max" value="50" min="1" max="99" class="ui-field w-1/2 border-gray-300" required>
+                    </div>
+                  </div>
+
+                  <div class="form-row">
+                    <div class="grid grid-cols-2 gap-3">
+                      <div>
+                        <label class="block text-sm font-medium flex items-center">
+                          限制条件
+                          <button
+                            type="button"
+                            class="ml-1 cursor-help text-gray-400 hover:text-gray-600 focus:outline-none"
+                            data-tooltip="限制条件指在设定的转速或噪音限制下取最佳测试成绩。如：限制转速3000RPM，则意为取3000及以下转速最高风量。选择“无(全速)”将在搜索结果中显示风扇全速运行时的风量数据。"
+                            aria-label="限制条件说明">
+                            <i class="fa-solid fa-circle-info text-xs"></i>
+                          </button>
+                        </label>
+                        <select name="sort_by" id="sortBySelect" class="ui-field w-full border-gray-300">
+                          <option value="none" selected>无(全速)</option>
+                          <option value="rpm">转速(RPM)</option>
+                          <option value="noise">噪音(dB)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label class="block text-sm font-medium">限制值</label>
+                        <input type="number" inputmode="numeric" step="1" min="1" max="9999"
+                               name="sort_value" id="sortValueInput"
+                               class="ui-field w-full border-gray-300" disabled>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div class="form-row">
+                    <button type="submit" class="w-full ui-btn" style="font-size: 16px;">搜索风扇</button>
+                  </div>
+                </form>
+              </div>
+
             </div>
+          </div>
         </div>
 
         <!-- 右侧排行榜 / 搜索结果 -->
         <div class="bg-white rounded-xl shadow-md p-6 lg:w-2/3 right-panel-card relative">
-          <div id="query-count-display" 
-               style="position: absolute; top: 0px; right: 0; z-index: 10;
-                      font-size: 12px; color: #666; background: rgba(255, 255, 255, 0);
-                      padding: 2px 8px; ">
+          <div id="query-count-display"
+               style="position: absolute; top: 0; right: 0; z-index: 10;
+                      font-size: 12px; color: #666; background: rgba(255,255,255,0);
+                      padding: 2px 8px;">
             已执行查询<span id="query-count">0</span>次
           </div>
           <nav class="tab-nav with-subseg" data-tab-group="right-panel">
@@ -326,7 +275,6 @@
           </nav>
           <div class="tab-content-container">
             <div class="tab-content-wrapper" id="right-panel-wrapper">
-
               <!-- 热门查询 -->
               <div class="tab-pane" id="top-queries-pane">
                 <div class="mb-3">
@@ -354,43 +302,43 @@
                         </thead>
                         <tbody>
                         {% for query in top_queries %}
-                        <tr class="hover:bg-gray-50">
-                          <td class="rank-cell">
-                            {% if loop.index == 1 %}
-                              <i class="fa-solid fa-medal gold text-2xl"></i>
-                            {% elif loop.index == 2 %}
-                              <i class="fa-solid fa-medal silver text-2xl"></i>
-                            {% elif loop.index == 3 %}
-                              <i class="fa-solid fa-medal bronze text-2xl"></i>
-                            {% else %}
-                              <span class="font-medium">{{ loop.index }}</span>
-                            {% endif %}
-                          </td>
-                          <td>{{ query.brand_name_zh }}</td>
-                          <td>{{ query.model_name }} ({{ query.max_speed }} RPM)</td>
-                          <td>{{ query.size }}x{{ query.thickness }}</td>
-                          <td>
-                            {% if query.resistance_location_zh %}
-                              {{ query.resistance_type_zh }}({{ query.resistance_location_zh }})
-                            {% else %}
-                              {{ query.resistance_type_zh }}
-                            {% endif %}
-                          </td>
-                          <td class="text-blue-600 font-medium">{{ query.query_count }}</td>
-                          <td>
-                            <button class="btn-add js-ranking-add tooltip-btn"
-                                    title="添加到图表"
-                                    data-add-type="ranking"
-                                    data-brand="{{ query.brand_name_zh }}"
-                                    data-model="{{ query.model_name }}"
-                                    data-res-type="{{ query.resistance_type_zh }}"
-                                    data-res-loc="{{ query.resistance_location_zh or '无' }}"
-                                    data-model-id="{{ query.model_id }}"
-                                    data-condition-id="{{ query.condition_id }}">   
-                              <i class="fa-solid fa-plus"></i>
-                            </button>
-                          </td>
-                        </tr>
+                          <tr class="hover:bg-gray-50">
+                            <td class="rank-cell">
+                              {% if loop.index == 1 %}
+                                <i class="fa-solid fa-medal gold text-2xl"></i>
+                              {% elif loop.index == 2 %}
+                                <i class="fa-solid fa-medal silver text-2xl"></i>
+                              {% elif loop.index == 3 %}
+                                <i class="fa-solid fa-medal bronze text-2xl"></i>
+                              {% else %}
+                                <span class="font-medium">{{ loop.index }}</span>
+                              {% endif %}
+                            </td>
+                            <td>{{ query.brand_name_zh }}</td>
+                            <td>{{ query.model_name }} ({{ query.max_speed }} RPM)</td>
+                            <td>{{ query.size }}x{{ query.thickness }}</td>
+                            <td>
+                              {% if query.resistance_location_zh %}
+                                {{ query.resistance_type_zh }}({{ query.resistance_location_zh }})
+                              {% else %}
+                                {{ query.resistance_type_zh }}
+                              {% endif %}
+                            </td>
+                            <td class="text-blue-600 font-medium">{{ query.query_count }}</td>
+                            <td>
+                              <button class="btn-add js-ranking-add tooltip-btn"
+                                      title="添加到图表"
+                                      data-add-type="ranking"
+                                      data-brand="{{ query.brand_name_zh }}"
+                                      data-model="{{ query.model_name }}"
+                                      data-res-type="{{ query.resistance_type_zh }}"
+                                      data-res-loc="{{ query.resistance_location_zh or '无' }}"
+                                      data-model-id="{{ query.model_id }}"
+                                      data-condition-id="{{ query.condition_id }}">
+                                <i class="fa-solid fa-plus"></i>
+                              </button>
+                            </td>
+                          </tr>
                         {% endfor %}
                         </tbody>
                       </table>
@@ -485,13 +433,15 @@
       <!-- 图表 -->
       <div class="chart-container bg-white rounded-xl shadow-md p-6 relative" id="chart-settings">
         <div id="chartRoot">
-          <iframe id="chartFrame" src="/static/echarts-render.html" allow="fullscreen" allowfullscreen style="width:100%;height:100%;border:0;"></iframe>
+          <iframe id="chartFrame" src="/static/echarts-render.html"
+                  allow="fullscreen" allowfullscreen
+                  style="width:100%;height:100%;border:0;"></iframe>
         </div>
       </div>
     </div>
   </main>
 
-<script src="{{ url_for('static', filename='js/local-state.js') }}"></script>
-<script src="{{ url_for('static', filename='js/fancool.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/local-state.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/fancool.js') }}"></script>
 </body>
 </html>
