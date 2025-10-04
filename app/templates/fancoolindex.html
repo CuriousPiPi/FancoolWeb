@@ -381,12 +381,12 @@
                             <button class="btn-add js-ranking-add tooltip-btn"
                                     title="添加到图表"
                                     data-add-type="ranking"
-                                    data-model-id="{{ query.model_id }}"
-                                    data-condition-id="{{ query.condition_id }}"
                                     data-brand="{{ query.brand_name_zh }}"
                                     data-model="{{ query.model_name }}"
                                     data-res-type="{{ query.resistance_type_zh }}"
-                                    data-res-loc="{{ query.resistance_location_zh or '无' }}">
+                                    data-res-loc="{{ query.resistance_location_zh or '无' }}"
+                                    data-model-id="{{ query.model_id }}"
+                                    data-condition-id="{{ query.condition_id }}">   
                               <i class="fa-solid fa-plus"></i>
                             </button>
                           </td>
@@ -491,17 +491,7 @@
     </div>
   </main>
 
-  <script>
-  /* =========================================================
-   全局配置（后端注入）
-   ========================================================= */
-window.APP_CONFIG = {
-  clickCooldownMs: {{ click_cooldown_ms|default(2000) }},
-  maxItems: {{ max_chart_items }}
-};
-</script>
-<script src="{{ url_for('static', filename='js/debug_panel.js') }}"></script>
-<script src="{{ url_for('static', filename='js/local_state.js') }}"></script>
+<script src="{{ url_for('static', filename='js/local-state.js') }}"></script>
 <script src="{{ url_for('static', filename='js/fancool.js') }}"></script>
 </body>
 </html>
