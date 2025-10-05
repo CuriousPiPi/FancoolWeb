@@ -40,23 +40,23 @@
     </div>
 
     <!-- 上半区 -->
-    <div id="top-panel" class="sidebar-panel">
-      <div class="sidebar-panel-content">
-        <nav class="tab-nav" data-tab-group="sidebar-top">
-          <div class="tab-nav-item active" data-tab="recent-removed">最近移除</div>
-          <div class="tab-nav-item" data-tab="recent-liked">最近点赞</div>
+    <div id="top-panel" class="fc-sidebar-panel">
+      <div class="fc-sidebar-panel__content">
+        <nav class="fc-tabs" data-tab-group="sidebar-top">
+          <div class="fc-tabs__item active" data-tab="recent-removed">最近移除</div>
+          <div class="fc-tabs__item" data-tab="recent-liked">最近点赞</div>
         </nav>
 
-        <div class="tab-content-container" id="sidebar-top-container">
-          <div class="tab-content-wrapper" id="sidebar-top-wrapper" aria-live="polite">
+        <div class="fc-tab-container" id="sidebar-top-container">
+          <div class="fc-tab-wrapper" id="sidebar-top-wrapper" aria-live="polite">
             <!-- 最近移除 -->
-            <div class="tab-pane" id="recent-removed-pane">
+            <div class="fc-tab-pane" id="recent-removed-pane">
               <div id="recentlyRemovedList" class="space-y-2">
                 <p class="text-gray-500 text-center py-6 empty-removed">暂无最近移除的风扇</p>
               </div>
             </div>
             <!-- 最近点赞 -->
-            <div class="tab-pane" id="recent-liked-pane">
+            <div class="fc-tab-pane" id="recent-liked-pane">
               <div id="recentLikesList" class="space-y-2">
                 <p class="text-gray-500 text-center py-6">首次打开该页签时加载...</p>
               </div>
@@ -75,7 +75,7 @@
         <line id="sr-bot-right" x1="0" y1="11.5" x2="0" y2="11.5" stroke="var(--border-color)" stroke-width="1" vector-effect="non-scaling-stroke"></line>
       </svg>
       <button id="sidebar-splitter-handle"
-              class="splitter-handle"
+              class="fc-splitter-handle"
               type="button"
               role="separator"
               aria-orientation="horizontal"
@@ -83,8 +83,8 @@
     </div>
 
     <!-- 下半区 -->
-    <div id="bottom-panel" class="sidebar-panel">
-      <div class="sidebar-panel-content">
+    <div id="bottom-panel" class="fc-sidebar-panel">
+      <div class="fc-sidebar-panel__content">
         <h2 class="text-lg font-semibold mb-3">
           已添加的数据 (<span id="selectedCount">0</span>/<span id="maxItemsLabel"></span>)
         </h2>
@@ -92,8 +92,8 @@
           <!-- 初始为空，JS 构建 -->
         </div>
       </div>
-      <div class="sticky-footer text-center hidden" id="clearAllContainer">
-        <button id="clearAllBtn" class="w-full ui-btn secondary" style="font-size: 16px;">
+      <div class="fc-sticky-footer text-center hidden" id="clearAllContainer">
+        <button id="clearAllBtn" class="w-full fc-btn fc-btn--danger" style="font-size: 16px;">
           移除所有
         </button>
       </div>
@@ -109,38 +109,38 @@
       </header>
 
       <div style="position: fixed; top: 20px; right: 100px; z-index: 1000;">
-        <a href="javascript:void(0)" class="info-source-btn bg-white text-gray-700 hover:text-blue-600 p-2 rounded-full shadow-md border border-gray-200 flex items-center justify-center" title="数据来源与说明(待开发)">
+        <a href="javascript:void(0)" class="fc-info-btn bg-white text-gray-700 hover:text-blue-600 p-2 rounded-full shadow-md border border-gray-200 flex items-center justify-center" title="数据来源与说明(待开发)">
           <i class="fa-solid fa-circle-info text-lg"></i>
         </a>
       </div>
-      <div class="theme-toggle" id="themeToggle" title="切换深浅色">
+      <div class="fc-theme-toggle" id="themeToggle" title="切换深浅色">
         <i class="fa-solid fa-moon" id="themeIcon"></i>
       </div>
 
       <div id="main-panels" class="flex flex-col lg:flex-row gap-6 mb-8">
         <!-- 左侧添加 / 搜索区域 -->
         <div class="bg-white rounded-xl shadow-md p-6 lg:w-1/3">
-          <nav class="tab-nav" data-tab-group="left-panel">
-            <div class="tab-nav-item active" data-tab="add-by-model">按型号添加</div>
-            <div class="tab-nav-item" data-tab="filter-by-scenario">按负载场景筛选</div>
+          <nav class="fc-tabs" data-tab-group="left-panel">
+            <div class="fc-tabs__item active" data-tab="add-by-model">按型号添加</div>
+            <div class="fc-tabs__item" data-tab="filter-by-scenario">按负载场景筛选</div>
           </nav>
-          <div class="tab-content-container" id="left-panel-container">
-            <div class="tab-content-wrapper" id="left-panel-wrapper">
+          <div class="fc-tab-container" id="left-panel-container">
+            <div class="fc-tab-wrapper" id="left-panel-wrapper">
 
               <!-- 按型号添加 -->
-              <div class="tab-pane" id="add-by-model-pane">
-                <form id="fanForm" class="form-grid">
-                  <div class="form-row">
+              <div class="fc-tab-pane" id="add-by-model-pane">
+                <form id="fanForm" class="fc-form-grid">
+                  <div class="fc-form-row">
                     <label class="block text-sm font-medium">输入型号直接搜索</label>
                     <div class="relative">
-                      <input type="text" id="modelSearchInput" class="ui-field w-full border-gray-300" placeholder="输入型号关键字...">
+                      <input type="text" id="modelSearchInput" class="fc-field w-full border-gray-300" placeholder="输入型号关键字...">
                       <div id="searchSuggestions" class="absolute z-10 hidden bg-white border border-gray-300 rounded-md shadow-lg max-h-60 overflow-y-auto w-full mt-1"></div>
                     </div>
                   </div>
 
-                  <div class="form-row">
+                  <div class="fc-form-row">
                     <label class="block text-sm font-medium">品牌</label>
-                    <select id="brandSelect" class="ui-field w-full border-gray-300">
+                    <select id="brandSelect" class="fc-field w-full border-gray-300">
                       <option value="">-- 选择品牌 --</option>
                       {% for brand in brands %}
                         <option value="{{ brand }}">{{ brand }}</option>
@@ -148,44 +148,44 @@
                     </select>
                   </div>
 
-                  <div class="form-row">
+                  <div class="fc-form-row">
                     <label class="block text-sm font-medium">型号</label>
-                    <select id="modelSelect" class="ui-field w-full border-gray-300" disabled>
+                    <select id="modelSelect" class="fc-field w-full border-gray-300" disabled>
                       <option value="">-- 选择型号 --</option>
                     </select>
                     <div id="modelLoading" class="text-sm text-gray-500 mt-1 hidden">加载中...</div>
                   </div>
 
-                  <div class="form-row">
+                  <div class="fc-form-row">
                     <label class="block text-sm font-medium">风阻类型</label>
-                    <select id="resTypeSelect" class="ui-field w-full border-gray-300" disabled>
+                    <select id="resTypeSelect" class="fc-field w-full border-gray-300" disabled>
                       <option value="">-- 选择风阻类型 --</option>
                       <option value="全部">全部</option>
                     </select>
                     <div id="resTypeLoading" class="text-sm text-gray-500 mt-1 hidden">加载中...</div>
                   </div>
 
-                  <div class="form-row">
+                  <div class="fc-form-row">
                     <label class="block text-sm font-medium">风阻位置</label>
-                    <select id="resLocSelect" class="ui-field w-full border-gray-300" disabled>
+                    <select id="resLocSelect" class="fc-field w-full border-gray-300" disabled>
                       <option value="">-- 选择风阻位置 --</option>
                       <option value="全部">全部</option>
                     </select>
                     <div id="resLocLoading" class="text-sm text-gray-500 mt-1 hidden">加载中...</div>
                   </div>
 
-                  <div class="form-row">
-                    <button type="submit" class="w-full ui-btn success" style="font-size: 16px;">添加至图表</button>
+                  <div class="fc-form-row">
+                    <button type="submit" class="w-full fc-btn fc-btn-- fc-btn----" style="font-size: 16px;">添加至图表</button>
                   </div>
                 </form>
               </div>
 
               <!-- 按负载场景筛选 -->
-              <div class="tab-pane" id="filter-by-scenario-pane">
-                <form id="searchForm" class="form-grid">
-                  <div class="form-row">
+              <div class="fc-tab-pane" id="filter-by-scenario-pane">
+                <form id="searchForm" class="fc-form-grid">
+                  <div class="fc-form-row">
                     <label class="block text-sm font-medium">风阻类型</label>
-                    <select name="search_res_type" class="ui-field w-full border-gray-300">
+                    <select name="search_res_type" class="fc-field w-full border-gray-300">
                       <option value="">-- 选择风阻类型 --</option>
                       {% for type in all_res_types %}
                         <option value="{{ type }}">{{ type }}</option>
@@ -193,9 +193,9 @@
                     </select>
                   </div>
 
-                  <div class="form-row">
+                  <div class="fc-form-row">
                     <label class="block text-sm font-medium">风阻位置</label>
-                    <select name="search_res_loc" class="ui-field w-full border-gray-300">
+                    <select name="search_res_loc" class="fc-field w-full border-gray-300">
                       <option value="">-- 选择风阻位置 --</option>
                       {% for loc in all_res_locs %}
                         <option value="{{ loc }}">{{ loc }}</option>
@@ -203,25 +203,25 @@
                     </select>
                   </div>
 
-                  <div class="form-row">
+                  <div class="fc-form-row">
                     <label class="block text-sm font-medium">尺寸(mm)</label>
-                    <select name="size_filter" class="ui-field w-full border-gray-300">
+                    <select name="size_filter" class="fc-field w-full border-gray-300">
                       {% for size in size_options %}
                         <option value="{{ size }}">{{ size }}</option>
                       {% endfor %}
                     </select>
                   </div>
 
-                  <div class="form-row">
+                  <div class="fc-form-row">
                     <label class="block text-sm font-medium">风扇厚度(mm)</label>
                     <div class="flex items-center gap-3">
-                      <input type="number" name="thickness_min" value="25" min="1" max="99" class="ui-field w-1/2 border-gray-300" required>
+                      <input type="number" name="thickness_min" value="25" min="1" max="99" class="fc-field w-1/2 border-gray-300" required>
                       <span class="text-gray-600">-</span>
-                      <input type="number" name="thickness_max" value="50" min="1" max="99" class="ui-field w-1/2 border-gray-300" required>
+                      <input type="number" name="thickness_max" value="50" min="1" max="99" class="fc-field w-1/2 border-gray-300" required>
                     </div>
                   </div>
 
-                  <div class="form-row">
+                  <div class="fc-form-row">
                     <div class="grid grid-cols-2 gap-3">
                       <div>
                         <label class="block text-sm font-medium flex items-center">
@@ -234,7 +234,7 @@
                             <i class="fa-solid fa-circle-info text-xs"></i>
                           </button>
                         </label>
-                        <select name="sort_by" id="sortBySelect" class="ui-field w-full border-gray-300">
+                        <select name="sort_by" id="sortBySelect" class="fc-field w-full border-gray-300">
                           <option value="none" selected>无(全速)</option>
                           <option value="rpm">转速(RPM)</option>
                           <option value="noise">噪音(dB)</option>
@@ -244,13 +244,13 @@
                         <label class="block text-sm font-medium">限制值</label>
                         <input type="number" inputmode="numeric" step="1" min="1" max="9999"
                                name="sort_value" id="sortValueInput"
-                               class="ui-field w-full border-gray-300" disabled>
+                               class="fc-field w-full border-gray-300" disabled>
                       </div>
                     </div>
                   </div>
 
-                  <div class="form-row">
-                    <button type="submit" class="w-full ui-btn" style="font-size: 16px;">搜索风扇</button>
+                  <div class="fc-form-row">
+                    <button type="submit" class="w-full fc-btn" style="font-size: 16px;">搜索风扇</button>
                   </div>
                 </form>
               </div>
@@ -260,38 +260,38 @@
         </div>
 
         <!-- 右侧排行榜 / 搜索结果 -->
-        <div class="bg-white rounded-xl shadow-md p-6 lg:w-2/3 right-panel-card relative">
+        <div class="bg-white rounded-xl shadow-md p-6 lg:w-2/3 fc-right-card relative">
           <div id="query-count-display"
                style="position: absolute; top: 0; right: 0; z-index: 10;
                       font-size: 12px; color: #666; background: rgba(255,255,255,0);
                       padding: 2px 8px;">
             已执行查询<span id="query-count">0</span>次
           </div>
-          <nav class="tab-nav with-subseg" data-tab-group="right-panel">
-            <div class="tab-nav-item active" data-tab="top-queries">近期热门查询</div>
-            <div class="tab-nav-item" data-tab="search-results">搜索结果</div>
+          <nav class="fc-tabs with-subseg" fc-tabs--with-subseg data-tab-group="right-panel">
+            <div class="fc-tabs__item active" data-tab="top-queries">近期热门查询</div>
+            <div class="fc-tabs__item" data-tab="search-results">搜索结果</div>
             <div class="flex-1"></div>
-            <div class="right-subseg" id="rightSubsegContainer"></div>
+            <div class="fc-tabs__subseg" id="rightSubsegContainer"></div>
           </nav>
-          <div class="tab-content-container">
-            <div class="tab-content-wrapper" id="right-panel-wrapper">
+          <div class="fc-tab-container">
+            <div class="fc-tab-wrapper" id="right-panel-wrapper">
               <!-- 热门查询 -->
-              <div class="tab-pane" id="top-queries-pane">
+              <div class="fc-tab-pane" id="top-queries-pane">
                 <div class="mb-3">
-                  <div class="seg" data-active="queries-panel" role="tablist" aria-label="榜单切换">
-                    <button class="seg-btn is-active" data-target="queries-panel" role="tab" aria-selected="true" aria-controls="queries-panel">查询榜</button>
-                    <button class="seg-btn" data-target="likes-panel" role="tab" aria-selected="false" aria-controls="likes-panel">好评榜</button>
-                    <span class="seg-thumb"></span>
+                  <div class="fc-seg" data-active="queries-panel" role="tablist" aria-label="榜单切换">
+                    <button class="fc-seg__btn is-active" data-target="queries-panel" role="tab" aria-selected="true" aria-controls="queries-panel">查询榜</button>
+                    <button class="fc-seg__btn" data-target="likes-panel" role="tab" aria-selected="false" aria-controls="likes-panel">好评榜</button>
+                    <span class="fc-seg__thumb"></span>
                   </div>
                 </div>
 
-                <div class="rank-content-box">
-                  <div class="rank-panel active" id="queries-panel" role="tabpanel" aria-label="查询榜">
-                    <div class="rank-table-scroll">
-                      <table class="ranking-table">
+                <div class="fc-rank-box">
+                  <div class="fc-rank-panel active" id="queries-panel" role="tabpanel" aria-label="查询榜">
+                    <div class="fc-rank-scroll">
+                      <table class="fc-rank-table">
                         <thead>
                         <tr>
-                          <th class="rank-header">排名</th>
+                          <th class="fc-rank-header">排名</th>
                           <th>品牌</th>
                           <th>型号</th>
                           <th>尺寸</th>
@@ -303,7 +303,7 @@
                         <tbody>
                         {% for query in top_queries %}
                           <tr class="hover:bg-gray-50">
-                            <td class="rank-cell">
+                            <td class="fc-rank-cell">
                               {% if loop.index == 1 %}
                                 <i class="fa-solid fa-medal gold text-2xl"></i>
                               {% elif loop.index == 2 %}
@@ -326,7 +326,7 @@
                             </td>
                             <td class="text-blue-600 font-medium">{{ query.query_count }}</td>
                             <td>
-                              <button class="btn-add js-ranking-add tooltip-btn"
+                              <button class="fc-btn-icon-add js-ranking-add fc-tooltip-target"
                                       title="添加到图表"
                                       data-add-type="ranking"
                                       data-brand="{{ query.brand_name_zh }}"
@@ -345,12 +345,12 @@
                     </div>
                   </div>
 
-                  <div class="rank-panel" id="likes-panel" role="tabpanel" aria-label="好评榜">
-                    <div class="rank-table-scroll">
-                      <table class="ranking-table" id="ratingRankTable">
+                  <div class="fc-rank-panel" id="likes-panel" role="tabpanel" aria-label="好评榜">
+                    <div class="fc-rank-scroll">
+                      <table class="fc-rank-table" id="ratingRankTable">
                         <thead>
                         <tr>
-                          <th class="rank-header">排名</th>
+                          <th class="fc-rank-header">排名</th>
                           <th>品牌</th>
                           <th>型号</th>
                           <th>尺寸</th>
@@ -369,21 +369,21 @@
               </div>
 
               <!-- 搜索结果 -->
-              <div class="tab-pane" id="search-results-pane">
+              <div class="fc-tab-pane" id="search-results-pane">
                 <div class="mb-3">
-                  <div class="seg" data-active="search-airflow-panel" role="tablist" aria-label="排序视图切换">
-                    <button class="seg-btn is-active" data-target="search-airflow-panel" role="tab" aria-selected="true" aria-controls="search-airflow-panel">风量优先</button>
-                    <button class="seg-btn" data-target="search-likes-panel" role="tab" aria-selected="false" aria-controls="search-likes-panel">好评优先</button>
-                    <span class="seg-thumb"></span>
+                  <div class="fc-seg" data-active="search-airflow-panel" role="tablist" aria-label="排序视图切换">
+                    <button class="fc-seg__btn is-active" data-target="search-airflow-panel" role="tab" aria-selected="true" aria-controls="search-airflow-panel">风量优先</button>
+                    <button class="fc-seg__btn" data-target="search-likes-panel" role="tab" aria-selected="false" aria-controls="search-likes-panel">好评优先</button>
+                    <span class="fc-seg__thumb"></span>
                   </div>
                 </div>
 
-                <div class="rank-content-box">
-                  <div id="searchConditionLabel" class="condition-label"></div>
+                <div class="fc-rank-box">
+                  <div id="searchConditionLabel" class="fc-condition-label"></div>
 
-                  <div class="rank-panel active" id="search-airflow-panel" role="tabpanel">
-                    <div class="rank-table-scroll">
-                      <table class="ranking-table">
+                  <div class="fc-rank-panel active" id="search-airflow-panel" role="tabpanel">
+                    <div class="fc-rank-scroll">
+                      <table class="fc-rank-table">
                         <thead>
                         <tr>
                           <th>品牌</th>
@@ -402,9 +402,9 @@
                     </div>
                   </div>
 
-                  <div class="rank-panel" id="search-likes-panel" role="tabpanel">
-                    <div class="rank-table-scroll">
-                      <table class="ranking-table">
+                  <div class="fc-rank-panel" id="search-likes-panel" role="tabpanel">
+                    <div class="fc-rank-scroll">
+                      <table class="fc-rank-table">
                         <thead>
                         <tr>
                           <th>品牌</th>
@@ -431,7 +431,7 @@
       </div>
 
       <!-- 图表 -->
-      <div class="chart-container bg-white rounded-xl shadow-md p-6 relative" id="chart-settings">
+      <div class="fc-chart-container bg-white rounded-xl shadow-md p-6 relative" id="chart-settings">
         <div id="chartRoot">
           <iframe id="chartFrame" src="/static/echarts-render.html"
                   allow="fullscreen" allowfullscreen

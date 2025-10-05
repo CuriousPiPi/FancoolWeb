@@ -11,10 +11,10 @@
 
     /* 主题变量（用于轴开关的外观与暗色模式一致） */
     :root{
-      --bg-secondary:#ffffff;
+      --bg-:#ffffff;
       --border-color:#e5e7eb;
       --text-primary:#1f2937;
-      --text-secondary:#6b7280;
+      --text-:#6b7280;
       --accent:#2563eb;
       --accent-weak:#93c5fd;
       --ok:#16a34a;          /* 绿色激活 */
@@ -23,10 +23,10 @@
       --shadow-strong:0 8px 24px rgba(0,0,0,0.18);
     }
     [data-theme="dark"]{
-      --bg-secondary:#1f2937;
+      --bg-:#1f2937;
       --border-color:#374151;
       --text-primary:#f3f4f6;
-      --text-secondary:#9ca3af;
+      --text-:#9ca3af;
       --accent:#60a5fa;
       --accent-weak:#bfdbfe;
       --ok:#16a34a;
@@ -66,7 +66,7 @@
       position:absolute;
       width:24px;
       height:100%;
-      background:var(--text-secondary);
+      background:var(--text-);
       border-radius:12px;
       left:0; top:0;
       transition:transform .25s ease;
@@ -110,7 +110,7 @@
     .fit-buttons .btn{
       appearance: none;
       border: 1px solid var(--border-color);
-      background: var(--bg-secondary);
+      background: var(--bg-);
       color: var(--text-primary);
       font-size: 12px;
       font-weight: 700;
@@ -139,7 +139,7 @@
       max-width: 420px;
       max-height: 60vh;
       overflow: auto;
-      background: var(--bg-secondary);
+      background: var(--bg-);
       border: 1px solid var(--border-color);
       border-radius: 12px;
       box-shadow: var(--shadow-strong);
@@ -163,7 +163,7 @@
     }
     .fit-bubble .x-input{
       margin-left:auto; display:flex; align-items:center; gap:6px;
-      font-size:12px; color: var(--text-secondary);
+      font-size:12px; color: var(--text-);
       white-space: nowrap;
     }
     .fit-bubble input[type="number"]{
@@ -186,7 +186,7 @@
       flex:0 0 auto;
     }
     .fit-bubble .hint{
-      color: var(--text-secondary);
+      color: var(--text-);
       font-size: 11px;
       margin-top: 6px;
     }
@@ -232,7 +232,7 @@
       position:absolute;
       z-index:2147483643;
       font-size:11px;
-      color: var(--text-secondary);
+      color: var(--text-);
       pointer-events:none;
       user-select:none;
       white-space:nowrap;

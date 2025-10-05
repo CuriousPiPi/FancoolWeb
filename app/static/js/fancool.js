@@ -52,7 +52,7 @@ const LIKE_FULL_FETCH_THRESHOLD = 2;
   window.__APP.dom = { one, all, clear };
 })();
 
-/* ==== P1-5 帧写入调度器（低频批量写入） ==== */
+/* ==== P1-5 帧写入调度器 ==== */
 window.__APP.scheduler = (function(){
   const writeQueue = [];
   let scheduled = false;
@@ -93,9 +93,9 @@ function initSnapTabScrolling(opts){
     clickScrollBehavior = 'smooth'
   } = opts || {};
   const container = document.getElementById(containerId);
-  const nav = document.querySelector(`.tab-nav[data-tab-group="${group}"]`);
+  const nav = document.querySelector(`.fc-tabs[data-tab-group="${group}"]`);
   if (!container || !nav) return;
-  const tabs = Array.from(nav.querySelectorAll('.tab-nav-item'));
+  const tabs = Array.from(nav.querySelectorAll('.fc-tabs__item'));
   if (!tabs.length) return;
 
   function go(idx, smooth=true){
@@ -117,7 +117,7 @@ function initSnapTabScrolling(opts){
   }
 
   nav.addEventListener('click', e=>{
-    const item = e.target.closest('.tab-nav-item');
+    const item = e.target.closest('.fc-tabs__item');
     if (!item) return;
     const idx = tabs.indexOf(item);
     if (idx < 0) return;
@@ -481,6 +481,9 @@ function verifyLikeFingerprintIfStale(){
 // 初始化定时器（放在 DOMContentLoaded 后也可，这里直接放即可）
 setInterval(verifyLikeFingerprintIfStale, PERIODIC_VERIFY_INTERVAL_MS);
 
+/* =========================================================
+   Toast （新版：使用 fc-toast + 修饰符）
+   ========================================================= */
 const toastContainerId = 'toastContainer';
 function ensureToastRoot() {
   let r = document.getElementById(toastContainerId);
@@ -490,7 +493,11 @@ function ensureToastRoot() {
 let toastIdCounter = 0;
 const activeLoadingKeys = new Set();
 
+function normalizeToastType(t){
+  return ['success','error','loading','info'].includes(t) ? t : 'info';
+}
 function createToast(msg, type='info', opts={}) {
+  type = normalizeToastType(type);
   const container = ensureToastRoot();
   const { autoClose = (type === 'loading' ? false : 2600), id = 't_'+(++toastIdCounter) } = opts;
 
@@ -506,9 +513,9 @@ function createToast(msg, type='info', opts={}) {
   };
 
   const div = document.createElement('div');
-  div.className = 'toast '+type;
+  div.className = 'fc-toast fc-toast--'+type;
   div.id = id;
-  div.innerHTML = `${iconMap[type]||iconMap.info}<div class="msg">${msg}</div><span class="close-btn" data-close="1">&times;</span>`;
+  div.innerHTML = `${iconMap[type]||iconMap.info}<div class="msg">${msg}</div><span class="fc-toast__close" data-close="1">&times;</span>`;
   container.appendChild(div);
 
   if (autoClose) {
@@ -524,7 +531,7 @@ function closeToast(id){
 }
 document.addEventListener('click', (e)=>{
   if (e.target.closest && e.target.closest('[data-close]')) {
-    const t = e.target.closest('.toast'); if (t) closeToast(t.id);
+    const t = e.target.closest('.fc-toast'); if (t) closeToast(t.id);
   }
 });
 
@@ -553,16 +560,9 @@ function showLoading(key, text='加载中...') {
 
 function hideLoading(key) {
   activeLoadingKeys.delete(key);
-
   const id = 'loading_' + key;
-
-  const nodes = [];
-
-  while (document.getElementById(id)) {
-    nodes.push(document.getElementById(id));
-    document.getElementById(id).remove(); 
-  }
-
+  const el = document.getElementById(id);
+  if (el) el.remove();
   const t = loadingTimeoutMap.get(key);
   if (t) {
     clearTimeout(t);
@@ -572,7 +572,7 @@ function hideLoading(key) {
 
 function autoCloseOpLoading() {
   hideLoading('op');
-  document.querySelectorAll('.toast.loading').forEach(t => {
+  document.querySelectorAll('.fc-toast.fc-toast--loading').forEach(t => {
     const msgEl = t.querySelector('.msg');
     if (!msgEl) return;
     const text = (msgEl.textContent || '').trim();
@@ -583,8 +583,8 @@ function autoCloseOpLoading() {
 }
 
 const showSuccess = (m)=>createToast(m,'success');
-const showError = (m)=>createToast(m,'error');
-const showInfo = (m)=>createToast(m,'info', {autoClose:1800});
+const showError   = (m)=>createToast(m,'error');
+const showInfo    = (m)=>createToast(m,'info', {autoClose:1800});
 
 let lastGlobalAction = 0;
 function globalThrottle(){
@@ -739,7 +739,7 @@ function flushChartQueue(){
     try {
       chartFrame.contentWindow.postMessage(msg, window.location.origin);
     } catch(e){
-      console.warn('postMessage flush error:', e);
+      console.warn('postMessage flush :', e);
       break;
     }
   }
@@ -950,8 +950,8 @@ function resizeChart(){
    子段 UI（右侧子段定位）
    ========================================================= */
 const rightSubsegContainer = $('#rightSubsegContainer');
-const segQueriesOrig = document.querySelector('#top-queries-pane .seg');
-const segSearchOrig  = document.querySelector('#search-results-pane .seg');
+const segQueriesOrig = document.querySelector('#top-queries-pane .fc-seg');
+const segSearchOrig  = document.querySelector('#search-results-pane .fc-seg');
 if (segQueriesOrig && rightSubsegContainer){ segQueriesOrig.dataset.paneId='top-queries-pane'; rightSubsegContainer.appendChild(segQueriesOrig); }
 if (segSearchOrig && rightSubsegContainer){ segSearchOrig.dataset.paneId='search-results-pane'; rightSubsegContainer.appendChild(segSearchOrig); }
 function updateRightSubseg(activeTab){
@@ -1052,11 +1052,11 @@ function rebuildRecentLikes(list){
     const groupDiv = document.createElement('div');
     groupDiv.className='recent-like-group p-3 border border-gray-200 rounded-md';
     groupDiv.innerHTML = `
-      <div class="group-header">
-        <div class="title-wrap flex items-center min-w-0">
+      <div class="fc-group-header">
+        <div class="fc-title-wrap flex items-center min-w-0">
           <div class="truncate font-medium">${escapeHtml(g.brand)} ${escapeHtml(g.model)}</div>
         </div>
-        <div class="meta-right text-sm text-gray-600">${metaRight}</div>
+        <div class="fc-meta-right text-sm text-gray-600">${metaRight}</div>
       </div>
       <div class="group-scenarios mt-2 space-y-1">${scenariosHtml}</div>`;
     wrap.appendChild(groupDiv);
@@ -1175,11 +1175,11 @@ function activateTab(group, tabName, animate = false) {
   if (group === 'sidebar-top' || group === 'left-panel') return;
 
   // 其余（如 right-panel）沿用原 transform 方案
-  const nav = document.querySelector(`.tab-nav[data-tab-group="${group}"]`);
+  const nav = document.querySelector(`.fc-tabs[data-tab-group="${group}"]`);
   const wrapper = document.getElementById(`${group}-wrapper`);
   if (!nav || !wrapper) return;
 
-  const items = [...nav.querySelectorAll('.tab-nav-item')];
+  const items = [...nav.querySelectorAll('.fc-tabs__item')];
 
   // 关键：右侧页签初始化时（animate=false）忽略本地存储，固定用第一个页签
   if (group === 'right-panel' && !animate) {
@@ -1204,9 +1204,9 @@ function activateTab(group, tabName, animate = false) {
 }
 
 document.addEventListener('click',(e)=>{
-  const item = safeClosest(e.target, '.tab-nav .tab-nav-item');
+  const item = safeClosest(e.target, '.fc-tabs .fc-tabs__item');
   if (!item) return;
-  const nav = item.closest('.tab-nav');
+  const nav = item.closest('.fc-tabs');
   const group = nav?.dataset?.tabGroup;
   if (!group) return;
   activateTab(group, item.dataset.tab, true);
@@ -1215,17 +1215,17 @@ document.addEventListener('click',(e)=>{
  (function initTabDefaults(){
    ['left-panel','right-panel'].forEach(group=>{
      const saved = localStorage.getItem('activeTab_'+group);
-     const fallback = document.querySelector(`.tab-nav[data-tab-group="${group}"] .tab-nav-item`)?.dataset.tab || '';
+     const fallback = document.querySelector(`.fc-tabs[data-tab-group="${group}"] .fc-tabs__item`)?.dataset.tab || '';
      activateTab(group, saved || fallback, false);
    });
-   const sidebarTopActive = document.querySelector('.tab-nav[data-tab-group="sidebar-top"] .tab-nav-item.active')?.dataset.tab;
+   const sidebarTopActive = document.querySelector('.fc-tabs[data-tab-group="sidebar-top"] .fc-tabs__item.active')?.dataset.tab;
    if (sidebarTopActive) activateTab('sidebar-top', sidebarTopActive, false);
  })();
 
 /* ===== 顶部可视高度同步 ===== */
 function computeTopPaneViewportHeight(){
-  const scroller = document.querySelector('#top-panel .sidebar-panel-content');
-  const nav = scroller ? scroller.querySelector('nav.tab-nav') : null;
+  const scroller = document.querySelector('#top-panel .fc-sidebar-panel__content');
+  const nav = scroller ? scroller.querySelector('nav.fc-tabs') : null;
   if (!scroller || !nav) return 0;
   const scrollerStyle = getComputedStyle(scroller);
   const padBottom = parseFloat(scrollerStyle.paddingBottom)||0;
@@ -1236,13 +1236,13 @@ function computeTopPaneViewportHeight(){
   return Math.max(0, Math.floor(avail));
 }
 function syncTopTabsViewportHeight(){
-  const container = document.querySelector('#top-panel .tab-content-container');
+  const container = document.querySelector('#top-panel .fc-tab-container');
   if (!container) return;
   const h = computeTopPaneViewportHeight();
   container.style.height = (h>0?h:0)+'px';
 }
 (function initTopTabsViewport(){
-  const scroller = document.querySelector('#top-panel .sidebar-panel-content');
+  const scroller = document.querySelector('#top-panel .fc-sidebar-panel__content');
   if (scroller && 'ResizeObserver' in window){
     const ro = new ResizeObserver(()=>requestAnimationFrame(syncTopTabsViewportHeight));
     ro.observe(scroller);
@@ -1398,7 +1398,7 @@ sidebarToggle?.addEventListener('click', ()=>{
     const headerH = header ? header.getBoundingClientRect().height : 0;
     const trackHeight = sidebarRect.height - headerH - splitter.offsetHeight;
 
-    const bpContent = bottomPanel?.querySelector('.sidebar-panel-content');
+    const bpContent = bottomPanel?.querySelector('.fc-sidebar-panel__content');
     const bpTitle   = bpContent?.querySelector('h2');
     const footer    = document.getElementById('clearAllContainer');
     const csContent = bpContent ? getComputedStyle(bpContent) : null;
@@ -1697,7 +1697,7 @@ function buildQuickBtnHTML(addType, brand, model, resType, resLoc, modelId, cond
   else if (addType==='ranking') cls='js-ranking-add';
   else cls='js-likes-add';
   return `
-    <button class="btn-add ${cls} tooltip-btn"
+    <button class="fc-btn-icon-add ${cls} fc-tooltip-target"
             title="${title}"
             data-mode="${mode}"
             data-add-type="${addType}"
@@ -1735,7 +1735,7 @@ function mapKeyFromDataset(d){
   return `${b}||${m}||${rt}||${rl}`;
 }
 function syncQuickActionButtons(){
-  window.__APP.dom.all('.btn-add.tooltip-btn').forEach(btn=>{
+  window.__APP.dom.all('.fc-btn-icon-add.fc-tooltip-target').forEach(btn=>{
     if (!btn.dataset.addType){
       if (btn.classList.contains('js-rating-add')) btn.dataset.addType='rating';
       else if (btn.classList.contains('js-ranking-add')) btn.dataset.addType='ranking';
@@ -1791,7 +1791,7 @@ function rebuildSelectedFans(fans){
         <button class="like-button mr-3" data-fan-key="${f.key}" data-model-id="${f.model_id}" data-condition-id="${f.condition_id}">
           <i class="fa-solid fa-thumbs-up ${isLiked?'text-red-500':'text-gray-400'}"></i>
         </button>
-        <button class="remove-icon text-lg js-remove-fan" data-fan-key="${f.key}" title="移除">
+        <button class="fc-icon-remove text-lg js-remove-fan" data-fan-key="${f.key}" title="移除">
           <i class="fa-solid fa-xmark"></i>
         </button>
       </div>`;
@@ -1825,7 +1825,7 @@ function rebuildRemovedFans(list){
         <span class="font-medium">${escapeHtml(item.brand)} ${escapeHtml(item.model)}</span> - 
         <span class="text-gray-600 text-sm">${formatScenario(item.res_type, item.res_loc)}</span>
       </div>
-      <button class="restore-icon text-lg js-restore-fan" data-fan-key="${item.key}" title="恢复至图表">
+      <button class="fc-icon-restore text-lg js-restore-fan" data-fan-key="${item.key}" title="恢复至图表">
         <i class="fa-solid fa-rotate-left"></i>
       </button>`;
     removedListEl.appendChild(div);
@@ -1980,14 +1980,14 @@ function applyRatingTable(data){
     const btnIcon  = isDup?'<i class="fa-solid fa-xmark"></i>':'<i class="fa-solid fa-plus"></i>';
     html+=`
       <tr class="hover:bg-gray-50">
-        <td class="rank-cell">${rankCell}</td>
-        <td class="nowrap marquee-cell"><span class="marquee-inner">${escapeHtml(r.brand_name_zh)}</span></td>
-        <td class="nowrap marquee-cell"><span class="marquee-inner">${escapeHtml(r.model_name)} (${r.max_speed} RPM)</span></td>
-        <td class="nowrap marquee-cell"><span class="marquee-inner">${escapeHtml(r.size)}x${escapeHtml(r.thickness)}</span></td>
-        <td class="nowrap marquee-cell"><span class="marquee-inner">${scen}</span></td>
+        <td class="fc-rank-cell">${rankCell}</td>
+        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(r.brand_name_zh)}</span></td>
+        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(r.model_name)} (${r.max_speed} RPM)</span></td>
+        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(r.size)}x${escapeHtml(r.thickness)}</span></td>
+        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${scen}</span></td>
         <td class="text-blue-600 font-medium">${escapeHtml(r.like_count)}</td>
         <td>
-          <button class="btn-add ${btnClass} tooltip-btn"
+          <button class="fc-btn-icon-add ${btnClass} fc-tooltip-target"
                   title="${btnTitle}"
                   data-mode="${btnMode}"
                   data-add-type="rating"
@@ -2044,10 +2044,10 @@ function fillSearchTable(tbody, list){
     const scenLabel = formatScenario(resType, resLocRaw);
     return `
       <tr class="hover:bg-gray-50">
-        <td class="nowrap marquee-cell"><span class="marquee-inner">${escapeHtml(brand)}</span></td>
-        <td class="nowrap marquee-cell"><span class="marquee-inner">${escapeHtml(model)} (${r.max_speed} RPM)</span></td>
-        <td class="nowrap marquee-cell"><span class="marquee-inner">${escapeHtml(r.size)}x${escapeHtml(r.thickness)}</span></td>
-        <td class="nowrap marquee-cell"><span class="marquee-inner">${scenLabel}</span></td>
+        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(brand)}</span></td>
+        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(model)} (${r.max_speed} RPM)</span></td>
+        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(r.size)}x${escapeHtml(r.thickness)}</span></td>
+        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${scenLabel}</span></td>
         <td class="text-blue-600 font-medium text-sm">${Number(r.max_airflow).toFixed(1)}</td>
         <td class="text-blue-600 font-medium">${r.like_count ?? 0}</td>
         <td>${buildQuickBtnHTML('search', brand, model, resType, resLocRaw, r.model_id, r.condition_id)}</td>
@@ -2093,7 +2093,7 @@ if (searchForm){
         window.__APP.cache.set(cacheNS, payload, data);
         renderSearchResults(data.search_results, data.condition_label);
         hideLoading('op'); showSuccess('搜索完成');
-        document.querySelector('.tab-nav[data-tab-group="right-panel"] .tab-nav-item[data-tab="search-results"]')?.click();
+        document.querySelector('.fc-tabs[data-tab-group="right-panel"] .fc-tabs__item[data-tab="search-results"]')?.click();
       } catch(err){
         hideLoading('op'); showError('搜索异常: '+err.message);
         searchAirflowTbody.innerHTML='<tr><td colspan="7" class="text-center text-gray-500 py-6">搜索失败</td></tr>';
@@ -2111,7 +2111,7 @@ if (searchForm){
     async function refreshFromServer(){
       try {
         const fresh = await doFetch();
-        if (fresh.success){
+        if (fresh.success) {
           window.__APP.cache.set(cacheNS, payload, fresh);
           if (!cached || JSON.stringify(cached.search_results)!==JSON.stringify(fresh.search_results)){
             renderSearchResults(fresh.search_results, fresh.condition_label);
@@ -2503,7 +2503,7 @@ document.addEventListener('click', async e=>{
     if (state === 'normal'){
       clearAllBtn.setAttribute('data-state','confirming');
       clearAllBtn.innerHTML = `
-        <div class="clear-confirm-wrapper">
+        <div class="fc-clear-confirm">
           <button id="confirmClearAll" class="bg-red-600 text-white hover:bg-red-700">确认</button>
           <button id="cancelClearAll" class="bg-gray-400 text-white hover:bg-gray-500">取消</button>
         </div>`;
@@ -2643,7 +2643,7 @@ function prepareMarqueeCells(tbody, indexes){
       const td = cells[i];
       if (!td) return;
       if (!td.classList.contains('marquee-cell')){
-        td.classList.add('marquee-cell','nowrap');
+        td.classList.add('fc-marquee-cell','nowrap');
         const inner = document.createElement('span');
         inner.className='marquee-inner';
         inner.innerHTML=td.innerHTML;
@@ -2661,7 +2661,7 @@ function wrapMarqueeForExistingTables(){
 }
 function startRowMarquee(tr){
   const speed=60;
-  tr.querySelectorAll('.marquee-cell .marquee-inner').forEach(inner=>{
+  tr.querySelectorAll('.fc-marquee-cell .fc-marquee-inner').forEach(inner=>{
     const td = inner.parentElement;
     const delta = inner.scrollWidth - td.clientWidth;
     if (delta > 6){
@@ -2672,18 +2672,18 @@ function startRowMarquee(tr){
   });
 }
 function stopRowMarquee(tr){
-  tr.querySelectorAll('.marquee-cell .marquee-inner').forEach(inner=>{
+  tr.querySelectorAll('.fc-marquee-cell .fc-marquee-inner').forEach(inner=>{
     inner.style.transition='transform .35s ease';
     inner.style.transform='translateX(0)';
   });
 }
 document.addEventListener('mouseenter',(e)=>{
-  const tr = safeClosest(e.target, '#right-panel-wrapper .ranking-table tbody tr');
+  const tr = safeClosest(e.target, '#right-panel-wrapper .fc-rank-table tbody tr');
   if (!tr) return;
   startRowMarquee(tr);
 }, true);
 document.addEventListener('mouseleave',(e)=>{
-  const tr = safeClosest(e.target, '#right-panel-wrapper .ranking-table tbody tr');
+  const tr = safeClosest(e.target, '#right-panel-wrapper .fc-rank-table tbody tr');
   if (!tr) return;
   stopRowMarquee(tr);
 }, true);
@@ -2691,7 +2691,7 @@ document.addEventListener('mouseleave',(e)=>{
 /* 侧栏行跑马灯 */
 function prepareSidebarMarquee(){
   window.__APP.dom.all('#sidebar .fan-item .truncate').forEach(container=>{
-    if (container.querySelector('.sidebar-marquee-inner')) return;
+    if (container.querySelector('.fc-sidebar-marquee-inner')) return;
     const inner = document.createElement('span');
     inner.className='sidebar-marquee-inner';
     inner.innerHTML = container.innerHTML;
@@ -2718,8 +2718,8 @@ function stopSingleMarquee(row, innerSel){
   inner.style.transition='transform .35s ease';
   inner.style.transform='translateX(0)';
 }
-function startSidebarMarquee(row){ startSingleMarquee(row, '.truncate', '.sidebar-marquee-inner', SIDEBAR_SCROLL_SPEED); }
-function stopSidebarMarquee(row){ stopSingleMarquee(row, '.sidebar-marquee-inner'); }
+function startSidebarMarquee(row){ startSingleMarquee(row, '.truncate', '.fc-sidebar-marquee-inner', SIDEBAR_SCROLL_SPEED); }
+function stopSidebarMarquee(row){ stopSingleMarquee(row, '.fc-sidebar-marquee-inner'); }
 
 document.addEventListener('mouseenter',(e)=>{
   const row = safeClosest(e.target, '#sidebar .fan-item');
@@ -2736,7 +2736,7 @@ document.addEventListener('mouseleave',(e)=>{
 // 新增：最近点赞场景行的跑马灯（与侧栏/表格分开，互不影响）
 function prepareRecentLikesMarquee(){
   document.querySelectorAll('#recentLikesList .scenario-row .scenario-text').forEach(container=>{
-    if (container.querySelector('.recent-marquee-inner')) return;
+    if (container.querySelector('.fc-recent-marquee-inner')) return;
     const inner = document.createElement('span');
     inner.className = 'recent-marquee-inner';
     inner.textContent = container.textContent;
@@ -2746,8 +2746,8 @@ function prepareRecentLikesMarquee(){
 }
 
 const RECENT_LIKES_SCROLL_SPEED = 60; // px/s，与其它区块一致
-function startRecentLikesMarquee(row){ startSingleMarquee(row, '.scenario-text', '.recent-marquee-inner', RECENT_LIKES_SCROLL_SPEED); }
-function stopRecentLikesMarquee(row){ stopSingleMarquee(row, '.recent-marquee-inner'); }
+function startRecentLikesMarquee(row){ startSingleMarquee(row, '.scenario-text', '.fc-recent-marquee-inner', RECENT_LIKES_SCROLL_SPEED); }
+function stopRecentLikesMarquee(row){ stopSingleMarquee(row, '.fc-recent-marquee-inner'); }
 
 // 委托监听：进入行开始左移，离开行复位
 document.addEventListener('mouseenter', (e)=>{
@@ -2773,7 +2773,7 @@ document.addEventListener('mouseleave', (e)=>{
 
   function computeDesiredBottomHeight(){
     const bottom = document.getElementById('bottom-panel');
-    const content = bottom?.querySelector('.sidebar-panel-content');
+    const content = bottom?.querySelector('.fc-sidebar-panel__content');
     const title = content?.querySelector('h2');
     const list = document.getElementById('selectedFansList');
     const footer = document.getElementById('clearAllContainer');
@@ -2850,25 +2850,25 @@ document.addEventListener('mouseleave', (e)=>{
    Segment 切换（查询榜 / 好评榜 + 搜索子段）
    ========================================================= */
 document.addEventListener('click',(e)=>{
-  const btn = safeClosest(e.target,'.seg-btn');
+  const btn = safeClosest(e.target,'.fc-seg__btn');
   if (!btn) return;
-  const seg = btn.closest('.seg'); if (!seg) return;
+  const seg = btn.closest('.fc-seg'); if (!seg) return;
   const targetId = btn.dataset.target;
-  seg.querySelectorAll('.seg-btn').forEach(b=>b.classList.toggle('is-active', b===btn));
+  seg.querySelectorAll('.fc-seg__btn').forEach(b=>b.classList.toggle('is-active', b===btn));
   seg.setAttribute('data-active', targetId);
   const paneId = seg.dataset.paneId;
   const pane = paneId ? document.getElementById(paneId):null;
-  if (pane) pane.querySelectorAll('.rank-panel').forEach(p=>p.classList.toggle('active', p.id===targetId));
+  if (pane) pane.querySelectorAll('.fc-rank-panel').forEach(p=>p.classList.toggle('active', p.id===targetId));
   if (targetId === 'likes-panel') loadLikesIfNeeded();
 });
 
 (function initRightSegSwitchLikeXAxis() {
-  const segs = document.querySelectorAll('#rightSubsegContainer .seg');
+  const segs = document.querySelectorAll('#rightSubsegContainer .fc-seg');
   if (!segs.length) return;
 
   segs.forEach(seg => {
-    const thumb = seg.querySelector('.seg-thumb');
-    const btns = seg.querySelectorAll('.seg-btn');
+    const thumb = seg.querySelector('.fc-seg__thumb');
+    const btns = seg.querySelectorAll('.fc-seg__btn');
     if (!thumb || btns.length !== 2) return;
 
     let dragging = false;
@@ -2943,7 +2943,7 @@ document.addEventListener('click',(e)=>{
      主容器宽度自适应和重排
      ========================================================= */
   (function initRightPanelResponsiveWrap(){
-    const card = document.querySelector('.right-panel-card');
+    const card = document.querySelector('.fc-right-card');
     if (!card || !('ResizeObserver' in window)) return;
     const APPLY_W = 640; // 小于该宽度时视为“窄”，与 <=600px 媒体查询布局一致
     const ro = new ResizeObserver(entries=>{
@@ -2968,9 +2968,9 @@ document.addEventListener('click',(e)=>{
 
   function apply(width){
     if (width < THRESHOLD) {
-      container.classList.add('force-col');
+      container.classList.add('fc-force-col');
     } else {
-      container.classList.remove('force-col');
+      container.classList.remove('fc-force-col');
     }
   }
 
@@ -3172,14 +3172,14 @@ const a11yFocusTrap = (function(){
 
 /* ==== P2-8 A11y: Tabs / Segmented 控件 ARIA + 键盘导航 ==== */
 (function initA11yTabs(){
-  const TAB_GROUP_SELECTOR = '.tab-nav[data-tab-group]';
-  const SEG_SELECTOR = '.seg[data-active]';
+  const TAB_GROUP_SELECTOR = '.fc-tabs[data-tab-group]';
+  const SEG_SELECTOR = '.fc-seg[data-active]';
 
   function upgradeTabGroup(nav){
     if (nav.getAttribute('role') === 'tablist') return;
     nav.setAttribute('role','tablist');
     const group = nav.dataset.tabGroup || '';
-    const items = Array.from(nav.querySelectorAll('.tab-nav-item'));
+    const items = Array.from(nav.querySelectorAll('.fc-tabs__item'));
     items.forEach((item, idx) => {
       const tabId = item.id || (`tab-${group}-${idx}`);
       item.id = tabId;
@@ -3199,7 +3199,7 @@ const a11yFocusTrap = (function(){
   }
 
   function syncActive(nav){
-    const items = Array.from(nav.querySelectorAll('.tab-nav-item'));
+    const items = Array.from(nav.querySelectorAll('.fc-tabs__item'));
     items.forEach(it => {
       const active = it.classList.contains('active');
       it.setAttribute('tabindex', active ? '0':'-1');
@@ -3208,13 +3208,13 @@ const a11yFocusTrap = (function(){
   }
 
   function handleKey(e){
-    const item = e.target.closest('.tab-nav-item[role="tab"]');
+    const item = e.target.closest('.fc-tabs__item[role="tab"]');
     if (!item) return;
     const nav = item.closest('[role="tablist"]');
     if (!nav) return;
     if (!['ArrowLeft','ArrowRight','Home','End'].includes(e.key)) return;
 
-    const items = Array.from(nav.querySelectorAll('.tab-nav-item[role="tab"]'));
+    const items = Array.from(nav.querySelectorAll('.fc-tabs__item[role="tab"]'));
     const currentIndex = items.indexOf(item);
     let nextIndex = currentIndex;
     if (e.key === 'ArrowRight') nextIndex = (currentIndex + 1) % items.length;
@@ -3234,18 +3234,18 @@ const a11yFocusTrap = (function(){
   document.querySelectorAll(TAB_GROUP_SELECTOR).forEach(upgradeTabGroup);
   // 监听点击后同步 ARIA
   document.addEventListener('click', e=>{
-    const item = e.target.closest('.tab-nav-item');
+    const item = e.target.closest('.fc-tabs__item');
     if (!item) return;
     const nav = item.closest(TAB_GROUP_SELECTOR);
     if (nav) syncActive(nav);
   });
   document.addEventListener('keydown', handleKey);
 
-  /* Segmented 控件（.seg）辅助角色 */
+  /* Segmented 控件（.fc-seg）辅助角色 */
   document.querySelectorAll(SEG_SELECTOR).forEach(seg=>{
-    if (!seg.querySelector('.seg-btn')) return;
+    if (!seg.querySelector('.fc-seg__btn')) return;
     if (!seg.hasAttribute('role')) seg.setAttribute('role','tablist');
-    const btns = Array.from(seg.querySelectorAll('.seg-btn'));
+    const btns = Array.from(seg.querySelectorAll('.fc-seg__btn'));
     btns.forEach((b,i)=>{
       b.setAttribute('role','tab');
       b.setAttribute('tabindex', b.classList.contains('is-active') ? '0':'-1');
@@ -3367,7 +3367,7 @@ window.__APP.modules = {
   function applyRecentLikesTitleMask() {
     const groups = document.querySelectorAll('#recentLikesList .recent-like-group');
     groups.forEach(g => {
-      const titleWrap = g.querySelector('.group-header .title-wrap');
+      const titleWrap = g.querySelector('.fc-group-header .fc-title-wrap');
       const titleBox  = titleWrap?.querySelector('.truncate');
       if (!titleWrap || !titleBox) return;
       // 可见标题宽度（容器宽度即为可见宽度，因溢出被裁切）
@@ -3692,7 +3692,7 @@ async function refreshChartFromLocal(showToast=false){
     });
     const data = await resp.json();
     if (!data.success){
-      showError(data.error || '获取曲线失败');
+      showError(data.error  || '获取曲线失败');
       return;
     }
     const chartData = {
