@@ -9,7 +9,8 @@
     COLOR_MAP:'colorIndexMap_v1',
     X_AXIS:   'x_axis_type',
     PREFS:    'fc_prefs_v1',
-    LIKES:    'fc_likes_v1'        // 新增：点赞集合持久化（数组）
+    LIKES:    'fc_likes_v1',       // 点赞集合
+    LIKES_FP: 'fc_likes_fp_v1'     // 持久化服务端指纹
   };
 
   const MAX_RECENTLY_REMOVED = 50;
@@ -28,18 +29,14 @@
     return (v==='rpm'||v==='noise_db'||v==='noise')?(v==='noise'?'noise_db':v):DEFAULT_X_AXIS;
   })();
 
-  // ========== 点赞集合 + 指纹（LIKES FP MIGRATION） ==========
-  // 说明：
-  // 1. 持久化结构：localStorage.fc_likes_v1 = ["mid_cid", ...]
-  // 2. localFP 每次增删/全量替换后重算
-  // 3. serverFP 来自服务端 fp 字段（不持久化；也可持久化但目前无必要）
-  // 4. compare()：用于第二阶段判断是否完整；本阶段只是提供调试与统一入口
+  // ========== 点赞集合 + 指纹 ==========
   const persistedLikeArray = readJSON(LS_KEYS.LIKES, []);
   let _liked = new Set(Array.isArray(persistedLikeArray)?persistedLikeArray:[]);
   let _serverFP = null;
   let _serverFPTs = 0;
 
-  const LIKESET_DEFAULT_MAX_AGE_MS = 5 * 60 * 1000; // 5 分钟（供 needRefresh 默认）
+  const LIKESET_DEFAULT_MAX_AGE_MS = 5 * 60 * 1000;        // 对 /api/like_status 的刷新判定基准
+  const SERVER_FP_MAX_AGE_MS = LIKESET_DEFAULT_MAX_AGE_MS; // 持久化 serverFP 的最大有效期（可单独配置）
   const FNV_OFFSET_64 = 0xcbf29ce484222325n;
   const FNV_PRIME_64  = 0x100000001b3n;
   const MASK_64       = 0xffffffffffffffffn;
@@ -71,69 +68,94 @@
   _recomputeLocalFP();
 
   function _persistLikes(){
-    // 存储为数组，空间估算：1000条 * ~10~14字节 ≈ <15KB，远低于 10MB
     writeJSON(LS_KEYS.LIKES, Array.from(_liked));
   }
 
-const likesAPI = {
-  setAll(arr){
-    _liked = new Set(Array.isArray(arr)?arr:[]);
-    _recomputeLocalFP();
-    _persistLikes();
-  },
-  add(key){
-    if (!_liked.has(key)){
-      _liked.add(key);
-      _recomputeLocalFP();
-      _persistLikes();
-    }
-  },
-  remove(key){
-    if (_liked.has(key)){
-      _liked.delete(key);
-      _recomputeLocalFP();
-      _persistLikes();
-    }
-  },
-  has: (key)=>_liked.has(key),
-  getAll: ()=>Array.from(_liked),
-  getCount: ()=>_liked.size,
-  getLocalFP: ()=>({ ..._localFP }),
-  getServerFP: ()=>(_serverFP ? { ..._serverFP } : null),
-  updateServerFP(fp){
-    if (fp && typeof fp === 'object' && 'c' in fp && 'x' in fp && 's' in fp){
-      _serverFP = { c:fp.c, x:fp.x, s:fp.s };
-      _serverFPTs = Date.now();
-    }
-  },
-  compare(){
-    const equal = !!(_serverFP &&
-      _serverFP.c === _localFP.c &&
-      _serverFP.x === _localFP.x &&
-      _serverFP.s === _localFP.s);
-    return { equal, server: _serverFP ? { ..._serverFP } : null, local:{ ..._localFP } };
-  },
-  logCompare(){
-    try { console.debug('[LocalState.likes] fingerprint compare:', likesAPI.compare()); } catch(_){}
-  },
-  // === 新增：同步状态与刷新判定 ===
-  isSynced(){
-    const c = likesAPI.compare();
-    return c.equal;
-  },
-  needRefresh(maxAgeMs = LIKESET_DEFAULT_MAX_AGE_MS){
-    if (!_serverFP) return true;
-    if (!likesAPI.isSynced()) return true;
-    if (!_serverFPTs) return true;
-    return (Date.now() - _serverFPTs) > maxAgeMs;
-  },
-  shouldSkipStatus(maxAgeMs = LIKESET_DEFAULT_MAX_AGE_MS){
-    // “完全一致 + 未超过时限”即可跳过 /api/like_status
-    return likesAPI.isSynced() && !likesAPI.needRefresh(maxAgeMs);
-  }
-};
+  // ---- 恢复 serverFP（持久化）----
+  (function restoreServerFP(){
+    try {
+      const raw = localStorage.getItem(LS_KEYS.LIKES_FP);
+      if (!raw) return;
+      const parsed = JSON.parse(raw);
+      if (!parsed || typeof parsed !== 'object') return;
+      const { fp, ts } = parsed;
+      if (!fp || typeof fp !== 'object') return;
+      if (!('c' in fp && 'x' in fp && 's' in fp)) return;
+      if (typeof ts !== 'number') return;
+      if (Date.now() - ts > SERVER_FP_MAX_AGE_MS) return; // 过期丢弃
+      _serverFP = { c: fp.c, x: fp.x, s: fp.s };
+      _serverFPTs = ts;
+      // console.debug('[LocalState.likes] restored serverFP', _serverFP);
+    } catch(_){}
+  })();
 
-  // ---- 颜色索引分配 ----
+  function persistServerFP(){
+    try {
+      if (_serverFP){
+        localStorage.setItem(LS_KEYS.LIKES_FP, JSON.stringify({ fp: _serverFP, ts: _serverFPTs }));
+      } else {
+        localStorage.removeItem(LS_KEYS.LIKES_FP);
+      }
+    } catch(_){}
+  }
+
+  const likesAPI = {
+    setAll(arr){
+      _liked = new Set(Array.isArray(arr)?arr:[]);
+      _recomputeLocalFP();
+      _persistLikes();
+    },
+    add(key){
+      if (!_liked.has(key)){
+        _liked.add(key);
+        _recomputeLocalFP();
+        _persistLikes();
+      }
+    },
+    remove(key){
+      if (_liked.has(key)){
+        _liked.delete(key);
+        _recomputeLocalFP();
+        _persistLikes();
+      }
+    },
+    has: (key)=>_liked.has(key),
+    getAll: ()=>Array.from(_liked),
+    getCount: ()=>_liked.size,
+    getLocalFP: ()=>({ ..._localFP }),
+    getServerFP: ()=>(_serverFP ? { ..._serverFP } : null),
+    updateServerFP(fp){
+      if (fp && typeof fp === 'object' && 'c' in fp && 'x' in fp && 's' in fp){
+        _serverFP = { c:fp.c, x:fp.x, s:fp.s };
+        _serverFPTs = Date.now();
+        persistServerFP();
+      }
+    },
+    compare(){
+      const equal = !!(_serverFP &&
+        _serverFP.c === _localFP.c &&
+        _serverFP.x === _localFP.x &&
+        _serverFP.s === _localFP.s);
+      return { equal, server: _serverFP ? { ..._serverFP } : null, local:{ ..._localFP } };
+    },
+    logCompare(){
+      try { console.debug('[LocalState.likes] fingerprint compare:', likesAPI.compare()); } catch(_){}
+    },
+    isSynced(){
+      return likesAPI.compare().equal;
+    },
+    needRefresh(maxAgeMs = LIKESET_DEFAULT_MAX_AGE_MS){
+      if (!_serverFP) return true;
+      if (!likesAPI.isSynced()) return true;
+      if (!_serverFPTs) return true;
+      return (Date.now() - _serverFPTs) > maxAgeMs;
+    },
+    shouldSkipStatus(maxAgeMs = LIKESET_DEFAULT_MAX_AGE_MS){
+      return likesAPI.isSynced() && !likesAPI.needRefresh(maxAgeMs);
+    }
+  };
+
+  // ---- 颜色索引分配（原逻辑不动）----
   function ensureColorIndex(key){
     if (!key) return 0;
     if (Object.prototype.hasOwnProperty.call(colorMap,key)) return colorMap[key]|0;
@@ -150,6 +172,7 @@ const likesAPI = {
       persistColorMap();
     }
   }
+
   function reassignUniqueIndices(){
     const counts = new Map();
     selected.forEach(it=>{
@@ -195,7 +218,6 @@ const likesAPI = {
   }
   function findSelectedIndex(key){ return selected.findIndex(it=>it.key===key); }
 
-  // ---- 最近移除去重逻辑 ----
   function addOrUpdateRemoved(info){
     if (!info || !info.key) return;
     const now = new Date().toISOString();
@@ -222,7 +244,7 @@ const likesAPI = {
     }
   }
 
-  // ---- 核心公开 API（原有） ----
+  // ---- 核心公开 API ----
   function getSelected(){ return selected.slice(); }
   function getRecentlyRemoved(){ return removed.slice(); }
   function getXAxisType(){ return xAxisType; }
@@ -339,7 +361,6 @@ const likesAPI = {
     return prefs.pointer[mode];
   }
 
-  // ---- 导出 ----
   const api = {
     getSelected: ()=>selected.slice(),
     getRecentlyRemoved: ()=> removed.slice(),
@@ -358,7 +379,7 @@ const likesAPI = {
     getPointer:(mode)=>getPointer(mode),
     getSelectionPairs:()=> getSelectionPairs(),
     persistAll,
-    likes: likesAPI            // 新增点赞与指纹子模块
+    likes: likesAPI
   };
 
   global.LocalState = api;

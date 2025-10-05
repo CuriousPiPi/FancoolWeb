@@ -1,16 +1,21 @@
 import os
 import uuid
 import logging
-from datetime import timedelta
-from typing import List, Dict, Tuple
-import threading
-from flask import Flask, request, render_template, session, jsonify, g
-from sqlalchemy import create_engine, text
 import time
-import hmac, hashlib
+import threading
+import hmac
+import hashlib
+from datetime import timedelta
+from typing import List, Dict, Tuple, Any
+
+from flask import Flask, request, render_template, session, jsonify, g, make_response
+from sqlalchemy import create_engine, text
 from user_agents import parse as parse_ua
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+# =========================================
+# App / Config
+# =========================================
 app = Flask(__name__)
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 app.secret_key = os.getenv('APP_SECRET', 'replace-me-in-prod')
@@ -19,7 +24,10 @@ app.config['TEMPLATES_AUTO_RELOAD'] = True
 app.jinja_env.auto_reload = True
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
 
-DB_DSN = os.getenv('FANDB_DSN', 'mysql+pymysql://localreader:12345678@127.0.0.1/FANDB?charset=utf8mb4')
+DB_DSN = os.getenv(
+    'FANDB_DSN',
+    'mysql+pymysql://localreader:12345678@127.0.0.1/FANDB?charset=utf8mb4'
+)
 engine = create_engine(
     DB_DSN,
     pool_pre_ping=True,
@@ -27,15 +35,14 @@ engine = create_engine(
     future=True
 )
 
-# ========= 新增/恢复：模板仍使用的常量 =========
 SIZE_OPTIONS = ["不限", "120", "140"]
-
 TOP_QUERIES_LIMIT = 10
 RECENT_LIKES_LIMIT = 50
 CLICK_COOLDOWN_SECONDS = 0.5
 
 query_count_cache = 0
 
+# UID cookie config
 UID_COOKIE_NAME = os.getenv('UID_COOKIE_NAME', 'fc_uid')
 UID_COOKIE_MAX_AGE = int(os.getenv('UID_COOKIE_MAX_AGE_SECONDS', str(60 * 60 * 24 * 365 * 2)))
 UID_COOKIE_SAMESITE = os.getenv('UID_COOKIE_SAMESITE', 'Lax')
@@ -44,18 +51,23 @@ UID_COOKIE_HTTPONLY = os.getenv('UID_COOKIE_HTTPONLY', '0') == '1'
 UID_COOKIE_REFRESH_INTERVAL = int(os.getenv('UID_COOKIE_REFRESH_INTERVAL_SECONDS', str(60 * 60 * 24 * 7)))
 UID_COOKIE_REFRESH_TS_NAME = os.getenv('UID_COOKIE_REFRESH_TS_NAME', 'fc_uid_refreshed_at')
 
-# HTTPS Proxy Fix + 安全头
+# =========================================
+# Middleware / Headers
+# =========================================
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_for=1)
 app.config['SESSION_COOKIE_HTTPONLY'] = os.getenv('SESSION_COOKIE_HTTPONLY', '1') == '1'
 app.config['SESSION_COOKIE_SAMESITE'] = os.getenv('SESSION_COOKIE_SAMESITE', 'Lax')
 app.config['SESSION_COOKIE_PATH'] = '/'
 
+
 @app.after_request
 def add_security_headers(resp):
     try:
         if request.is_secure:
-            resp.headers.setdefault('Strict-Transport-Security',
-                                    'max-age=31536000; includeSubDomains; preload')
+            resp.headers.setdefault(
+                'Strict-Transport-Security',
+                'max-age=31536000; includeSubDomains; preload'
+            )
         resp.headers.setdefault('X-Frame-Options', 'SAMEORIGIN')
         resp.headers.setdefault('X-Content-Type-Options', 'nosniff')
         resp.headers.setdefault('Referrer-Policy', 'strict-origin-when-cross-origin')
@@ -63,11 +75,41 @@ def add_security_headers(resp):
         pass
     return resp
 
-# 签名
+# =========================================
+# Unified Response Helpers (旧字段兼容移除：不再复制顶层 extra)
+# =========================================
+def resp_ok(data: Any = None, message: str | None = None,
+            meta: dict | None = None, http_status: int = 200):
+    payload = {
+        'success': True,
+        'data': data,
+        'message': message,
+        'meta': meta or {}
+    }
+    return make_response(jsonify(payload), http_status)
+
+
+def resp_err(error_code: str, error_message: str,
+             http_status: int = 400, *,
+             meta: dict | None = None):
+    payload = {
+        'success': False,
+        'error_code': error_code,
+        'error_message': error_message,
+        'data': None,
+        'meta': meta or {}
+    }
+    return make_response(jsonify(payload), http_status)
+
+
+# =========================================
+# UID Signing
+# =========================================
 def _sign_uid(value: str) -> str:
     key = app.secret_key.encode() if not isinstance(app.secret_key, (bytes, bytearray)) else app.secret_key
     sig = hmac.new(key, value.encode('utf-8'), hashlib.sha256).hexdigest()[:16]
     return f"{value}.{sig}"
+
 
 def _unsign_uid(token: str) -> str | None:
     if not token:
@@ -81,10 +123,12 @@ def _unsign_uid(token: str) -> str | None:
         return raw
     return None
 
+
 @app.before_request
 def _init_g_defaults():
     if not hasattr(g, '_uid_source'):
         g._uid_source = None
+
 
 def get_or_create_user_identifier() -> str:
     token = request.cookies.get(UID_COOKIE_NAME)
@@ -108,6 +152,7 @@ def get_or_create_user_identifier() -> str:
     session['user_identifier'] = uid
     session.permanent = True
     return uid
+
 
 @app.after_request
 def ensure_uid_cookie(resp):
@@ -170,78 +215,82 @@ def ensure_uid_cookie(resp):
         )
     return resp
 
+# =========================================
+# DB Helpers
+# =========================================
 def fetch_all(sql: str, params: dict = None) -> List[dict]:
     with engine.begin() as conn:
         rows = conn.execute(text(sql), params or {})
         return [dict(r._mapping) for r in rows]
 
+
 def exec_write(sql: str, params: dict = None):
     with engine.begin() as conn:
         conn.execute(text(sql), params or {})
 
+# =========================================
+# Utilities
+# =========================================
 def _parse_device_basic(ua_string: str) -> dict:
     try:
         ua = parse_ua(ua_string or '')
-        if ua.is_bot: dtype = 'bot'
-        elif ua.is_mobile: dtype = 'mobile'
-        elif ua.is_tablet: dtype = 'tablet'
-        elif ua.is_pc: dtype = 'desktop'
-        else: dtype = 'other'
+        if ua.is_bot:
+            dtype = 'bot'
+        elif ua.is_mobile:
+            dtype = 'mobile'
+        elif ua.is_tablet:
+            dtype = 'tablet'
+        elif ua.is_pc:
+            dtype = 'desktop'
+        else:
+            dtype = 'other'
         return dict(os_name=ua.os.family or None, device_type=dtype)
     except Exception:
         return dict(os_name=None, device_type='other')
 
-# 访问启动
-@app.route('/api/visit_start', methods=['POST'])
-def api_visit_start():
-    try:
-        _ = get_or_create_user_identifier()
-        uid = g._active_uid
-        uid_source = getattr(g, '_uid_source', None)
-        row = fetch_all("SELECT COUNT(*) AS c FROM visit_logs WHERE user_identifier=:u", {'u': uid})
-        visit_index = int(row[0]['c']) + 1 if row else 1
-        is_new_user = (visit_index == 1)
+# =========================================
+# FNV Fingerprint for Likes (保持 c/x/s)
+# =========================================
+FNV_OFFSET_64 = 0xCBF29CE484222325
+FNV_PRIME_64 = 0x100000001B3
+MASK_64 = 0xFFFFFFFFFFFFFFFF
 
-        data = request.get_json(force=True, silent=True) or {}
-        screen_w = int(data.get('screen_w') or 0) or None
-        screen_h = int(data.get('screen_h') or 0) or None
-        dpr      = float(data.get('device_pixel_ratio') or 0) or None
-        language = (data.get('language') or '').strip() or None
-        is_touch = 1 if data.get('is_touch') else 0
 
-        ua_raw = request.headers.get('User-Agent','') or None
-        dev = _parse_device_basic(ua_raw or '')
+def _fnv1a_64(s: str) -> int:
+    h = FNV_OFFSET_64
+    for ch in s:
+        h ^= ord(ch)
+        h = (h * FNV_PRIME_64) & MASK_64
+    return h
 
-        sql = """
-        INSERT INTO visit_logs
-        (user_identifier, uid_source, visit_index, is_new_user,
-         user_agent_raw, os_name, device_type,
-         screen_w, screen_h, device_pixel_ratio, language, is_touch)
-        VALUES
-        (:uid, :usrc, :vidx, :isnew,
-         :ua, :osn, :dtype,
-         :sw, :sh, :dpr, :lang, :touch)
-        """
-        exec_write(sql, {
-          'uid': uid,
-          'usrc': uid_source,
-          'vidx': visit_index,
-          'isnew': 1 if is_new_user else 0,
-          'ua': ua_raw,
-          'osn': dev['os_name'],
-          'dtype': dev['device_type'],
-          'sw': screen_w,
-          'sh': screen_h,
-          'dpr': dpr,
-          'lang': language,
-          'touch': is_touch
-        })
-        return jsonify({'success': True, 'visit_index': visit_index, 'is_new_user': is_new_user})
-    except Exception as e:
-        app.logger.exception(e)
-        return jsonify({'success': False, 'error': str(e)}), 500
 
-# ====== 恢复：热门查询榜 DAO（模板需要） ======
+def get_user_likes_full(user_identifier: str, limit: int | None = None) -> List[dict]:
+    rows = fetch_all("""
+        SELECT user_identifier, model_id, condition_id, brand_name_zh, model_name,
+               resistance_type_zh, resistance_location_zh, max_speed, size, thickness
+        FROM user_likes_view
+        WHERE user_identifier=:u
+    """, {'u': user_identifier})
+    return rows if limit is None else rows[:limit]
+
+
+def get_user_like_keys(user_identifier: str) -> List[str]:
+    return [f"{int(r['model_id'])}_{int(r['condition_id'])}" for r in get_user_likes_full(user_identifier)]
+
+
+def compute_like_fingerprint(user_id: str) -> dict:
+    keys = get_user_like_keys(user_id)
+    xor_v = 0
+    sum_v = 0
+    for k in keys:
+        hv = _fnv1a_64(k)
+        xor_v ^= hv
+        sum_v = (sum_v + hv) & MASK_64
+    return {'c': len(keys), 'x': f"{xor_v:016x}", 's': f"{sum_v:016x}"}
+
+# =========================================
+# Query Helpers
+# =========================================
 def get_top_queries(limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
     sql = """SELECT model_id, condition_id,
                     brand_name_zh, model_name,
@@ -252,7 +301,7 @@ def get_top_queries(limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
              LIMIT :l"""
     return fetch_all(sql, {'l': limit})
 
-# 点赞排行 DAO 已存在
+
 def get_top_ratings(limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
     sql = """SELECT model_id, condition_id,
                     brand_name_zh, model_name,
@@ -263,7 +312,7 @@ def get_top_ratings(limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
              LIMIT :l"""
     return fetch_all(sql, {'l': limit})
 
-# 搜索
+
 def search_fans_by_condition(res_type, res_loc, sort_by, sort_value,
                              size_filter=None, thickness_min=None, thickness_max=None,
                              limit=200) -> List[dict]:
@@ -275,8 +324,10 @@ def search_fans_by_condition(res_type, res_loc, sort_by, sort_value,
         "WHERE resistance_type_zh=:rt"
     ]
     params = {'rt': res_type, 'limit': limit}
+
     def _is_empty_loc_value(v: str | None) -> bool:
-        if v is None: return False
+        if v is None:
+            return False
         s = str(v).strip()
         return s == '' or s == '无'
 
@@ -290,53 +341,77 @@ def search_fans_by_condition(res_type, res_loc, sort_by, sort_value,
                 params['rl'] = s
 
     if size_filter and size_filter != '不限':
-        base.append("AND size=:sz"); params['sz'] = int(size_filter)
+        base.append("AND size=:sz")
+        params['sz'] = int(size_filter)
     if thickness_min is not None and thickness_max is not None:
         base.append("AND thickness BETWEEN :tmin AND :tmax")
         params.update(tmin=int(thickness_min), tmax=int(thickness_max))
     if sort_by == 'rpm':
-        base.append("AND rpm <= :sv"); params['sv'] = float(sort_value)
+        base.append("AND rpm <= :sv")
+        params['sv'] = float(sort_value)
     elif sort_by == 'noise':
-        base.append("AND noise_db <= :sv"); params['sv'] = float(sort_value)
+        base.append("AND noise_db <= :sv")
+        params['sv'] = float(sort_value)
 
     base.append("GROUP BY model_id, condition_id, brand_name_zh, model_name, resistance_type_zh, resistance_location_zh, size, thickness")
     base.append("ORDER BY max_airflow DESC LIMIT :limit")
     return fetch_all("\n".join(base), params)
 
-# 点赞数据
-def get_user_likes_full(user_identifier: str, limit: int | None = None) -> List[dict]:
-    rows = fetch_all("""
-        SELECT user_identifier, model_id, condition_id, brand_name_zh, model_name,
-               resistance_type_zh, resistance_location_zh, max_speed, size, thickness
-        FROM user_likes_view
-        WHERE user_identifier=:u
-    """, {'u': user_identifier})
-    return rows if limit is None else rows[:limit]
+# =========================================
+# Visit Start
+# =========================================
+@app.route('/api/visit_start', methods=['POST'])
+def api_visit_start():
+    try:
+        _ = get_or_create_user_identifier()
+        uid = g._active_uid
+        uid_source = getattr(g, '_uid_source', None)
+        row = fetch_all("SELECT COUNT(*) AS c FROM visit_logs WHERE user_identifier=:u", {'u': uid})
+        visit_index = int(row[0]['c']) + 1 if row else 1
+        is_new_user = (visit_index == 1)
 
-def get_user_like_keys(user_identifier: str) -> List[str]:
-    return [f"{int(r['model_id'])}_{int(r['condition_id'])}" for r in get_user_likes_full(user_identifier)]
+        data = request.get_json(force=True, silent=True) or {}
+        screen_w = int(data.get('screen_w') or 0) or None
+        screen_h = int(data.get('screen_h') or 0) or None
+        dpr = float(data.get('device_pixel_ratio') or 0) or None
+        language = (data.get('language') or '').strip() or None
+        is_touch = 1 if data.get('is_touch') else 0
 
-# FNV 指纹
-FNV_OFFSET_64 = 0xCBF29CE484222325
-FNV_PRIME_64  = 0x100000001B3
-MASK_64       = 0xFFFFFFFFFFFFFFFF
-def _fnv1a_64(s: str) -> int:
-    h = FNV_OFFSET_64
-    for ch in s:
-        h ^= ord(ch)
-        h = (h * FNV_PRIME_64) & MASK_64
-    return h
-def compute_like_fingerprint(user_id: str) -> dict:
-    keys = get_user_like_keys(user_id)
-    xor_v = 0
-    sum_v = 0
-    for k in keys:
-        hv = _fnv1a_64(k)
-        xor_v ^= hv
-        sum_v = (sum_v + hv) & MASK_64
-    return {'c': len(keys), 'x': f"{xor_v:016x}", 's': f"{sum_v:016x}"}
+        ua_raw = request.headers.get('User-Agent', '') or None
+        dev = _parse_device_basic(ua_raw or '')
 
-# 批量点赞状态
+        sql = """
+        INSERT INTO visit_logs
+        (user_identifier, uid_source, visit_index, is_new_user,
+         user_agent_raw, os_name, device_type,
+         screen_w, screen_h, device_pixel_ratio, language, is_touch)
+        VALUES
+        (:uid, :usrc, :vidx, :isnew,
+         :ua, :osn, :dtype,
+         :sw, :sh, :dpr, :lang, :touch)
+        """
+        exec_write(sql, {
+            'uid': uid,
+            'usrc': uid_source,
+            'vidx': visit_index,
+            'isnew': 1 if is_new_user else 0,
+            'ua': ua_raw,
+            'osn': dev['os_name'],
+            'dtype': dev['device_type'],
+            'sw': screen_w,
+            'sh': screen_h,
+            'dpr': dpr,
+            'lang': language,
+            'touch': is_touch
+        })
+        return resp_ok({'visit_index': visit_index, 'is_new_user': is_new_user})
+    except Exception as e:
+        app.logger.exception(e)
+        return resp_err('INTERNAL_ERROR', str(e), 500)
+
+# =========================================
+# Like APIs
+# =========================================
 @app.route('/api/like_status', methods=['POST'])
 def api_like_status():
     try:
@@ -346,31 +421,36 @@ def api_like_status():
         cleaned, seen = [], set()
         for p in raw_pairs:
             try:
-                mid = int(p.get('model_id')); cid = int(p.get('condition_id'))
+                mid = int(p.get('model_id'))
+                cid = int(p.get('condition_id'))
             except Exception:
                 continue
             t = (mid, cid)
-            if t in seen: continue
-            seen.add(t); cleaned.append(t)
+            if t in seen:
+                continue
+            seen.add(t)
+            cleaned.append(t)
         if not cleaned:
             fp = compute_like_fingerprint(user_id)
-            return jsonify({'success': True, 'liked_keys': [], 'fp': fp})
+            return resp_ok({'like_keys': [], 'fp': fp})
         conds, params = [], {'u': user_id}
-        for i,(m,c) in enumerate(cleaned, start=1):
+        for i, (m, c) in enumerate(cleaned, start=1):
             conds.append(f"(:m{i}, :c{i})")
-            params[f"m{i}"]=m; params[f"c{i}"]=c
+            params[f"m{i}"] = m
+            params[f"c{i}"] = c
         sql = f"""
           SELECT model_id, condition_id
           FROM user_likes_view
           WHERE user_identifier=:u AND (model_id, condition_id) IN ({",".join(conds)})
         """
         rows = fetch_all(sql, params)
-        liked_keys = [f"{int(r['model_id'])}_{int(r['condition_id'])}" for r in rows]
+        like_keys = [f"{int(r['model_id'])}_{int(r['condition_id'])}" for r in rows]
         fp = compute_like_fingerprint(user_id)
-        return jsonify({'success': True, 'liked_keys': liked_keys, 'fp': fp})
+        return resp_ok({'like_keys': like_keys, 'fp': fp})
     except Exception as e:
         app.logger.exception(e)
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return resp_err('INTERNAL_ERROR', str(e), 500)
+
 
 @app.route('/api/like_keys', methods=['GET'])
 def api_like_keys():
@@ -378,68 +458,76 @@ def api_like_keys():
         user_id = get_or_create_user_identifier()
         keys = get_user_like_keys(user_id)
         fp = compute_like_fingerprint(user_id)
-        return jsonify({'success': True, 'like_keys': keys, 'fp': fp})
+        return resp_ok({'like_keys': keys, 'fp': fp})
     except Exception as e:
         app.logger.exception(e)
-        return jsonify({'success': False, 'error': str(e)}), 500
+        return resp_err('INTERNAL_ERROR', str(e), 500)
+
 
 @app.route('/api/like', methods=['POST'])
 def api_like():
-    data = request.get_json(force=True) or {}
+    data = request.get_json(force=True, silent=True) or {}
     model_id = data.get('model_id')
     condition_id = data.get('condition_id')
     user_id = get_or_create_user_identifier()
     if not model_id or not condition_id:
-        return jsonify({'success': False, 'error': '缺少 model_id 或 condition_id'})
+        return resp_err('LIKE_MISSING_IDS', '缺少 model_id 或 condition_id', 400)
     try:
         exec_write("""INSERT INTO rate_logs (user_identifier, model_id, condition_id, is_valid, rate_id)
                       VALUES (:u,:m,:c,1,1)
                       ON DUPLICATE KEY UPDATE is_valid=1, update_date=NOW()""",
                    {'u': user_id, 'm': model_id, 'c': condition_id})
         fp = compute_like_fingerprint(user_id)
-        return jsonify({'success': True, 'fp': fp})
+        return resp_ok({'fp': fp})
     except Exception as e:
         app.logger.exception(e)
-        return jsonify({'success': False, 'error': str(e)})
+        return resp_err('LIKE_DB_WRITE_FAIL', str(e), 500)
+
 
 @app.route('/api/unlike', methods=['POST'])
 def api_unlike():
-    data = request.get_json(force=True) or {}
+    data = request.get_json(force=True, silent=True) or {}
     model_id = data.get('model_id')
     condition_id = data.get('condition_id')
     user_id = get_or_create_user_identifier()
     if not model_id or not condition_id:
-        return jsonify({'success': False, 'error': '缺少 model_id 或 condition_id'})
+        return resp_err('LIKE_MISSING_IDS', '缺少 model_id 或 condition_id', 400)
     try:
         exec_write("""UPDATE rate_logs
                       SET is_valid=0, update_date=NOW()
                       WHERE rate_id=1 AND user_identifier=:u AND model_id=:m AND condition_id=:c""",
                    {'u': user_id, 'm': model_id, 'c': condition_id})
         fp = compute_like_fingerprint(user_id)
-        return jsonify({'success': True, 'fp': fp})
+        return resp_ok({'fp': fp})
     except Exception as e:
         app.logger.exception(e)
-        return jsonify({'success': False, 'error': str(e)})
+        return resp_err('UNLIKE_DB_WRITE_FAIL', str(e), 500)
 
-# recent likes
+# =========================================
+# Recent Likes
+# =========================================
 @app.route('/api/recent_likes', methods=['GET'])
 def api_recent_likes():
     try:
         user_id = get_or_create_user_identifier()
         items = get_user_likes_full(user_id, limit=RECENT_LIKES_LIMIT)
         fp = compute_like_fingerprint(user_id)
-        return jsonify({'success': True, 'data': items, 'fp': fp})
+        return resp_ok({'items': items, 'fp': fp})
     except Exception as e:
         app.logger.exception(e)
-        return jsonify({'success': False, 'error': str(e)})
+        return resp_err('INTERNAL_ERROR', str(e), 500)
 
-# 曲线
-def get_curves_for_pairs(pairs: List[Tuple[int,int]]) -> Dict[str, dict]:
-    if not pairs: return {}
+# =========================================
+# Curves
+# =========================================
+def get_curves_for_pairs(pairs: List[Tuple[int, int]]) -> Dict[str, dict]:
+    if not pairs:
+        return {}
     conds, params = [], {}
-    for i,(m,c) in enumerate(pairs, start=1):
+    for i, (m, c) in enumerate(pairs, start=1):
         conds.append(f"(:m{i}, :c{i})")
-        params[f"m{i}"]=int(m); params[f"c{i}"]=int(c)
+        params[f"m{i}"] = int(m)
+        params[f"c{i}"] = int(c)
     sql = f"""
       SELECT model_id, condition_id, brand_name_zh, model_name,
              resistance_type_zh, resistance_location_zh,
@@ -463,11 +551,14 @@ def get_curves_for_pairs(pairs: List[Tuple[int,int]]) -> Dict[str, dict]:
                 'condition_id': int(r['condition_id'])
             }
         })
-        rpm = r.get('rpm'); airflow = r.get('airflow'); noise = r.get('noise_db')
+        rpm = r.get('rpm')
+        airflow = r.get('airflow')
+        noise = r.get('noise_db')
         try:
             airflow_f = float(airflow)
-            if airflow_f != airflow_f: continue
-        except:
+            if airflow_f != airflow_f:  # NaN
+                continue
+        except Exception:
             continue
         if rpm is None and noise is None:
             continue
@@ -476,25 +567,31 @@ def get_curves_for_pairs(pairs: List[Tuple[int,int]]) -> Dict[str, dict]:
         b['noise_db'].append(noise)
     return bucket
 
+
 @app.post('/api/curves')
 def api_curves():
     try:
-        data = request.get_json(force=True) or {}
+        data = request.get_json(force=True, silent=True) or {}
         raw_pairs = data.get('pairs') or []
         uniq, seen = [], set()
         for p in raw_pairs:
             try:
-                mid = int(p.get('model_id')); cid = int(p.get('condition_id'))
+                mid = int(p.get('model_id'))
+                cid = int(p.get('condition_id'))
             except Exception:
                 continue
             t = (mid, cid)
-            if t in seen: continue
-            seen.add(t); uniq.append(t)
+            if t in seen:
+                continue
+            seen.add(t)
+            uniq.append(t)
         bucket = get_curves_for_pairs(uniq)
         series = []
-        for mid,cid in uniq:
-            k = f"{mid}_{cid}"; b = bucket.get(k)
-            if not b: continue
+        for mid, cid in uniq:
+            k = f"{mid}_{cid}"
+            b = bucket.get(k)
+            if not b:
+                continue
             info = b['info']
             series.append(dict(
                 key=k,
@@ -504,64 +601,93 @@ def api_curves():
                 model_id=info['model_id'], condition_id=info['condition_id'],
                 rpm=b['rpm'], noise_db=b['noise_db'], airflow=b['airflow']
             ))
-        return jsonify({'success': True, 'series': series})
+        return resp_ok({'series': series})
     except Exception as e:
         app.logger.exception(e)
-        return jsonify({'success': False, 'error': f'后端异常: {e}'})
+        return resp_err('INTERNAL_ERROR', f'后端异常: {e}', 500)
 
-# 查询日志
+# =========================================
+# Log Query
+# =========================================
 @app.post('/api/log_query')
 def api_log_query():
     try:
-        data = request.get_json(force=True) or {}
+        data = request.get_json(force=True, silent=True) or {}
         raw_pairs = data.get('pairs') or []
         cleaned, seen = [], set()
         for p in raw_pairs:
             try:
-                mid = int(p.get('model_id')); cid = int(p.get('condition_id'))
+                mid = int(p.get('model_id'))
+                cid = int(p.get('condition_id'))
             except Exception:
                 continue
-            t=(mid,cid)
-            if t in seen: continue
+            t = (mid, cid)
+            if t in seen:
+                continue
             seen.add(t)
             cleaned.append({'model_id': mid, 'condition_id': cid})
+        logged = 0
         if cleaned:
             user_id = get_or_create_user_identifier()
             sql = "INSERT INTO query_logs (user_identifier, model_id, condition_id, batch_id) VALUES (:u,:m,:c,:b)"
             batch = str(uuid.uuid4())
             with engine.begin() as conn:
                 for pair in cleaned:
-                    conn.execute(text(sql), {'u': user_id,'m':pair['model_id'],'c':pair['condition_id'],'b':batch})
-        return jsonify({'success': True, 'logged': len(cleaned)})
+                    conn.execute(text(sql), {
+                        'u': user_id,
+                        'm': pair['model_id'],
+                        'c': pair['condition_id'],
+                        'b': batch
+                    })
+                    logged += 1
+        return resp_ok({'logged': logged})
     except Exception as e:
         app.logger.exception(e)
-        return jsonify({'success': False, 'error': str(e)})
+        return resp_err('INTERNAL_ERROR', str(e), 500)
 
-# 模型 / 级联 & 搜索相关
+# =========================================
+# Cascade / Simple Lists (raw=1 保留)
+# =========================================
+def _maybe_raw_array(data):
+    if request.args.get('raw') == '1':
+        return jsonify(data)
+    return resp_ok(data)
+
+
 @app.route('/search_models/<query>')
 def search_models(query):
-    rows = fetch_all("SELECT DISTINCT brand_name_zh, model_name FROM general_view WHERE model_name LIKE :q LIMIT 20",
-                     {'q': f"%{query}%"} )
-    return jsonify([f"{r['brand_name_zh']} {r['model_name']}" for r in rows])
+    rows = fetch_all(
+        "SELECT DISTINCT brand_name_zh, model_name FROM general_view WHERE model_name LIKE :q LIMIT 20",
+        {'q': f"%{query}%"}
+    )
+    data = [f"{r['brand_name_zh']} {r['model_name']}" for r in rows]
+    return _maybe_raw_array(data)
+
 
 @app.route('/get_models/<brand>')
 def get_models(brand):
-    rows = fetch_all("SELECT DISTINCT model_name FROM fan_model m JOIN fan_brand b ON b.brand_id=m.brand_id WHERE b.brand_name_zh=:b",
-                     {'b': brand})
-    return jsonify([r['model_name'] for r in rows])
+    rows = fetch_all(
+        "SELECT DISTINCT model_name FROM fan_model m JOIN fan_brand b ON b.brand_id=m.brand_id WHERE b.brand_name_zh=:b",
+        {'b': brand}
+    )
+    return _maybe_raw_array([r['model_name'] for r in rows])
+
 
 @app.route('/get_resistance_types/<brand>/<model>')
 def get_resistance_types(brand, model):
-    rows = fetch_all("SELECT DISTINCT resistance_type_zh FROM general_view WHERE brand_name_zh=:b AND model_name=:m",
-                     {'b': brand, 'm': model})
-    return jsonify([r['resistance_type_zh'] for r in rows])
+    rows = fetch_all(
+        "SELECT DISTINCT resistance_type_zh FROM general_view WHERE brand_name_zh=:b AND model_name=:m",
+        {'b': brand, 'm': model}
+    )
+    return _maybe_raw_array([r['resistance_type_zh'] for r in rows])
+
 
 @app.route('/get_resistance_locations/<brand>/<model>/<res_type>')
 def get_resistance_locations(brand, model, res_type):
     rows = fetch_all("""SELECT DISTINCT resistance_location_zh
                         FROM general_view
                         WHERE brand_name_zh=:b AND model_name=:m AND resistance_type_zh=:rt""",
-                     {'b': brand,'m': model,'rt': res_type})
+                     {'b': brand, 'm': model, 'rt': res_type})
     out = []
     has_empty = False
     for r in rows:
@@ -572,14 +698,17 @@ def get_resistance_locations(brand, model, res_type):
             out.append(s)
     if has_empty or res_type == '空载':
         out.insert(0, '无')
-    return jsonify(out)
+    return _maybe_raw_array(out)
+
 
 @app.route('/get_resistance_locations_by_type/<res_type>')
 def get_resistance_locations_by_type(res_type):
     if not res_type:
-        return jsonify([])
-    rows = fetch_all("SELECT DISTINCT resistance_location_zh FROM general_view WHERE resistance_type_zh=:rt",
-                     {'rt': res_type})
+        return _maybe_raw_array([])
+    rows = fetch_all(
+        "SELECT DISTINCT resistance_location_zh FROM general_view WHERE resistance_type_zh=:rt",
+        {'rt': res_type}
+    )
     out = []
     has_empty = False
     for r in rows:
@@ -590,12 +719,15 @@ def get_resistance_locations_by_type(res_type):
             out.append(s)
     if res_type == '空载' or has_empty:
         out.insert(0, '无')
-    return jsonify(out)
+    return _maybe_raw_array(out)
 
+# =========================================
+# Search
+# =========================================
 @app.route('/api/search_fans', methods=['POST'])
 def api_search_fans():
     try:
-        data = request.get_json(force=True) or {}
+        data = request.get_json(force=True, silent=True) or {}
         mode = (data.get('mode') or 'filter').strip()
         if mode == 'expand':
             brand = (data.get('brand') or '').strip()
@@ -603,17 +735,18 @@ def api_search_fans():
             res_type = (data.get('res_type') or '').strip()
             res_loc = data.get('res_loc')
             if not brand or not model:
-                return jsonify({'success': False, 'error_message': '缺少品牌或型号'})
-            # expand 查询
+                return resp_err('EXPAND_MISSING_BRAND_MODEL', '缺少品牌或型号')
             where = ["brand_name_zh=:b", "model_name=:m"]
             params = {'b': brand, 'm': model}
             if res_type and res_type != '全部':
-                where.append("resistance_type_zh=:rt"); params['rt'] = res_type
+                where.append("resistance_type_zh=:rt")
+                params['rt'] = res_type
             if res_loc is not None and res_loc not in ('', '全部'):
                 if res_loc == '无':
                     where.append("COALESCE(NULLIF(TRIM(resistance_location_zh),''),'') = ''")
                 else:
-                    where.append("resistance_location_zh=:rl"); params['rl'] = res_loc
+                    where.append("resistance_location_zh=:rl")
+                    params['rl'] = res_loc
             sql = f"""
               SELECT model_id, condition_id, brand_name_zh, model_name,
                      resistance_type_zh, resistance_location_zh,
@@ -642,41 +775,44 @@ def api_search_fans():
                     'max_airflow': float(r['max_airflow']) if r['max_airflow'] is not None else None,
                     'like_count': r['like_count']
                 })
-            return jsonify({'success': True, 'data': {'mode': 'expand', 'items': items, 'count': len(items)}})
+            return resp_ok({'mode': 'expand', 'items': items, 'count': len(items)})
 
-        # 普通搜索
+        # Filter mode
         res_type = (data.get('search_res_type') or '').strip()
-        res_loc  = (data.get('search_res_loc') or '').strip()
+        res_loc = (data.get('search_res_loc') or '').strip()
         size_filter = (data.get('size_filter') or '').strip()
         thickness_min = (data.get('thickness_min') or '').strip()
         thickness_max = (data.get('thickness_max') or '').strip()
-        sort_by  = (data.get('sort_by') or 'none').strip()
+        sort_by = (data.get('sort_by') or 'none').strip()
         sort_value_raw = (data.get('sort_value') or '').strip()
 
         if not res_type:
-            return jsonify({'success': False, 'error_message': '请选择风阻类型'})
+            return resp_err('SEARCH_MISSING_TYPE', '请选择风阻类型')
         if res_type != '空载' and not res_loc:
-            return jsonify({'success': False, 'error_message': '请选择风阻位置'})
+            return resp_err('SEARCH_MISSING_LOCATION', '请选择风阻位置')
 
         try:
-            tmin = int(thickness_min); tmax = int(thickness_max)
-            if tmin < 1 or tmax < 1 or tmin > 99 or tmax > 99 or tmin > tmax:
-                return jsonify({'success': False, 'error_message': '厚度区间不合法 (1~99 且最小不大于最大)'})
+            tmin = int(thickness_min)
+            tmax = int(thickness_max)
         except ValueError:
-            return jsonify({'success': False, 'error_message': '厚度必须为整数'})
+            return resp_err('SEARCH_INVALID_THICKNESS_FORMAT', '厚度必须为整数')
+        if tmin < 1 or tmax < 1 or tmin > 99 or tmax > 99 or tmin > tmax:
+            return resp_err('SEARCH_INVALID_THICKNESS_RANGE', '厚度区间不合法 (1~99 且最小不大于最大)')
 
         sort_value = None
         if sort_by != 'none':
             if not sort_value_raw:
-                return jsonify({'success': False, 'error_message': '请输入限制值'})
+                return resp_err('SEARCH_MISSING_SORT_VALUE', '请输入限制值')
             try:
                 sort_value = float(sort_value_raw)
             except ValueError:
-                return jsonify({'success': False, 'error_message': '限制值必须是数字'})
+                return resp_err('SEARCH_INVALID_SORT_VALUE', '限制值必须是数字')
 
         res_loc_filter = '' if res_type == '空载' else res_loc
-        results = search_fans_by_condition(res_type, res_loc_filter, sort_by, sort_value,
-                                           size_filter, tmin, tmax, limit=200)
+        results = search_fans_by_condition(
+            res_type, res_loc_filter, sort_by, sort_value,
+            size_filter, tmin, tmax, limit=200
+        )
 
         if sort_by == 'rpm':
             label = f'条件限制：转速 ≤ {sort_value_raw} RPM'
@@ -684,23 +820,31 @@ def api_search_fans():
             label = f'条件限制：噪音 ≤ {sort_value_raw} dB'
         else:
             label = '条件：全速运行'
-        return jsonify({'success': True, 'search_results': results, 'condition_label': label})
+
+        return resp_ok({'search_results': results, 'condition_label': label})
     except Exception as e:
         app.logger.exception(e)
-        return jsonify({'success': False, 'error_message': f'搜索异常: {e}'})
+        return resp_err('INTERNAL_ERROR', f'搜索异常: {e}', 500)
 
-# 排行
+# =========================================
+# Rankings
+# =========================================
 @app.route('/api/top_ratings', methods=['GET'])
 def api_top_ratings():
     try:
-        return jsonify({'success': True, 'data': get_top_ratings(limit=10)})
+        data = get_top_ratings(limit=10)
+        return resp_ok({'items': data})
     except Exception as e:
         app.logger.exception(e)
-        return jsonify({'success': False, 'error': str(e)})
+        return resp_err('INTERNAL_ERROR', str(e), 500)
 
+# =========================================
+# Query Count (去除顶层旧兼容字段)
+# =========================================
 @app.route('/api/query_count')
 def get_query_count():
-    return jsonify({'count': query_count_cache})
+    return resp_ok({'count': query_count_cache})
+
 
 def update_query_count():
     global query_count_cache
@@ -712,29 +856,38 @@ def update_query_count():
             print(f"更新查询次数失败: {e}")
         time.sleep(60)
 
+
 threading.Thread(target=update_query_count, daemon=True).start()
 
+# =========================================
+# Theme & Config (去除 extra)
+# =========================================
 @app.route('/api/theme', methods=['POST'])
 def api_theme():
     data = request.get_json(force=True, silent=True) or {}
-    session['theme'] = data.get('theme', 'light')
+    theme = data.get('theme', 'light')
+    session['theme'] = theme
     session.modified = True
-    return jsonify({'success': True})
+    return resp_ok({'theme': theme})
+
 
 @app.route('/api/config')
 def api_config():
-    return jsonify({
-        'success': True,
+    cfg = {
         'click_cooldown_ms': CLICK_COOLDOWN_SECONDS * 1000,
         'recent_likes_limit': RECENT_LIKES_LIMIT
-    })
+    }
+    return resp_ok(cfg)
 
+# =========================================
+# Index
+# =========================================
 @app.route('/')
 def index():
     brands_rows = fetch_all("SELECT DISTINCT brand_name_zh FROM fan_brand")
     brands = [r['brand_name_zh'] for r in brands_rows]
     res_types_rows = fetch_all("SELECT DISTINCT resistance_type_zh FROM working_condition")
-    res_locs_rows  = fetch_all("SELECT DISTINCT resistance_location_zh FROM working_condition")
+    res_locs_rows = fetch_all("SELECT DISTINCT resistance_location_zh FROM working_condition")
 
     top_queries = get_top_queries(limit=TOP_QUERIES_LIMIT)
     top_ratings = get_top_ratings(limit=TOP_QUERIES_LIMIT)
@@ -749,6 +902,9 @@ def index():
         size_options=SIZE_OPTIONS,
     )
 
+# =========================================
+# Entrypoint
+# =========================================
 if __name__ == '__main__':
     app.logger.setLevel(logging.INFO)
     app.run(host='0.0.0.0', port=5001, debug=True, use_reloader=False)
