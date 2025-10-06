@@ -692,15 +692,24 @@
         if (showFitCurves) showFitCurves = false;
         }
 
+    const exportBg = (payload && payload.chartBg) || getExportBg();
+    const bgNormal = isFs ? exportBg : 'transparent';
+
     if (!sList.length || (!showRawCurves && !showFitCurves)) {
-      const bgColor = (payload && payload.chartBg) || getExportBg();
       toggleFitUI(false);
       return {
         __empty:true,
-        backgroundColor: bgColor,
+        backgroundColor: bgNormal,
         title:{ text:'暂无数据', left:'center', top:'middle',
           textStyle:{ color:t.axisLabel, fontFamily:t.fontFamily } },
-        toolbox:{ feature:{ saveAsImage:{ backgroundColor:bgColor, pixelRatio: window.devicePixelRatio || 1 } } },
+        toolbox:{
+           feature:{ 
+            saveAsImage:{ 
+              backgroundColor:exportBg, 
+              pixelRatio: window.devicePixelRatio || 1 
+            } 
+          } 
+        },
         tooltip:{ show:false, triggerOn:'none' }
       };
     }
@@ -826,6 +835,7 @@
     });
   }
 
+
     return {
       __empty:false,
       __titlePrefix:titlePrefix,
@@ -835,7 +845,7 @@
       __titleFontWeight: titleFontWeight,
       __titleFamily: t.fontFamily,
 
-      backgroundColor: bgColor,
+      backgroundColor: bgNormal,
       color: sList.map(s=>s.color),
       textStyle:{ fontFamily:t.fontFamily },
       stateAnimation: { duration: 220, easing: 'cubicOut' },
@@ -894,7 +904,10 @@
         feature:{
           dataZoom:{ yAxisIndex:'none' },
           restore:{},
-          saveAsImage:{ backgroundColor:bgColor, pixelRatio: window.devicePixelRatio || 1 },
+          saveAsImage:{ 
+            backgroundColor:exportBg, 
+            pixelRatio: window.devicePixelRatio || 1 
+          },
           myFullscreen: {
             show: true,
             title: !!document.fullscreenElement ? '退出全屏' : '全屏查看',
