@@ -13,6 +13,7 @@ window.__APP = window.__APP || {};
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', apply, { once:true });
+    applyDarkGradientIfNeeded();
   } else {
     apply();
   }
@@ -2771,7 +2772,7 @@ async function primeSelectedLikeStatus(){
         if (m && c) updateLikeIcons(m, c, true);
       }
     });
-    
+
     // 二次判定：增量后若仍不同步且属于小集合 → 全量补齐
     const fp = LocalState.likes.getServerFP && LocalState.likes.getServerFP();
     if (!didFullFetch &&
@@ -3059,15 +3060,25 @@ window.__APP.modules = {
 /* 查询次数显示 */
 function loadQueryCount() {
   fetch('/api/query_count')
-    .then(response => response.json())
-    .then(data => {
-      document.getElementById('query-count').textContent = data.count;
+    .then(r => r.json())
+    .then(j => {
+      // 兼容结构：新 = j.data.count；旧（如果后端改回裸 count）= j.count
+      const count = (j && typeof j === 'object')
+        ? (j.data && typeof j.data === 'object' && typeof j.data.count !== 'undefined'
+            ? j.data.count
+            : (typeof j.count !== 'undefined' ? j.count : 0))
+        : 0;
+      const el = document.getElementById('query-count');
+      if (el) el.textContent = count;
     })
-    .catch(error => {
-      console.error('获取查询次数失败:', error);
+    .catch(err => {
+      console.warn('获取查询次数失败:', err);
     });
 }
-document.addEventListener('DOMContentLoaded', loadQueryCount);
+document.addEventListener('DOMContentLoaded', () => {
+  loadQueryCount();
+  setInterval(loadQueryCount, 60000);
+});
 
 /* 最近点赞标题渐隐宽度测量 */
 function applyRecentLikesTitleMask() {
@@ -3375,4 +3386,67 @@ async function logNewPairs(addedDetails){
   }catch(e){
     // 静默失败即可
   }
+}
+
+function generateDarkGradient() {
+  // 随机主色 & 副色 (HSL)
+  const h1 = Math.floor(Math.random() * 360);
+  const h2Offset = 30 + Math.floor(Math.random() * 60); // 30~90 之间偏移
+  const h2 = (h1 + h2Offset) % 360;
+
+  const s1 = 35 + Math.random() * 25; // 35-60%
+  const s2 = 35 + Math.random() * 25;
+
+  const l1 = 10 + Math.random() * 8;  // 10-18% 更暗
+  const l2 = 14 + Math.random() * 12; // 14-26% 略亮
+
+  const angle = Math.floor(Math.random() * 360);
+
+  const stop1 = `hsl(${h1} ${s1.toFixed(1)}% ${l1.toFixed(1)}%)`;
+  const stop2 = `hsl(${h2} ${s2.toFixed(1)}% ${l2.toFixed(1)}%)`;
+
+  // 选择更暗的那一个作为基准底色
+  const baseIsFirst = l1 <= l2;
+  const base = baseIsFirst ? stop1 : stop2;
+
+  const gradient = `linear-gradient(${angle}deg, ${stop1} 0%, ${stop2} 100%)`;
+
+  const root = document.documentElement;
+  root.style.setProperty('--dark-rand-gradient', gradient);
+  root.style.setProperty('--dark-rand-base', base);
+
+  // 覆盖 body 的主背景色变量（这样 body background-color 仍与变量体系统一）
+  // 这里不直接改 --bg-primary，以免影响其它组件逻辑；而是直接设置 body 的 background-color
+  // 但因 CSS 中 body 使用 var(--bg-primary) 作为 background-color，
+  // 我们通过同步 --bg-primary 的值来让 getComputedStyle(body).backgroundColor 返回基准色。
+  root.style.setProperty('--bg-primary', 'var(--dark-rand-base)');
+}
+
+function applyDarkGradientIfNeeded() {
+  const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+  if (isDark) {
+    generateDarkGradient();
+  } else {
+    const root = document.documentElement;
+    root.style.setProperty('--dark-rand-gradient', 'none');
+    // 恢复亮色基准（如果你有自定义其它亮色可以在这里改回）
+    root.style.setProperty('--bg-primary', '#f9fafb');
+  }
+}
+
+function setTheme(t){
+  const prev = document.documentElement.getAttribute('data-theme');
+  document.documentElement.setAttribute('data-theme', t);
+  if (themeIcon) themeIcon.className = t==='dark' ? 'fa-solid fa-sun' : 'fa-solid fa-moon';
+  try { localStorage.setItem('theme', t); } catch(_){}
+  fetch('/api/theme',{
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({theme:t})
+  }).catch(()=>{});
+  // 新增：根据主题应用或清除随机暗色渐变
+  applyDarkGradientIfNeeded();
+
+  // 如果需要在用户“重复点击暗色图标”时刷新渐变，可在这里加：
+  // if (t === 'dark' && prev === 'dark') generateDarkGradient();
 }

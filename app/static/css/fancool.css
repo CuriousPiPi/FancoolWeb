@@ -1,10 +1,3 @@
-/* =========================================================
- * FancyCool UI Styles (Refactored Clean Version)
- * - 移除旧兼容空选择器与重复规则
- * - 保留必要变量别名（仍被部分暗色规则或 JS 引用）
- * - 统一语义色使用 fc-color-*，内部仍留 brand/danger/primary alias 过渡
- * ======================================================= */
-
 /* 1. 基础与变量 */
 html { font-size:16px; }
 html, body { height:100%; overflow-x:hidden; }
@@ -25,7 +18,7 @@ html, body { height:100%; overflow-x:hidden; }
 
   --fc-color-info:#2563eb;
 
-  /* 依旧存在的别名（旧 JS 或暗色态里有用到，后续可再清理） */
+  /* 旧别名 */
   --brand-green:#10B981;
   --brand-green-hover:#0ea373;
   --brand-green-dark:#198f63;
@@ -44,6 +37,13 @@ html, body { height:100%; overflow-x:hidden; }
   --text-secondary:#4b5563;
   --border-color:#e5e7eb;
   --shadow-color:rgba(0,0,0,0.12);
+  --transition-speed:0.28s;
+
+  /* 动态暗色渐变占位：默认无（light 模式不会显示） */
+  --dark-rand-gradient:none;
+  /* 暗色主题时 JS 会写入 --dark-rand-base 作为真正的底色（导出等回退） */
+  --dark-rand-base:#111827;
+
   --transition-speed:0.28s;
 
   --toast-bg:#ffffff;
@@ -88,7 +88,7 @@ html, body { height:100%; overflow-x:hidden; }
 
 [data-theme="dark"] {
   --bg-primary:#111827;
-  --bg-secondary:#1f2937;
+  --bg-secondary:#1f2937c3;
   --text-primary:#f3f4f6;
   --text-secondary:#d1d5db;
   --border-color:#374151;
@@ -104,11 +104,26 @@ html, body { height:100%; overflow-x:hidden; }
   --tooltip-shadow:0 8px 28px rgba(0,0,0,.45);
 }
 
+/* ===== 修改：拆分背景，允许注入渐变 ===== */
 body {
-  background:var(--bg-primary)!important;
+  /* 基础底色：亮色使用 --bg-primary；暗色时 JS 会把 --dark-rand-base 改成深色并保留在 background-color */
+  background-color:var(--bg-primary)!important;
+  /* 渐变层：默认 none，暗色模式 JS 写入 --dark-rand-gradient */
+  background-image:var(--dark-rand-gradient)!important;
+  background-attachment:fixed;
+  background-size:cover;
+  background-repeat:no-repeat;
+
   color:var(--text-primary);
   font-family:system-ui,-apple-system,"Segoe UI","Helvetica Neue","Microsoft YaHei",Arial,sans-serif;
-  transition:background .3s,color .3s;
+  transition:background-color .5s, color .3s;
+  /* 给渐变出现一个轻微淡入体验 */
+  animation:fc-bg-fade-in .6s ease;
+}
+
+@keyframes fc-bg-fade-in {
+  from { opacity:0; }
+  to { opacity:1; }
 }
 
 /* Tailwind 适配覆写 */
@@ -333,7 +348,7 @@ input.fc-field[type=number] { -moz-appearance:textfield; }
   max-height:360px;
   overflow:auto;
   padding-top:0;
-  background:var(--bg-secondary);
+  background:transparent;
   scrollbar-gutter:stable both-edges;
 }
 .fc-rank-scroll::-webkit-scrollbar { width:8px; }
@@ -393,14 +408,16 @@ input.fc-field[type=number] { -moz-appearance:textfield; }
 }
 
 /* 右侧卡片遮罩 */
+
 .fc-right-card .fc-rank-table thead th:last-child {
   top:0;
   z-index:11;
   box-shadow:0 2px 3px -1px rgba(0,0,0,.45);
 }
+
 .fc-right-card .fc-rank-table td:last-child {
   background:linear-gradient(to left,
-    var(--bg-secondary) 30px,
+    transparent 30px,
     rgba(0,0,0,0) 50px);
 }
 .fc-right-card .fc-rank-box { position:relative; }
@@ -409,7 +426,7 @@ input.fc-field[type=number] { -moz-appearance:textfield; }
   position:absolute;
   top:0; right:-2px; bottom:0;
   width:calc(var(--sbw) + 3px);
-  background:var(--bg-secondary);
+  background:transparent;
   pointer-events:none;
   z-index:20;
 }
@@ -849,7 +866,7 @@ input.fc-field[type=number] { -moz-appearance:textfield; }
   position:fixed;
   inset:0;
   background:rgba(0,0,0,.38);
-  backdrop-filter:saturate(120%) blur(2px);
+  backdrop-filter:saturate(120%) blur(10px);
   z-index:250;
   opacity:0;
   transition:opacity .25s ease;
