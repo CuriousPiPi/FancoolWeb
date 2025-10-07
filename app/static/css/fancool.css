@@ -866,7 +866,7 @@ input.fc-field[type=number] { -moz-appearance:textfield; }
   position:fixed;
   inset:0;
   background:rgba(0,0,0,.38);
-  backdrop-filter:saturate(120%) blur(10px);
+  backdrop-filter:saturate(120%) blur(8px);
   z-index:250;
   opacity:0;
   transition:opacity .25s ease;
@@ -1174,8 +1174,8 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
 /*Toast 毛玻璃效果*/
 .fc-toast {
   background: var(--toast-glass-bg) !important;
-  backdrop-filter: blur(8px) saturate(160%);
-  -webkit-backdrop-filter: blur(8px) saturate(160%);
+  backdrop-filter: blur(8px) saturate(120%);
+  -webkit-backdrop-filter: blur(8px) saturate(120%);
   border: 1px solid var(--toast-glass-border) !important;
   box-shadow: var(--toast-glass-shadow) !important;
 
