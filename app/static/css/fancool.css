@@ -1150,4 +1150,11 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
     position: relative;
     transition: background .25s, box-shadow .25s, transform .2s;
   }
+
+    #recentLikesList .recent-like-group .actions .fc-btn-icon-add {
+    background:transparent !important;
+    box-shadow:none !important;
+    border:none !important;
+
+  }
 }
