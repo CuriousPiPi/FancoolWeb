@@ -1171,8 +1171,8 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
 }
 
 
+/*Toast 毛玻璃效果*/
 .fc-toast {
-  
   background: var(--toast-glass-bg) !important;
   backdrop-filter: blur(8px) saturate(160%);
   -webkit-backdrop-filter: blur(8px) saturate(160%);
@@ -1189,7 +1189,6 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
   transition: background .25s ease, box-shadow .25s ease;
 }
 
-
 .fc-toast .icon,
 .fc-toast i.icon,
 .fc-toast > i.fa-solid,
@@ -1205,7 +1204,6 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
   transform: translateY(-1px);    
 }
 
-
 .fc-toast .msg {
   flex: 1 1 auto;
   min-width: 0;
@@ -1214,7 +1212,6 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
   font-size: 14px;
   font-weight: 500;
 }
-
 
 .fc-toast__close {
   top: 6px;
@@ -1226,11 +1223,9 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
 }
 .fc-toast__close:hover { opacity: .95; }
 
-
 .fc-toast--success { border-color: rgba(16,185,129,0.6) !important; }
 .fc-toast--error   { border-color: rgba(220,38,38,0.6) !important; }
 .fc-toast--loading { border-color: rgba(37,99,235,0.60) !important; }
-
 
 @keyframes toast-in {
   from { opacity:0; transform:translateY(-8px) scale(.96); }
