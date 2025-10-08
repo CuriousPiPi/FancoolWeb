@@ -5,7 +5,7 @@ import time
 import threading
 import hmac
 import hashlib
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Any
 
 from flask import Flask, request, render_template, session, jsonify, g, make_response
@@ -883,6 +883,14 @@ def api_config():
 def source_info():
     return render_template('source-info.html')
 
+@app.route('/legal')
+def legal():
+    return render_template(
+        'legal.html',
+        current_year=datetime.now().year,
+        update_date='2025-10-08'
+    )
+
 # =========================================
 # Index
 # =========================================
@@ -904,6 +912,7 @@ def index():
         top_queries=top_queries,
         top_ratings=top_ratings,
         size_options=SIZE_OPTIONS,
+        current_year=datetime.now().year
     )
 
 # =========================================

@@ -102,14 +102,14 @@
 
   <!-- 主内容 -->
   <main id="main-content">
-    <div class="container mx-auto px-4 py-8">
+    <div class="container mx-auto px-4 pt-8 pb-4">
       <header class="text-center mb-8">
         <h1 class="text-3xl font-bold text-blue-600 mb-2">风扇库</h1>
         <p class="text-gray-600">一个风扇性能可视化对比网站，选择参数并添加到图表</p>
       </header>
 
       <div style="position: fixed; top: 20px; right: 100px; z-index: 1000;">
-        <a href="/source-info" class="fc-info-btn bg-white text-gray-700 hover:text-blue-600 p-2 rounded-full shadow-md border border-gray-200 flex items-center justify-center" title="数据来源与说明(待开发)">
+        <a href="/source-info" class="fc-info-btn bg-white text-gray-700 hover:text-blue-600 p-2 rounded-full shadow-md border border-gray-200 flex items-center justify-center" title="数据来源与说明">
           <i class="fa-solid fa-circle-info text-lg"></i>
         </a>
       </div>
@@ -431,7 +431,7 @@
       </div>
 
       <!-- 图表 -->
-      <div class="fc-chart-container bg-white rounded-xl shadow-md p-6 relative" id="chart-settings">
+      <div class="fc-chart-container bg-white rounded-xl shadow-md p-4 relative" id="chart-settings">
         <div id="chartRoot">
           <iframe id="chartFrame" src="/static/echarts-render.html"
                   allow="fullscreen" allowfullscreen
@@ -439,8 +439,22 @@
         </div>
       </div>
     </div>
+    <!-- 底部 Footer：无背景色，文字跟随主题 -->
+  <footer class="fc-site-footer">
+    <div class="container mx-auto px-4 py-2 text-sm flex flex-col md:flex-row gap-2 md:gap-4 md:items-center justify-between">
+      <div class="flex flex-col md:flex-row md:items-center gap-2 md:gap-6">
+        <span>© {{ current_year or 2025 }} 风扇库</span>
+        <span class="opacity-70">沪ICP备2025145529号-1</span>
+        <span>交流及反馈QQ群：1070155380</span>
+        <a href="https://github.com/CuriousPiPi/FancoolWeb.git" class="underline hover:text-blue-600">GitHub代码开源</a>
+      </div>
+      <div class="flex flex-col md:flex-row md:items-center gap-2 md:gap-4">
+        <a href="/legal" class="underline hover:text-blue-600">版权及免责声明</a>
+      </div>
+    </div>
+  </footer>
   </main>
-
+  
   <script src="{{ url_for('static', filename='js/local-state.js') }}"></script>
   <script src="{{ url_for('static', filename='js/fancool.js') }}"></script>
 </body>
