@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>数据来源与说明</title>
+  <link rel="icon" type="image/png" href="/static/logo.png">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/tailwindcss@3.4.3/dist/tailwind.min.css">
+  <style>
+    .scenario-grid {
+      display: grid;
+      grid-template-columns: 1fr;
+      gap: 2rem 1.5rem;
+    }
+    @media (min-width: 640px) {
+      .scenario-grid {
+        grid-template-columns: repeat(2, 1fr);
+      }
+    }
+    @media (min-width: 900px) {
+      .scenario-grid {
+        grid-template-columns: repeat(3, 1fr);
+      }
+    }
+    .scenario-item {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    .scenario-img-frame {
+      width: 360px;
+      height: 360px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #f3f4f6; /* 灰色背景，便于区分图片边界 */
+      border-radius: 0.75rem;
+      overflow: hidden;
+      box-shadow: 0 2px 6px rgba(0,0,0,.08);
+      margin-bottom: 0.5rem;
+    }
+    .scenario-img-frame img {
+      max-width: 100%;
+      max-height: 100%;
+      object-fit: contain;
+      object-position: center;
+      display: block;
+      background: #fff;
+    }
+    .scenario-item span {
+      margin-top: 0.5rem;
+      text-align: center;
+      color: #4B5563;
+      font-size: 0.95rem;
+      width: 100%;
+      word-break: break-all;
+    }
+  </style>
+</head>
+<body class="bg-gray-50 min-h-screen">
+  <div class="container mx-auto px-4 py-8 max-w-3xl">
+    <!-- 返回主页 -->
+    <a href="/"
+       class="inline-block mb-6 px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700 transition"
+       title="返回主页">
+      ← 返回主页
+    </a>
+
+    <!-- 主图及说明 -->
+    <section class="bg-white rounded-xl shadow-md p-6 mb-8">
+      <h1 class="text-2xl font-bold text-blue-700 mb-4">数据来源与测试环境说明</h1>
+      <div class="flex flex-col items-center mb-4">
+        <img src="/static/imgs/main_eqp.jpg" alt="主测试环境配图" class="rounded-lg w-full max-w-lg mb-4 shadow">
+        <p class="text-gray-700 text-base leading-relaxed mb-4">
+          ↑测试装置如上图所示↑<br>
+          风管在风扇的进气侧，长度（不算整流罩）为1m，外径120mm；内径114mm。风速探头为testo405i热敏式风速仪。<br>
+          测试时风扇连接PWM调速器对风扇进行调速，待转速稳定后用风速探头采集20秒取平均值，最后根据风管内径转换为风量。
+        </p>
+        <div class="w-full max-w-lg bg-gray-100 rounded p-4">
+          <h2 class="text-lg font-semibold text-blue-600 mb-2">常见问答（Q&A）</h2>
+          <dl class="space-y-2">
+            <dt class="font-medium">Q: 为什么风管在风扇进气侧？</dt>
+            <dd class="ml-4 text-gray-600">A: 经前期测试发现，风扇出气侧有较大的旋流和乱流，导致测试数据不稳定，如果增加整流格栅又会增加风阻。而进气侧气流受风扇旋流影响小得多，配合喇叭形整流口流场更加均匀稳定，因此选择在进气侧进行测试。</dd>
+            <br>
+            <dt class="font-medium">Q: 风管壁附近是否有低速附面层气流？</dt>
+            <dd class="ml-4 text-gray-600">A: 在未安装喇叭形进气口的时候能观察到管道壁附近不到1cm处的气流速度相对中心处有约10%的差距，但无法确定是附面层气流，更有可能是入口无整流导致的乱流，安装喇叭口之后这个现象几乎完全消失。</dd>
+            <br>
+            <dt class="font-medium">Q: 为什么有些型号的空载数据和官方标称不一样？</dt>
+            <dd class="ml-4 text-gray-600">A: 不同厂家可能采用了不同的测试标准和环境，因此导致了数据的差异。而且我们的测试设备和环境没有那么专业，所以空载风量数值以官方数据为准，我们的测试结果仅供参考。</dd>
+          </dl>
+        </div>
+      </div>
+    </section>
+
+    <!-- 工况配图区域 -->
+    <section class="bg-white rounded-xl shadow-md p-6">
+      <h2 class="text-xl font-semibold text-blue-700 mb-4">不同测试负载展示</h2>
+      <div class="scenario-grid">
+        <div class="scenario-item">
+          <div class="scenario-img-frame">
+            <img src="/static/imgs/冷排(27mm).jpg" alt="工况1">
+          </div>
+          <span>冷排(厚度27mm)</span>
+        </div>
+        <div class="scenario-item">
+          <div class="scenario-img-frame">
+            <img src="/static/imgs/多孔板(40%穿孔率).jpg" alt="工况2">
+          </div>
+          <span>多孔板(40%穿孔率)</span>
+        </div>
+        <div class="scenario-item">
+          <div class="scenario-img-frame">
+            <img src="/static/imgs/尼龙网(65%通风率).jpg" alt="工况3">
+          </div>
+          <span>尼龙网(65%通风率)</span>
+        </div>
+        <!-- 占位 -->
+      </div>
+    </section>
+  </div>
+</body>
+</html>

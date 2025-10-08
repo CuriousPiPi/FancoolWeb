@@ -879,6 +879,10 @@ def api_config():
     }
     return resp_ok(cfg)
 
+@app.route('/source-info')
+def source_info():
+    return render_template('source-info.html')
+
 # =========================================
 # Index
 # =========================================
