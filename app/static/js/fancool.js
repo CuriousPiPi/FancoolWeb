@@ -3429,7 +3429,7 @@ function applyDarkGradientIfNeeded() {
   } else {
     const root = document.documentElement;
     root.style.setProperty('--dark-rand-gradient', 'none');
-    // 恢复亮色基准（如果你有自定义其它亮色可以在这里改回）
+    // 恢复亮色基准（如果有自定义其它亮色可以在这里改回）
     root.style.setProperty('--bg-primary', '#f9fafb');
   }
 }
