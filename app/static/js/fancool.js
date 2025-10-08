@@ -2483,7 +2483,7 @@ document.addEventListener('mouseleave',(e)=>{
   stopSidebarMarquee(row);
 }, true);
 
-/* 最近点赞场景行跑马灯 */
+/* 最近点赞工况行跑马灯 */
 function prepareRecentLikesMarquee(){
   document.querySelectorAll('#recentLikesList .scenario-row .scenario-text').forEach(container=>{
     if (container.querySelector('.fc-recent-marquee-inner')) return;
@@ -3156,7 +3156,7 @@ function maybeAutoOpenSidebarOnAdd(){
   });
 })();
 
-/* 搜索场景位置联动（按负载筛选） */
+/* 搜索工况位置联动（按负载筛选） */
 (function initScenarioCascading(){
   const form = document.getElementById('searchForm');
   if (!form) return;
@@ -3304,7 +3304,7 @@ async function refreshLocByType(rt){
   });
 })();
 
-/* 场景格式化 */
+/* 工况格式化 */
 function formatScenario(rt, rl){
   const rtype = escapeHtml(rt || '');
   const raw = rl ?? '';
