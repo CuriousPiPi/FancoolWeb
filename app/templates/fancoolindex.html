@@ -268,8 +268,11 @@
             已执行查询<span id="query-count">0</span>次
           </div>
           <nav class="fc-tabs with-subseg" fc-tabs--with-subseg data-tab-group="right-panel">
-            <div class="fc-tabs__item active" data-tab="top-queries">近期热门</div>
-            <div class="fc-tabs__item" data-tab="search-results">搜索结果</div>
+            <div class="fc-tabs__primary-group">
+              <div class="fc-tabs__item active" data-tab="top-queries">近期热门</div>
+              <div class="fc-tabs__item" data-tab="search-results">搜索结果</div>
+              <div class="fc-tabs__item" data-tab="recent-updates">近期更新</div>
+            </div>
             <div class="flex-1"></div>
             <div class="fc-tabs__subseg" id="rightSubsegContainer"></div>
           </nav>
@@ -426,7 +429,29 @@
                   </div>
                 </div>
               </div>
-
+              <div class="fc-tab-pane" id="recent-updates-pane">
+                <div class="fc-rank-box">
+                  <div class="fc-rank-panel active" id="updates-panel" role="tabpanel" aria-label="近期更新">
+                    <div class="fc-rank-scroll">
+                      <table class="fc-rank-table" id="recentUpdatesTable">
+                        <thead>
+                        <tr>
+                          <th>品牌</th>
+                          <th>型号</th>
+                          <th>尺寸</th>
+                          <th>工况</th>
+                          <th>更新日期</th>
+                          <th class="add-header">添加</th>
+                        </tr>
+                        </thead>
+                        <tbody id="recentUpdatesTbody">
+                          <tr><td colspan="6" class="text-center text-gray-500 py-6">首次点击“近期更新”加载...</td></tr>
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
           </div>
         </div>

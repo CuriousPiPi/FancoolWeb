@@ -75,6 +75,7 @@ SIZE_OPTIONS = ["不限", "120", "140"]
 TOP_QUERIES_LIMIT = 10
 RECENT_LIKES_LIMIT = 50
 CLICK_COOLDOWN_SECONDS = 0.5
+RECENT_UPDATES_LIMIT = 50
 
 query_count_cache = 0
 
@@ -513,6 +514,32 @@ def search_fans_by_condition_with_fit(res_type, res_loc, sort_by, sort_value,
 
     items.sort(key=lambda r: (r['effective_airflow'] if r['effective_airflow'] is not None else -1e9), reverse=True)
     return items[:limit]
+
+def get_recent_updates(limit: int = RECENT_UPDATES_LIMIT) -> List[dict]:
+    """
+    从视图 FANDB.update_notice_d30_view 获取近30天内的更新记录。
+    期望字段：
+      - model_id, condition_id
+      - brand_name_zh, model_name
+      - resistance_type_zh, resistance_location_zh
+      - size, thickness, max_speed
+      - update_date
+    """
+    sql = """
+      SELECT
+        model_id, condition_id,
+        brand_name_zh, model_name,
+        resistance_type_zh, resistance_location_zh,
+        size, thickness, max_speed,
+        CONCAT(
+          DATE_FORMAT(update_date, '%Y-%m-%d %H:%i'),
+          ' CST'
+        ) AS update_date
+      FROM update_notice_d30_view
+      ORDER BY update_date DESC
+      LIMIT :l
+    """
+    return fetch_all(sql, {'l': limit})
 
 # =========================================
 # Visit Start
@@ -1166,6 +1193,17 @@ def index():
         current_year=datetime.now().year
     )
 
+# 3) 新增：近期更新 API（懒加载页签调用）
+@app.route('/api/recent_updates', methods=['GET'])
+def api_recent_updates():
+    try:
+        items = get_recent_updates(limit=RECENT_UPDATES_LIMIT)
+        # 直接返回标准结构，前端用 normalizeApiResponse 解析
+        return resp_ok({'items': items})
+    except Exception as e:
+        app.logger.exception(e)
+        return resp_err('INTERNAL_ERROR', str(e), 500)
+    
 # =========================================
 # Entrypoint
 # =========================================

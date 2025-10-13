@@ -339,6 +339,21 @@ input.fc-field[type=number] { -moz-appearance:textfield; }
   text-align:center;
 }
 
+/* 右侧三大页签（近期热门/搜索结果/近期更新）始终同一行，不换行 */
+.fc-tabs[data-tab-group="right-panel"] {
+  flex-wrap: wrap;
+}
+.fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group {
+  display: flex;        /* 从 inline-flex 改为 flex，便于占满剩余空间 */
+  flex-wrap: nowrap;    /* 组内不换行 */
+  gap: .5rem;
+  flex: 1 1 auto;       /* 可占据可用宽度 */
+  min-width: 0;
+}
+.fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group .fc-tabs__item {
+  flex: 0 0 auto !important;  /* 覆盖小屏下 .fc-tabs__item 的“自动50%占位”规则 */
+}
+
 /* 6. 排行 / 表格 */
 .fc-rank-panel { display:none; animation:fadePanel .25s ease; }
 .fc-rank-panel.active { display:block; }
@@ -1060,7 +1075,6 @@ input.fc-field[type=number] { -moz-appearance:textfield; }
     flex:1 1 calc(50% - 10px);
     text-align:center;
     padding:.55rem .8rem;
-    font-size:15px;
   }
   .fc-tabs__subseg {
     order:3;
@@ -1072,6 +1086,17 @@ input.fc-field[type=number] { -moz-appearance:textfield; }
   }
   .fc-right-card > nav.fc-tabs { margin-bottom:4px; }
   .fc-right-card .fc-rank-box { padding-top:0; }
+
+  /* ≤600px 时，继续确保三大页签不被拆到两行（仅对 right-panel 生效） */
+  .fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group {
+    flex: 1 1 100%;
+    width: 100%;
+    justify-content: space-between;
+  }
+  .fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group .fc-tabs__item {
+    flex: 1 1 0 !important;   /* 三项等分一行 */
+    text-align: center;
+  }
 }
 
 .fc-right-card.rp-narrow > nav.fc-tabs {
@@ -1085,7 +1110,6 @@ input.fc-field[type=number] { -moz-appearance:textfield; }
   flex:1 1 calc(50% - 10px);
   text-align:center;
   padding:.55rem .8rem;
-  font-size:15px;
 }
 .fc-right-card.rp-narrow .fc-tabs__subseg {
   order:3;
@@ -1096,6 +1120,17 @@ input.fc-field[type=number] { -moz-appearance:textfield; }
   margin-top:2px;
 }
 .fc-right-card.rp-narrow .fc-rank-box { padding-top:0; }
+
+/* 窄宽容器（rp-narrow）与上面逻辑一致：三大页签等分并撑满一行，子页签换到下一行 */
+.fc-right-card.rp-narrow > nav.fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group {
+  flex: 1 1 100%;
+  width: 100%;
+  justify-content: space-between;
+}
+.fc-right-card.rp-narrow > nav.fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group .fc-tabs__item {
+  flex: 1 1 0 !important;
+  text-align: center;
+}
 
 /* 拖拽垂直分隔时关闭动画 */
 body.is-vert-dragging #bottom-panel { transition:none!important; }
