@@ -2,6 +2,11 @@ window.APP_CONFIG = window.APP_CONFIG || { clickCooldownMs: 2000, maxItems: 0 };
 /* ==== 命名空间根 ==== */
 window.__APP = window.__APP || {};
 
+const FRONT_MAX_ITEMS = (window.APP_CONFIG && window.APP_CONFIG.maxItems) || 8;
+const LIKESET_VERIFY_MAX_AGE_MS = 5 * 60 * 1000;      // 5 分钟指纹过期
+const PERIODIC_VERIFY_INTERVAL_MS = 3 * 60 * 1000;    // 3 分钟后台触发一次检查
+const LIKE_FULL_FETCH_THRESHOLD = 20;
+
 /* 在最前阶段就写入上限标签，避免闪烁 */
 (function initMaxItemsLabel(){
   function apply(){
@@ -18,11 +23,6 @@ window.__APP = window.__APP || {};
     apply();
   }
 })();
-
-const FRONT_MAX_ITEMS = (window.APP_CONFIG && window.APP_CONFIG.maxItems) || 8;
-const LIKESET_VERIFY_MAX_AGE_MS = 5 * 60 * 1000;      // 5 分钟指纹过期
-const PERIODIC_VERIFY_INTERVAL_MS = 3 * 60 * 1000;    // 3 分钟后台触发一次检查
-const LIKE_FULL_FETCH_THRESHOLD = 20;
 
 (async function fetchAppConfig(){
   try {
@@ -960,14 +960,6 @@ function syncTopTabsViewportHeight(){
   document.addEventListener('mouseup', ()=>requestAnimationFrame(syncTopTabsViewportHeight));
 })();
 
-const sidebar = $('#sidebar');
-const sidebarToggle  = document.getElementById('sidebar-toggle');
-const mainContent    = $('#main-content');
-const resizer        = document.getElementById('sidebar-resizer');
-const splitter       = document.getElementById('sidebar-splitter');
-const topPanel       = document.getElementById('top-panel');
-const bottomPanel    = document.getElementById('bottom-panel');
-
 // 初始化按钮可达性状态（加安全判断，避免加载顺序问题）
 try { window.__APP?.sidebar?.refreshToggleUI?.(); } catch(_) {}
 
@@ -985,8 +977,10 @@ function setTheme(t){
   }
   document.documentElement.setAttribute('data-theme', t);
   if (themeIcon) themeIcon.className = t==='dark' ? 'fa-solid fa-sun' : 'fa-solid fa-moon';
-  localStorage.setItem('theme', t);
+  try { localStorage.setItem('theme', t); } catch(_){}
+  applyDarkGradientIfNeeded();
   fetch('/api/theme',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:t})}).catch(()=>{});
+
 }
 setTheme(currentTheme);
 themeToggle?.addEventListener('click', ()=>{
@@ -2984,21 +2978,4 @@ function applyDarkGradientIfNeeded() {
     // 恢复亮色基准（如果有自定义其它亮色可以在这里改回）
     root.style.setProperty('--bg-primary', '#f9fafb');
   }
-}
-
-function setTheme(t){
-  const prev = document.documentElement.getAttribute('data-theme');
-  document.documentElement.setAttribute('data-theme', t);
-  if (themeIcon) themeIcon.className = t==='dark' ? 'fa-solid fa-sun' : 'fa-solid fa-moon';
-  try { localStorage.setItem('theme', t); } catch(_){}
-  fetch('/api/theme',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({theme:t})
-  }).catch(()=>{});
-  // 新增：根据主题应用或清除随机暗色渐变
-  applyDarkGradientIfNeeded();
-
-  // 如果需要在用户“重复点击暗色图标”时刷新渐变，可在这里加：
-  // if (t === 'dark' && prev === 'dark') generateDarkGradient();
 }
