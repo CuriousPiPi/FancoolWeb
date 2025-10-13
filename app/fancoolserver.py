@@ -13,6 +13,8 @@ from sqlalchemy import create_engine, text
 from user_agents import parse as parse_ua
 from werkzeug.middleware.proxy_fix import ProxyFix
 
+from curves.pchip_cache import get_or_build_pchip, eval_pchip
+
 # =========================================
 # App / Config
 # =========================================
@@ -23,6 +25,22 @@ app.config['SESSION_COOKIE_SECURE'] = os.getenv('SESSION_COOKIE_SECURE', '0') ==
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 app.jinja_env.auto_reload = True
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+
+# 将 curves.pchip_cache 日志接到 Flask 的 handlers 上
+def _hook_curve_logger_to_flask():
+    import logging, os
+    l = logging.getLogger("curves.pchip_cache")
+    # 复用 Flask 的 handler，避免重复输出
+    if not l.handlers:
+        for h in app.logger.handlers:
+            l.addHandler(h)
+    l.setLevel(logging.INFO)
+    l.propagate = False  # 不再向上冒泡到 root，避免重复
+    # 打印一次路径信息，确认落盘位置
+    app.logger.info("CWD = %s", os.path.abspath(os.getcwd()))
+    app.logger.info("Curve cache dir = %s", os.path.abspath(os.getenv("CURVE_CACHE_DIR", "./curve_cache")))
+
+# _hook_curve_logger_to_flask()
 
 DB_DSN = os.getenv(
     'FANDB_DSN',
@@ -301,7 +319,6 @@ def get_top_queries(limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
              LIMIT :l"""
     return fetch_all(sql, {'l': limit})
 
-
 def get_top_ratings(limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
     sql = """SELECT model_id, condition_id,
                     brand_name_zh, model_name,
@@ -312,50 +329,173 @@ def get_top_ratings(limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
              LIMIT :l"""
     return fetch_all(sql, {'l': limit})
 
+def _effective_value_for_series(series_rows: list, model_id: int, condition_id: int,
+                                axis: str, limit_value: float | None):
+    """
+    输入：某个 (model_id, condition_id) 的所有行记录（含 rpm, noise_db, airflow）
+    输出：effective_x, effective_airflow, source ('raw'|'fit'), axis ('rpm'|'noise_db')
+    规则：
+      - 未限制：取原始最大风量的点（raw）
+      - 有限制：
+         * 若 limit < min_x → 丢弃该条目（不显示）
+         * 若存在 x==limit 的原始点 → raw
+         * 若 limit >= max_x → 取 max_x 的原始点 → raw
+         * 否则（位于域内且无原始点）→ 拟合值（fit, PCHIP）
+    """
+    import math
+    ax = 'noise_db' if axis == 'noise' else axis
+    xs, ys, rpm_list = [], [], []
+    for r in series_rows:
+        x = r[ax]
+        y = r['airflow']
+        rpm = r['rpm']
+        try:
+            xf = float(x) if x is not None else None
+            yf = float(y) if y is not None else None
+        except Exception:
+            continue
+        if xf is None or not math.isfinite(xf) or yf is None or not math.isfinite(yf):
+            continue
+        xs.append(xf); ys.append(yf); rpm_list.append(float(rpm) if r['rpm'] is not None else None)
+    if not xs:
+        return None
 
-def search_fans_by_condition(res_type, res_loc, sort_by, sort_value,
-                             size_filter=None, thickness_min=None, thickness_max=None,
-                             limit=200) -> List[dict]:
-    base = [
-        "SELECT model_id, condition_id, brand_name_zh, model_name, resistance_type_zh, resistance_location_zh,",
-        "MAX(airflow_cfm) AS max_airflow, size, thickness, MAX(rpm) AS max_speed,",
-        "MAX(COALESCE(like_count,0)) AS like_count",
-        "FROM general_view",
-        "WHERE resistance_type_zh=:rt"
-    ]
-    params = {'rt': res_type, 'limit': limit}
+    x_min, x_max = min(xs), max(xs)
 
-    def _is_empty_loc_value(v: str | None) -> bool:
-        if v is None:
-            return False
-        s = str(v).strip()
-        return s == '' or s == '无'
+    # 未限制：取 y 最大的原始点
+    if limit_value is None:
+        idx = max(range(len(ys)), key=lambda i: ys[i])
+        eff_x = xs[idx]
+        eff_y = ys[idx]
+        return {'effective_x': eff_x, 'effective_airflow': eff_y, 'effective_source': 'raw', 'effective_axis': ax,
+                'effective_rpm_at_point': rpm_list[idx]}
 
-    if res_loc is not None:
-        s = str(res_loc).strip()
-        if s not in ('全部',):
-            if _is_empty_loc_value(s):
-                base.append("AND COALESCE(NULLIF(TRIM(resistance_location_zh),''),'') = ''")
-            else:
-                base.append("AND resistance_location_zh=:rl")
-                params['rl'] = s
+    # 有限制：若限制值小于所有原始点的最小 x → 丢弃
+    lv = float(limit_value)
+    if lv < x_min - 1e-9:
+        return None
 
+    # 若 limit >= max_x → 取 max_x 原始点
+    if lv >= x_max - 1e-9:
+        idxs = [i for i, x in enumerate(xs) if abs(x - x_max) < 1e-9]
+        best = max(idxs, key=lambda i: ys[i])
+        return {'effective_x': xs[best], 'effective_airflow': ys[best], 'effective_source': 'raw', 'effective_axis': ax,
+                'effective_rpm_at_point': rpm_list[best]}
+
+    # 若存在原始点恰好等于 limit（整型 RPM 直接匹配，噪音允许 0.05 容差）
+    tol = 0.05 if ax == 'noise_db' else 0.0
+    for i, x in enumerate(xs):
+        if (tol == 0.0 and x == lv) or (tol > 0.0 and abs(x - lv) <= tol):
+            return {'effective_x': x, 'effective_airflow': ys[i], 'effective_source': 'raw', 'effective_axis': ax,
+                    'effective_rpm_at_point': rpm_list[i]}
+
+    # 位于域内且无原始点 → PCHIP 拟合
+    model = get_or_build_pchip(model_id, condition_id, ax, xs, ys)
+    if not model:
+        # 回退：取最接近 limit 的原始点
+        j = min(range(len(xs)), key=lambda i: abs(xs[i] - lv))
+        return {'effective_x': xs[j], 'effective_airflow': ys[j], 'effective_source': 'raw', 'effective_axis': ax,
+                'effective_rpm_at_point': rpm_list[j]}
+    lx = max(model['x0'], min(lv, model['x1']))
+    eff_y = eval_pchip(model, lx)
+    return {'effective_x': lx, 'effective_airflow': float(eff_y), 'effective_source': 'fit', 'effective_axis': ax,
+            'effective_rpm_at_point': None}
+
+
+def search_fans_by_condition_with_fit(res_type, res_loc, sort_by, sort_value,
+                                      size_filter=None, thickness_min=None, thickness_max=None,
+                                      limit=200) -> list[dict]:
+    """
+    统一按后端模型/原始值评估有效点，并按有效风量排序返回前 limit 条。
+    说明：
+      - 已合并原 search_fans_by_condition 的筛选功能
+      - 限制条件下若 limit < min_x 则舍弃该条目
+    """
+    where = ["resistance_type_zh=:rt"]
+    params = {'rt': res_type}
+    if res_type != '空载':
+        s = (res_loc or '').strip()
+        if s not in ('', '全部'):
+            where.append("resistance_location_zh=:rl")
+            params['rl'] = s
+        else:
+            if s == '' or s == '无':
+                where.append("COALESCE(NULLIF(TRIM(resistance_location_zh),''),'') = ''")
     if size_filter and size_filter != '不限':
-        base.append("AND size=:sz")
-        params['sz'] = int(size_filter)
+        where.append("size=:sz"); params['sz'] = int(size_filter)
     if thickness_min is not None and thickness_max is not None:
-        base.append("AND thickness BETWEEN :tmin AND :tmax")
+        where.append("thickness BETWEEN :tmin AND :tmax")
         params.update(tmin=int(thickness_min), tmax=int(thickness_max))
-    if sort_by == 'rpm':
-        base.append("AND rpm <= :sv")
-        params['sv'] = float(sort_value)
-    elif sort_by == 'noise':
-        base.append("AND noise_db <= :sv")
-        params['sv'] = float(sort_value)
 
-    base.append("GROUP BY model_id, condition_id, brand_name_zh, model_name, resistance_type_zh, resistance_location_zh, size, thickness")
-    base.append("ORDER BY max_airflow DESC LIMIT :limit")
-    return fetch_all("\n".join(base), params)
+    sql = f"""
+      SELECT model_id, condition_id,
+             brand_name_zh, model_name,
+             resistance_type_zh, resistance_location_zh,
+             size, thickness,
+             rpm, noise_db, airflow_cfm AS airflow,
+             COALESCE(like_count,0) AS like_count
+      FROM general_view
+      WHERE {" AND ".join(where)}
+      ORDER BY model_id, condition_id, rpm
+    """
+    rows = fetch_all(sql, params)
+
+    groups = {}
+    for r in rows:
+        mid = int(r['model_id']); cid = int(r['condition_id'])
+        key = (mid, cid)
+        g = groups.setdefault(key, {
+            'rows': [],
+            'brand': r['brand_name_zh'],
+            'model': r['model_name'],
+            'res_type': r['resistance_type_zh'],
+            'res_loc': r['resistance_location_zh'],
+            'size': r['size'],
+            'thickness': r['thickness'],
+            'like_count': 0,
+            'max_speed': None
+        })
+        g['rows'].append({'rpm': r['rpm'], 'noise_db': r['noise_db'], 'airflow': r['airflow']})
+        try:
+            g['like_count'] = max(g['like_count'], int(r['like_count']))
+        except Exception:
+            pass
+        try:
+            if r['rpm'] is not None:
+                g['max_speed'] = max(g['max_speed'] or 0, int(r['rpm']))
+        except Exception:
+            pass
+
+    if sort_by == 'rpm':
+        axis = 'rpm'; lv = float(sort_value)
+    elif sort_by == 'noise':
+        axis = 'noise_db'; lv = float(sort_value)
+    else:
+        axis = 'rpm'; lv = None
+
+    items = []
+    for (mid, cid), g in groups.items():
+        eff = _effective_value_for_series(g['rows'], mid, cid, axis, lv)
+        if not eff:
+            continue
+        items.append({
+            'model_id': mid, 'condition_id': cid,
+            'brand_name_zh': g['brand'],
+            'model_name': g['model'],
+            'resistance_type_zh': g['res_type'],
+            'resistance_location_zh': g['res_loc'],
+            'size': g['size'], 'thickness': g['thickness'],
+            'like_count': g['like_count'],
+            'effective_airflow': eff['effective_airflow'],
+            'effective_x': eff['effective_x'],
+            'effective_axis': eff['effective_axis'],
+            'effective_source': eff['effective_source'],
+            'max_airflow': eff['effective_airflow'],
+            'max_speed': g['max_speed']
+        })
+
+    items.sort(key=lambda r: (r['effective_airflow'] if r['effective_airflow'] is not None else -1e9), reverse=True)
+    return items[:limit]
 
 # =========================================
 # Visit Start
@@ -730,6 +870,7 @@ def api_search_fans():
         data = request.get_json(force=True, silent=True) or {}
         mode = (data.get('mode') or 'filter').strip()
         if mode == 'expand':
+            # 原“expand”分支保持不变（略）
             brand = (data.get('brand') or '').strip()
             model = (data.get('model') or '').strip()
             res_type = (data.get('res_type') or '').strip()
@@ -773,7 +914,12 @@ def api_search_fans():
                     'thickness': r['thickness'],
                     'max_speed': r['max_speed'],
                     'max_airflow': float(r['max_airflow']) if r['max_airflow'] is not None else None,
-                    'like_count': r['like_count']
+                    'like_count': r['like_count'],
+                    # 兼容前端渲染：未限制情况下，标记为原始 rpm 最大点
+                    'effective_airflow': float(r['max_airflow']) if r['max_airflow'] is not None else None,
+                    'effective_axis': 'rpm',
+                    'effective_x': r['max_speed'],
+                    'effective_source': 'raw'
                 })
             return resp_ok({'mode': 'expand', 'items': items, 'count': len(items)})
 
@@ -809,17 +955,19 @@ def api_search_fans():
                 return resp_err('SEARCH_INVALID_SORT_VALUE', '限制值必须是数字')
 
         res_loc_filter = '' if res_type == '空载' else res_loc
-        results = search_fans_by_condition(
+
+        # 新：后端评估有效点并排序
+        results = search_fans_by_condition_with_fit(
             res_type, res_loc_filter, sort_by, sort_value,
             size_filter, tmin, tmax, limit=200
         )
 
         if sort_by == 'rpm':
-            label = f'条件限制：转速 ≤ {sort_value_raw} RPM'
+            label = f'条件限制：转速 ≤ {sort_value_raw} RPM（原始优先，无原始则拟合）'
         elif sort_by == 'noise':
-            label = f'条件限制：噪音 ≤ {sort_value_raw} dB'
+            label = f'条件限制：噪音 ≤ {sort_value_raw} dB（原始优先，无原始则拟合）'
         else:
-            label = '条件：全速运行'
+            label = '条件：全速运行（取原始最大风量）'
 
         return resp_ok({'search_results': results, 'condition_label': label})
     except Exception as e:

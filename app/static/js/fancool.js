@@ -1867,14 +1867,13 @@ let SEARCH_RESULTS_RAW = [];
 
 function fillSearchTable(tbody, list){
   if (!tbody) return;
-  // 清理旧的跑马灯结构（如果之前版本遗留）
   Array.from(tbody.querySelectorAll('.fc-marquee-cell')).forEach(td=>{
     td.classList.remove('fc-marquee-cell','nowrap');
     const inner = td.querySelector('.fc-marquee-inner');
     if (inner) td.innerHTML = inner.innerHTML;
   });
   if (!list.length){
-    tbody.innerHTML='<tr><td colspan="7" class="text-center text-gray-500 py-6">没有符合条件的结果</td></tr>';
+    tbody.innerHTML='<tr><td colspan="8" class="text-center text-gray-500 py-6">没有符合条件的结果</td></tr>';
     return;
   }
   tbody.innerHTML = list.map(r=>{
@@ -1883,25 +1882,51 @@ function fillSearchTable(tbody, list){
     const resType = r.resistance_type_zh;
     const resLocRaw = r.resistance_location_zh || '';
     const scenLabel = formatScenario(resType, resLocRaw);
+
+    // x 信息列
+    const axis = (r.effective_axis === 'noise') ? 'noise_db' : (r.effective_axis || 'rpm');
+    const unit = axis === 'noise_db' ? 'dB' : 'RPM';
+    const xVal = Number(r.effective_x);
+    const xText = axis === 'noise_db' ? xVal.toFixed(1) : Math.round(xVal).toString();
+    const srcText = (r.effective_source === 'fit') ? '拟合' : '原始';
+    const xCell = `${xText} ${unit} (${srcText})`;
+
+    const airflow = Number(r.effective_airflow ?? r.max_airflow ?? 0);
+    const airflowText = airflow.toFixed(1);
+
     return `
       <tr class="hover:bg-gray-50">
         <td class="nowrap">${escapeHtml(brand)}</td>
-        <td class="nowrap">${escapeHtml(model)} (${r.max_speed} RPM)</td>
+        <td class="nowrap">${escapeHtml(model)}</td>
         <td class="nowrap">${escapeHtml(r.size)}x${escapeHtml(r.thickness)}</td>
         <td class="nowrap">${scenLabel}</td>
-        <td class="text-blue-600 font-medium text-sm">${Number(r.max_airflow).toFixed(1)}</td>
+        <td class="nowrap">${xCell}</td>
+        <td class="text-blue-600 font-medium text-sm">${airflowText}</td>
         <td class="text-blue-600 font-medium">${r.like_count ?? 0}</td>
         <td>${buildQuickBtnHTML('search', brand, model, resType, resLocRaw, r.model_id, r.condition_id)}</td>
       </tr>`;
   }).join('');
-  // 不再添加跑马灯
 }
+
 function renderSearchResults(results, conditionLabel){
   SEARCH_RESULTS_RAW = results.slice();
   const byAirflow = SEARCH_RESULTS_RAW;
   const byLikes = SEARCH_RESULTS_RAW.slice().sort((a,b)=>(b.like_count||0)-(a.like_count||0));
+
+  // 根据结果集设置“转速/噪音”表头（两个表同名）
+  let axisLabel = '转速';
+  if (results && results.length) {
+    const ax = results[0]?.effective_axis;
+    axisLabel = (ax === 'noise' || ax === 'noise_db') ? '噪音' : '转速';
+  }
+  const h1 = document.getElementById('searchXHeaderAir');
+  const h2 = document.getElementById('searchXHeaderLikes');
+  if (h1) h1.textContent = axisLabel;
+  if (h2) h2.textContent = axisLabel;
+
   const labelEl = document.getElementById('searchConditionLabel');
   if (labelEl) labelEl.textContent = conditionLabel;
+
   fillSearchTable(searchAirflowTbody, byAirflow);
   fillSearchTable(searchLikesTbody, byLikes);
   syncQuickActionButtons();
