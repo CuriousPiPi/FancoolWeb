@@ -14,6 +14,50 @@ logger = logging.getLogger("curves.pchip_cache")  # 继承上层日志配置
 # =========================
 # 配置（通过环境变量可调）
 # =========================
+
+#CURVE_SMOOTH_ALPHA_RPM / CURVE_SMOOTH_ALPHA_NOISE：0.0~1.0
+#0.0：严格贴近单调矫正后的节点（几乎“穿”原始趋势）
+#1.0：节点被拉向全局线性趋势（更“直”）
+#CURVE_TENSION_TAU_RPM / CURVE_TENSION_TAU_NOISE：0.0~1.0
+#0.0：保持原始 PCHIP 段斜率
+#1.0：将段斜率压为 0（段内近似直线，但仍穿“平滑后的节点”）
+_ALPHA = {
+    "rpm": float(os.getenv("CURVE_SMOOTH_ALPHA_RPM", "0.2")),
+    "noise_db": float(os.getenv("CURVE_SMOOTH_ALPHA_NOISE", "0.5")),
+}
+_TAU = {
+    "rpm": float(os.getenv("CURVE_TENSION_TAU_RPM", "0.0")),
+    "noise_db": float(os.getenv("CURVE_TENSION_TAU_NOISE", "0.0")),
+}   
+
+def reload_curve_params_from_env():
+    """
+    重新从环境变量加载平滑/张力参数。
+    - 无需重启进程即可生效新参数。
+    - 不需要清理内存/磁盘缓存：α/τ 已参与缓存键，后续请求会自动 MISS 并重建覆盖。
+    """
+    old_alpha = dict(_ALPHA)
+    old_tau = dict(_TAU)
+
+    _ALPHA["rpm"]      = float(os.getenv("CURVE_SMOOTH_ALPHA_RPM",      str(_ALPHA["rpm"])))
+    _ALPHA["noise_db"] = float(os.getenv("CURVE_SMOOTH_ALPHA_NOISE",    str(_ALPHA["noise_db"])))
+    _TAU["rpm"]        = float(os.getenv("CURVE_TENSION_TAU_RPM",       str(_TAU["rpm"])))
+    _TAU["noise_db"]   = float(os.getenv("CURVE_TENSION_TAU_NOISE",     str(_TAU["noise_db"])))
+
+    logger.info("curve-cache PARAMS RELOADED: ALPHA %s -> %s, TAU %s -> %s", old_alpha, _ALPHA, old_tau, _TAU)
+
+def _env_alpha_for_axis(axis: str) -> float:
+    # 从模块常量读取，并夹取到 [0,1]
+    ax = _axis_norm(axis)
+    val = float(_ALPHA.get(ax, 0.0))
+    return max(0.0, min(1.0, val))
+
+def _env_tau_for_axis(axis: str) -> float:
+    # 从模块常量读取，并夹取到 [0,1]
+    ax = _axis_norm(axis)
+    val = float(_TAU.get(ax, 0.0))
+    return max(0.0, min(1.0, val))
+
 def _axis_norm(axis: str) -> str:
     return "noise_db" if axis == "noise" else axis
 
@@ -145,10 +189,6 @@ def _note_hit(key: str) -> int:
 # =========================
 # PCHIP 基础
 # =========================
-def _model_cache_path(model_id: int, condition_id: int, axis: str) -> str:
-    return os.path.join(curve_cache_dir(), f"{int(model_id)}_{int(condition_id)}_{_axis_norm(axis)}.json")
-
-
 def raw_points_hash(xs: List[float], ys: List[float]) -> str:
     pairs = sorted([(float(x), float(y)) for x, y in zip(xs, ys)])
     buf = ";".join(f"{x:.6f}|{y:.6f}" for x, y in pairs)
@@ -231,35 +271,6 @@ def _pchip_slopes_fritsch_carlson(xs: List[float], ys: List[float]) -> List[floa
             m[i + 1] = 0.0
     return m
 
-
-def build_pchip_model(xs_in: List[float], ys_in: List[float]) -> Optional[Dict[str, Any]]:
-    pairs = []
-    for x, y in zip(xs_in, ys_in):
-        try:
-            xf = float(x)
-            yf = float(y)
-            if math.isfinite(xf) and math.isfinite(yf):
-                pairs.append((xf, yf))
-        except Exception:
-            continue
-    if not pairs:
-        return None
-    pairs.sort(key=lambda t: t[0])
-    xs: List[float] = []
-    ys: List[float] = []
-    for x, y in pairs:
-        if xs and abs(x - xs[-1]) < 1e-9:
-            ys[-1] = (ys[-1] + y) / 2.0
-        else:
-            xs.append(x)
-            ys.append(y)
-    if len(xs) == 1:
-        return {"x": xs, "y": ys, "m": [0.0], "x0": xs[0], "x1": xs[0]}
-    ys_mono = _pava_isotonic_non_decreasing(ys)
-    m = _pchip_slopes_fritsch_carlson(xs, ys_mono)
-    return {"x": xs, "y": ys_mono, "m": m, "x0": xs[0], "x1": xs[-1]}
-
-
 def eval_pchip(model: Dict[str, Any], x: float) -> float:
     xs = model["x"]
     ys = model["y"]
@@ -300,12 +311,111 @@ def eval_pchip(model: Dict[str, Any], x: float) -> float:
     h11 = (t**3 - t**2)
     return h00 * y0 + h10 * m0 + h01 * y1 + h11 * m1
 
+def _ols_linear(xs: List[float], ys: List[float]) -> tuple[float, float]:
+    n = len(xs)
+    if n == 0:
+        return (0.0, 0.0)
+    sx = sum(xs); sy = sum(ys)
+    sxx = sum(x*x for x in xs)
+    sxy = sum(x*y for x, y in zip(xs, ys))
+    denom = n * sxx - sx * sx
+    if abs(denom) < 1e-12:
+        return (sy / n if n else 0.0, 0.0)
+    b = (n * sxy - sx * sy) / denom
+    a = (sy - b * sx) / n
+    return (a, b)
 
+def _blend_nodes_with_trend(xs: List[float], ys_mono: List[float], axis: str) -> List[float]:
+    alpha = _env_alpha_for_axis(axis)
+    if alpha <= 1e-9:
+        return ys_mono[:]
+    a, b = _ols_linear(xs, ys_mono)
+    ys_lin = [a + b * x for x in xs]
+    # 线性插值到“更直”的趋势
+    return [(1.0 - alpha) * ym + alpha * yl for ym, yl in zip(ys_mono, ys_lin)]
+
+def _scale_slopes(m: List[float], axis: str) -> List[float]:
+    tau = _env_tau_for_axis(axis)
+    if tau <= 1e-9:
+        return m
+    return [(1.0 - tau) * v for v in m]
+
+def build_pchip_model_with_opts(xs_in: List[float], ys_in: List[float], axis: str) -> Optional[Dict[str, Any]]:
+    # 清洗/排序/合并同 x
+    pairs = []
+    for x, y in zip(xs_in, ys_in):
+        try:
+            xf = float(x); yf = float(y)
+            if math.isfinite(xf) and math.isfinite(yf):
+                pairs.append((xf, yf))
+        except Exception:
+            continue
+    if not pairs:
+        return None
+    pairs.sort(key=lambda t: t[0])
+    xs: List[float] = []
+    ys: List[float] = []
+    for x, y in pairs:
+        if xs and abs(x - xs[-1]) < 1e-9:
+            ys[-1] = (ys[-1] + y) / 2.0
+        else:
+            xs.append(x); ys.append(y)
+    if len(xs) == 1:
+        return {"x": xs, "y": ys, "m": [0.0], "x0": xs[0], "x1": xs[0]}
+
+    # 单调矫正（强约束），再按轴做“可控平滑”到线性趋势
+    ys_mono = _pava_isotonic_non_decreasing(ys)
+    ys_target = _blend_nodes_with_trend(xs, ys_mono, axis)
+
+    # 斜率（保形）并可按轴缩放“曲率”
+    m = _pchip_slopes_fritsch_carlson(xs, ys_target)
+    m = _scale_slopes(m, axis)
+
+    return {"x": xs, "y": ys_target, "m": m, "x0": xs[0], "x1": xs[-1]}
 # =========================
 # 磁盘缓存
 # =========================
 def _model_cache_path(model_id: int, condition_id: int, axis: str) -> str:
     return os.path.join(curve_cache_dir(), f"{int(model_id)}_{int(condition_id)}_{_axis_norm(axis)}.json")
+
+# 新增：删除某轴缓存（包含磁盘 + 进程内 LRU）
+def delete_cached_model(model_id: int, condition_id: int, axis: str) -> bool:
+    """
+    删除指定 (model_id, condition_id, axis) 的缓存文件，并尽量从进程内 LRU 清理该轴的所有版本。
+    返回 True 表示磁盘文件被删除（或原本不存在），False 表示删除过程中发生了错误。
+    """
+    axis = _axis_norm(axis)
+    ok = True
+    # 磁盘
+    p = _model_cache_path(model_id, condition_id, axis)
+    try:
+        if os.path.exists(p):
+            os.remove(p)
+            logger.info("curve-cache DELETE: key=%s path=%s", f"{model_id}/{condition_id}/{axis}", p)
+    except Exception as e:
+        ok = False
+        logger.warning("curve-cache DELETE ERROR: key=%s path=%s err=%s", f"{model_id}/{condition_id}/{axis}", p, repr(e))
+
+    # 进程内 LRU：按前缀逐出（raw_hash 不同，但前缀固定）
+    try:
+        if _INMEM:
+            prefix = f"{int(model_id)}|{int(condition_id)}|{axis}|"
+            evicted = 0
+            # 复制 key 列表避免遍历时修改
+            for k in list(_INMEM._map.keys()):
+                if k.startswith(prefix):
+                    m = _INMEM._map.pop(k, None)
+                    if m is not None:
+                        _INMEM._points_sum -= _INMEM._weight(m)
+                        evicted += 1
+            if evicted:
+                logger.info("curve-cache INMEM PURGE: prefix=%s evicted=%d size=%d pts=%d",
+                            prefix, evicted, len(_INMEM._map), _INMEM._points_sum)
+    except Exception as e:
+        ok = False
+        logger.warning("curve-cache INMEM PURGE ERROR: key=%s err=%s",
+                       f"{model_id}/{condition_id}/{axis}", repr(e))
+    return ok
 
 def _load_cached_model_if_valid(model_id: int, condition_id: int, axis: str, xs: List[float], ys: List[float]):
     p = _model_cache_path(model_id, condition_id, axis)
@@ -315,7 +425,7 @@ def _load_cached_model_if_valid(model_id: int, condition_id: int, axis: str, xs:
     try:
         with open(p, "r", encoding="utf-8") as f:
             data = json.load(f)
-        expect = raw_points_hash(xs, ys)
+        expect = _compose_cache_key(xs, ys, axis)
         if not isinstance(data, dict):
             logger.info("curve-cache STALE (not a dict): key=%s path=%s", f"{model_id}/{condition_id}/{_axis_norm(axis)}", p)
             return None
@@ -378,37 +488,47 @@ def _save_cached_model(model: Dict[str, Any], model_id: int, condition_id: int, 
 # =========================
 # 统一入口：含内存 LRU + 磁盘缓存
 # =========================
+def _compose_cache_key(xs: List[float], ys: List[float], axis: str) -> str:
+    """
+    基于“原始点 + 轴 + 平滑/张力参数”生成稳定的缓存键。
+    注意：只基于原始点（未平滑）做点哈希，确保装载时不必重做预处理。
+    """
+    base = raw_points_hash(xs, ys)
+    ax = _axis_norm(axis)
+    alpha = _env_alpha_for_axis(ax)
+    tau = _env_tau_for_axis(ax)
+    s = f"{base}|axis={ax}|alpha={alpha:.6f}|tau={tau:.6f}"
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()
+
 def get_or_build_pchip(model_id: int, condition_id: int, axis: str, xs: List[float], ys: List[float]) -> Optional[Dict[str, Any]]:
     axis = _axis_norm(axis)
-    # 用原始点立即算出“期望 hash”（比等到建模后再算更早可用）
-    expect_hash = raw_points_hash(xs, ys)
+    # 改：用“原始点 + 轴 + α/τ”组合键
+    expect_key = _compose_cache_key(xs, ys, axis)
 
     # 进程内 LRU 优先
-    ikey = _inmem_key(model_id, condition_id, axis, expect_hash)
+    ikey = _inmem_key(model_id, condition_id, axis, expect_key)
     if _INMEM:
         m = _INMEM.get(ikey)
         if m is not None:
             logger.info("curve-cache INMEM HIT: key=%s size=%d pts=%d", ikey, _INMEM.stats()["size"], _INMEM.stats()["points"])
-            _note_hit(ikey)  # 命中也记一笔
+            _note_hit(ikey)
             return m
 
     # 磁盘命中
     cached = _load_cached_model_if_valid(model_id, condition_id, axis, xs, ys)
     if cached:
-        # 准入判断：达到阈值才放入内存
         if _INMEM and _note_hit(ikey) >= _ADMIT_HITS:
             _INMEM.put(ikey, cached)
             logger.info("curve-cache INMEM PUT (from-disk): key=%s size=%d pts=%d",
                         ikey, _INMEM.stats()["size"], _INMEM.stats()["points"])
         return cached
 
-    # 构建模型
+    # 构建
     p = _model_cache_path(model_id, condition_id, axis)
     logger.info("curve-cache BUILD: key=%s dir=%s path=%s points=%d",
                 f"{model_id}/{condition_id}/{axis}", _abs_cache_dir(), p, len(xs or []))
-    model = build_pchip_model(xs, ys)
+    model = build_pchip_model_with_opts(xs, ys, axis)
     if not model:
-        # 如果文件存在但无法重建，删除失效缓存
         if os.path.exists(p):
             try:
                 os.remove(p)
@@ -419,16 +539,14 @@ def get_or_build_pchip(model_id: int, condition_id: int, axis: str, xs: List[flo
                                f"{model_id}/{condition_id}/{axis}", p, repr(e))
         return None
 
-    rh = raw_points_hash(model["x"], model["y"])
-    _save_cached_model(model, model_id, condition_id, axis, rh)
+    # 保存时直接用组合键作为 raw_hash
+    _save_cached_model(model, model_id, condition_id, axis, expect_key)
     model["type"] = "pchip_v1"
     model["axis"] = axis
-    model["raw_hash"] = rh
+    model["raw_hash"] = expect_key
 
-    # 准入判断：达到阈值才放入内存
     if _INMEM and _note_hit(ikey) >= _ADMIT_HITS:
         _INMEM.put(ikey, model)
         logger.info("curve-cache INMEM PUT (from-build): key=%s size=%d pts=%d",
                     ikey, _INMEM.stats()["size"], _INMEM.stats()["points"])
-
     return model

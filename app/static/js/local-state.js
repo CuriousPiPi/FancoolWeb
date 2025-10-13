@@ -330,16 +330,17 @@
     dispatchChange('clear_all',{});
   }
 
-  function purgeRemovedKey(key){
+  function removeFromRecentlyRemoved(key){
     const idx = removed.findIndex(r=>r.key===key);
     if (idx>=0){
       removed.splice(idx,1);
       persistAll();
       dispatchChange('purge_removed',{ key });
+      return true;
     }
+    return false;
   }
 
-  function getColorIndexMap(){ return Object.assign({}, colorMap); }
   function getSelectionPairs(){ return selected.map(s=>({ model_id: s.model_id, condition_id: s.condition_id })); }
 
   function setLegendHiddenKeys(keys){
@@ -368,8 +369,7 @@
     removeKey,
     restoreKey,
     clearAll,
-    purgeRemovedKey:(key)=>purgeRemovedKey(key),
-    getColorIndexMap: ()=> ({...colorMap}),
+    removeFromRecentlyRemoved:(key)=>removeFromRecentlyRemoved(key),
     ensureColorIndex,
     getXAxisType: ()=>xAxisType,
     setXAxisType:(t)=>setXAxisType(t),

@@ -1,0 +1,426 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+  <title>Chart Renderer</title>
+  <style>
+    /* 省略：样式不变 */
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.2/dist/echarts.min.js"></script>
+</head>
+<body>
+  <div id="chart"></div>
+<script>
+(function () {
+  let chart;
+  let lastOption = null;
+  let lastPayload = null;
+  let isFs = false;
+  let lastIsNarrow = null;
+
+  let bubbleUserMoved = false;
+  const bubblePos = { left: null, top: null };
+
+  let xAxisOverride = null;
+  let axisSnapSuppressUntil = 0;
+
+  window.__FS_TOGGLE_OFFSET = window.__FS_TOGGLE_OFFSET || { x: 0, y: 0 };
+  const TITLE_GLUE = '  -  ';
+
+  function isMobile(){
+    return /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
+      || (window.matchMedia && window.matchMedia('(pointer:coarse)').matches);
+  }
+
+  function layoutIsNarrow() {
+    const w = chart && typeof chart.getWidth === 'function'
+      ? chart.getWidth()
+      : (typeof window !== 'undefined' ? window.innerWidth : 0);
+    let narrow = w < 600;
+    if (isFs && isMobile()) narrow = false;
+    return narrow;
+  }
+
+  const FIT_ALGO_NAME = '趋势拟合';
+  let showRawCurves = true;
+  let showFitCurves = false;
+
+  const xQueryByMode = { rpm: null, noise_db: null };
+  const fitModelsCache = { rpm: new Map(), noise_db: new Map() };
+  let fitUIInstalled = false;
+
+  function init() {
+    chart = echarts.init(document.getElementById('chart'), null, {
+      renderer:'canvas',
+      devicePixelRatio: window.devicePixelRatio || 1
+    });
+
+    window.addEventListener('resize', () => {
+      if (!chart) return;
+      const nowNarrow = layoutIsNarrow();
+      if (lastIsNarrow === null) lastIsNarrow = nowNarrow;
+
+      if (nowNarrow !== lastIsNarrow) {
+        lastIsNarrow = nowNarrow;
+        if (lastPayload) render(lastPayload);
+        else chart.resize();
+      } else {
+        chart.resize();
+        if (lastOption) {
+          const { x, y, visible } = computePrefixCenter(lastOption);
+          placeAxisOverlayAt(x, y, visible && !lastOption.__empty);
+          placeFitUI();
+          repaintPointer();
+        }
+      }
+    });
+
+    document.addEventListener('fullscreenchange', async () => {
+      isFs = !!document.fullscreenElement;
+      if (!isFs) {
+        if (screen.orientation && screen.orientation.unlock) {
+          try { screen.orientation.unlock(); } catch(_) {}
+        }
+      }
+      const nowNarrow = layoutIsNarrow();
+      if (lastIsNarrow === null) lastIsNarrow = nowNarrow;
+
+      if (nowNarrow !== lastIsNarrow) {
+        lastIsNarrow = nowNarrow;
+        if (lastPayload) render(lastPayload);
+        else chart && chart.resize();
+      } else {
+        chart && chart.resize();
+        if (lastOption) {
+          const { x, y, visible } = computePrefixCenter(lastOption);
+          placeAxisOverlayAt(x, y, visible && !lastOption.__empty);
+          placeFitUI();
+          repaintPointer();
+        }
+      }
+    });
+
+    chart.on('legendselectchanged', () => {
+      if (showFitCurves) refreshFitBubble();
+    });
+
+    chart.on('dataZoom', () => {
+      clampXQueryIntoVisibleRange();
+      repaintPointer();
+      if (showFitCurves) refreshFitBubble();
+    });
+  }
+
+  /* 省略：X轴开关、overlay、fullscreen、tokens、currentXModeFromPayload 等均不变 */
+
+  const X_PLACEHOLDER_NEG = -1;
+  const X_MIN_CLAMP = 0;
+
+  function isFiniteNumber(v){ const n = Number(v); return Number.isFinite(n); }
+
+  function buildSeries(rawSeries, xMode) {
+    let maxAir = 0;
+    let minX = +Infinity, maxX = -Infinity;
+
+    const series = rawSeries.map(s => {
+      const xSrc  = Array.isArray(s[xMode]) ? s[xMode] : [];
+      const ySrc  = Array.isArray(s.airflow) ? s.airflow : [];
+      const tipSrc = Array.isArray(xMode === 'rpm' ? s.noise_db : s.rpm)
+        ? (xMode === 'rpm' ? s.noise_db : s.rpm) : [];
+
+      const n = Math.min(xSrc.length, ySrc.length);
+      const data = [];
+      for (let i = 0; i < n; i++) {
+        const xRaw = xSrc[i];
+        const yRaw = ySrc[i];
+        const yv = Number(yRaw);
+        const xv = Number(xRaw);
+
+        if (isFiniteNumber(yv)) {
+          if (isFiniteNumber(xv)) {
+            minX = Math.min(minX, xv);
+            maxX = Math.max(maxX, xv);
+            maxAir = Math.max(maxAir, yv);
+            const tipRaw = tipSrc[i];
+            const tip = isFiniteNumber(Number(tipRaw)) ? Number(tipRaw) : undefined;
+            data.push({ value: [xv, yv], tip });
+          } else {
+            maxAir = Math.max(maxAir, yv);
+            data.push({ value: [X_PLACEHOLDER_NEG, yv], tip: undefined, __missingX: true });
+          }
+        }
+      }
+
+      return {
+        name: s.name,
+        type: 'line',
+        smooth: true,
+        connectNulls: false,
+        showSymbol: true,
+        symbol: 'circle',
+        symbolSize: 8,
+        lineStyle: { width: 3, color: s.color },
+        itemStyle: { color: s.color },
+        label: { show: true, position: 'top', color: 'gray' },
+        legendHoverLink: true,
+        emphasis: {
+          focus: 'series',
+          blurScope: 'coordinateSystem',
+          lineStyle: { width: 4 },
+          itemStyle: { borderWidth: 1.2, shadowColor: 'rgba(0,0,0,0.25)', shadowBlur: 8 },
+          label: { show: true }
+        },
+        blur: {
+          lineStyle: { opacity: 0.18 },
+          itemStyle: { opacity: 0.18 },
+          label: { show: false }
+        },
+        data
+      };
+    });
+
+    if (minX === +Infinity) { minX = 0; maxX = 100; }
+    if (maxAir <= 0) maxAir = 100;
+
+    const span = Math.max(1, maxX - minX);
+    const pad = Math.floor(span * 0.2);
+    return { series, xMin: Math.max(minX - pad, 0), xMax: maxX + pad, yMax: Math.ceil(maxAir * 1.4) };
+  }
+
+  function buildOption(payload) {
+    const { chartData, theme } = payload || {};
+    const t = tokens(theme||'light');
+    const sList = Array.isArray(chartData?.series) ? chartData.series : [];
+    const xMode = currentXModeFromPayload(payload);
+
+    let isNarrow = chart && typeof chart.getWidth === 'function'
+      ? (chart.getWidth() < 600)
+      : (typeof window !== 'undefined' ? window.innerWidth < 600 : false);
+    if (isFs && isMobile()) isNarrow = false;
+    if (isNarrow) { if (!showRawCurves) showRawCurves = true; if (showFitCurves) showFitCurves = false; }
+
+    const exportBg = (payload && payload.chartBg) || getExportBg();
+    const bgNormal = isFs ? exportBg : 'transparent';
+
+    if (!sList.length || (!showRawCurves && !showFitCurves)) {
+      toggleFitUI(false);
+      return {
+        __empty:true,
+        backgroundColor: bgNormal,
+        title:{ text:'暂无数据', left:'center', top:'middle',
+          textStyle:{ color:t.axisLabel, fontFamily:t.fontFamily } },
+        toolbox:{ feature:{ saveAsImage:{ backgroundColor:exportBg, pixelRatio: window.devicePixelRatio || 1 } } },
+        tooltip:{ show:false, triggerOn:'none' }
+      };
+    }
+
+    const built = buildSeries(sList, xMode);
+
+    const xName = xMode==='rpm' ? '转速(RPM)' : '噪音(dB)';
+    const titlePrefix = xMode==='rpm' ? '转速' : '噪音';
+    const titleTop = 10, titleFontSize = 20, titleFontWeight = 600;
+    const titleText = `${titlePrefix}${TITLE_GLUE}风量曲线`;
+    const titleMeasure = measureText(titleText, titleFontSize, titleFontWeight, t.fontFamily);
+    const gridTop = Math.max(54, titleTop + Math.ceil(titleMeasure.height) + 12);
+
+    const legendMeta = {};
+    sList.forEach(s=>{
+      const brand = s.brand || s.brand_name_zh || s.brand_name || '';
+      const model = s.model || s.model_name || '';
+      const rt    = s.res_type || s.resistance_type_zh || s.resistance_type || s.rt || '';
+      const rl    = s.res_loc || s.resistance_location_zh || s.resistance_location || s.rl || '';
+      const key   = s.name || [brand, model].filter(Boolean).join(' ') || String(s.key || '');
+      legendMeta[key] = { brand, model, rt, rl };
+    });
+    function desktopLegendFormatter(name){
+      const m = legendMeta[name] || {};
+      const line1 = [m.brand, m.model].filter(Boolean).join(' ');
+      const line2 = [m.rt, m.rl].filter(Boolean).join(' ');
+      if (line2) return `{l1|${line1}}\n{l2|${line2}}`;
+      return `{l1|${line1||name}}`;
+    }
+    function mobileLegendFormatter(name){
+      const m = legendMeta[name] || {};
+      const left = [m.brand, m.model].filter(Boolean).join(' ');
+      const right = [m.rt, m.rl].filter(Boolean).join(' ');
+      if (right) return `{m1|${left}} {m1|-} {m2|${right}}`;
+      return `{m1|${left||name}}`;
+    }
+
+    const isN = isNarrow;
+    const legendCfg = isN ? {
+      type: 'scroll',
+      orient: 'vertical',
+      left: 20, right: 6, bottom: 6,
+      itemWidth: 16, itemHeight: 10, align: 'auto',
+      pageIconColor: t.pagerIcon, pageTextStyle: { color: t.axisLabel },
+      textStyle: { color: t.axisLabel, fontFamily: t.fontFamily,
+        rich: { m1:{ fontSize:13,fontWeight:600,color:t.axisLabel,lineHeight:18 },
+                m2:{ fontSize:11,fontWeight:500,color:t.axisName,lineHeight:16 } } },
+      formatter: mobileLegendFormatter
+    } : {
+      type: 'scroll',
+      orient: 'vertical',
+      right: 80, top: gridTop, bottom: 10,
+      itemWidth: 18, itemHeight: 10, itemGap: 16, align: 'auto',
+      pageIconColor: t.pagerIcon, pageTextStyle: { color: t.axisLabel },
+      textStyle: { color: t.axisLabel, fontFamily: t.fontFamily,
+        rich: { l1:{ fontSize:13,fontWeight:600,color:t.axisLabel,lineHeight:18 },
+                l2:{ fontSize:11,fontWeight:500,color:t.axisName,lineHeight:14 } } },
+      formatter: desktopLegendFormatter
+    };
+    legendCfg.data = sList.map(s => s.name);
+    try {
+      const prevSel = chart && chart.getOption && chart.getOption().legend && chart.getOption().legend[0] && chart.getOption().legend[0].selected;
+      if (prevSel) legendCfg.selected = prevSel;
+    } catch(_){}
+
+    const finalSeries = [];
+    if (showRawCurves) {
+      built.series.forEach(s => finalSeries.push(s));
+    }
+
+    if (showFitCurves) {
+      ensureFitModels(sList, xMode);
+      const width = Math.max(300, chart.getWidth ? chart.getWidth() : 800);
+      const sampleCount = computeSampleCount(width);
+      sList.forEach(s => {
+        const model = fitModelsCache[xMode].get(s.name);
+        if (!model || model.x0 == null || model.x1 == null) return;
+        const sMin = Math.min(model.x0, model.x1);
+        const sMax = Math.max(model.x0, model.x1);
+        const xmin = Math.max(built.xMin, sMin);
+        const xmax = Math.min(built.xMax, sMax);
+        if (!(xmax > xmin)) return;
+
+        const pts = resampleSingle(model, xmin, xmax, sampleCount);
+        finalSeries.push({
+          id: `fit-line:${xMode}:${s.name}`,
+          name: s.name,
+          type: 'line',
+          smooth: false,
+          showSymbol: false,
+          connectNulls: false,
+          data: pts.map(p => [p.x, p.y]),
+          lineStyle: { width: 2.5, type:'dashed', color: s.color, opacity: 0.95 },
+          itemStyle: { color: s.color },
+          legendHoverLink: true,
+          emphasis: { focus: 'series', blurScope: 'coordinateSystem', lineStyle: { width: 3.5, opacity: 1 }, itemStyle: { opacity: 1 } },
+          blur: { lineStyle: { opacity: 0.2 }, itemStyle: { opacity: 0.2 } },
+          silent: false,
+          tooltip: { show: false },
+          z: 3
+        });
+      });
+    }
+
+    const xMinForAxis = Math.max(X_MIN_CLAMP, built.xMin);
+    return {
+      __empty:false,
+      __titlePrefix:titlePrefix,
+      __themeTokens:t,
+      __titleTop: titleTop,
+      __titleFontSize: titleFontSize,
+      __titleFontWeight: titleFontWeight,
+      __titleFamily: t.fontFamily,
+
+      backgroundColor: bgNormal,
+      color: sList.map(s=>s.color),
+      textStyle:{ fontFamily:t.fontFamily },
+      stateAnimation: { duration: 220, easing: 'cubicOut' },
+
+      grid:{ left:40, right: (isN ? 20 : 260), top: gridTop, bottom: (isN ? Math.min(320, 50 + (sList.length || 1) * 22) : 40) },
+
+      title: {
+        text: titleText,
+        left: 'center',
+        top: titleTop,
+        textStyle: { color: t.axisLabel, fontSize: titleFontSize, fontWeight: titleFontWeight, fontFamily: t.fontFamily }
+      },
+
+      legend: legendCfg,
+
+      xAxis:{
+        type:'value', name:xName, nameLocation:'middle', nameGap:25, nameMoveOverlap:true,
+        nameTextStyle:{ color:t.axisName, fontWeight:600, fontFamily:t.fontFamily, textShadowColor:'rgba(0,0,0,0.28)', textShadowBlur:4, textShadowOffsetY:1 },
+        axisLabel:{ color:t.axisLabel, fontSize:12, fontFamily:t.fontFamily, margin:10 },
+        axisLine:{ lineStyle:{ color:t.axisLine }},
+        splitLine:{ show:true, lineStyle:{ color:t.gridLine }},
+        min: xMinForAxis,
+        max: built.xMax * 1.2
+      },
+      yAxis:{
+        type:'value', name:'风量(CFM)', min:0, max: built.yMax * 1.3,
+        nameTextStyle:{ color:t.axisName, fontWeight:600, textShadowColor:'rgba(0,0,0,0.28)', textShadowBlur:4, textShadowOffsetY:1 },
+        axisLabel:{ color:t.axisLabel }, axisLine:{ lineStyle:{ color:t.axisLine }},
+        splitLine:{ show:true, lineStyle:{ color:t.gridLine }}
+      },
+
+      tooltip:{
+        axisPointer: { type: "cross", label: { color: t.tooltipText } },
+        trigger:'item',
+        backgroundColor:t.tooltipBg,
+        borderColor:t.tooltipBorder,
+        textStyle:{ color:t.tooltipText },
+        extraCssText:`box-shadow:${t.tooltipShadow};`,
+        formatter:function(p){
+          const xModeNow = currentXModeFromPayload(lastPayload);
+          const xLabel = xModeNow==='rpm' ? 'RPM, ' : 'dB, ';
+          const infoLabel = xModeNow==='rpm' ? 'dB' : 'RPM';
+          const x = p.value?.[0], y = p.value?.[1];
+          const tip = p.data?.tip ?? '';
+          const dot = `<span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${p.color};margin-right:4px;"></span>`;
+          return `${dot}${p.seriesName}<br/>&nbsp;&nbsp;&nbsp;&nbsp;${y}CFM @${x}${xLabel}${tip}${infoLabel}`;
+        }
+      },
+
+      toolbox:{
+        top: -5, right: 0,
+        feature:{
+          dataZoom:{ yAxisIndex:'none' },
+          restore:{},
+          saveAsImage:{ backgroundColor:exportBg, pixelRatio: window.devicePixelRatio || 1 },
+          myFullscreen: {
+            show: true,
+            title: !!document.fullscreenElement ? '退出全屏' : '全屏查看',
+            icon: !!document.fullscreenElement ? 'path://M3 7v7h7M3 14l7-7M21 17v-7h-7M21 10l-7 7' : 'path://M3 10v-7h7M3 3l7 7M21 14v7h-7M21 21l-7-7',
+            onclick: () => toggleFullscreen()
+          }
+        }
+      },
+
+      dataZoom: [
+        { type: 'inside', xAxisIndex: 0, throttle: 50, zoomOnMouseWheel: true, moveOnMouseWheel: true, moveOnMouseMove: true ,filterMode: "none", startValue: xMinForAxis, endValue: built.xMax },
+        { type: 'inside', yAxisIndex: 0, throttle: 50, zoomOnMouseWheel: 'alt', moveOnMouseWheel: 'alt', moveOnMouseMove: true ,filterMode: "none", endValue: built.yMax}
+      ],
+
+      series: finalSeries
+    };
+  }
+
+  /* 省略：其余函数均与之前一致，唯一变更是去掉对 __hasFitInMode/__hasRawInMode 的依赖与计算 */
+
+  // 拟合 UI 显隐：仅随 showFitCurves 与空图/窄屏控制
+  function toggleFitUI(showFit){
+    const btns = document.getElementById('fitButtons');
+    const bubble = document.getElementById('fitBubble');
+    const ptr = document.getElementById('fitPointer');
+    const narrow = layoutIsNarrow();
+    const empty  = !lastOption || lastOption.__empty;
+
+    if (btns) btns.style.visibility = (empty || narrow) ? 'hidden' : 'visible';
+
+    const showFloating = showFit && !narrow && !empty;
+    if (bubble) bubble.style.visibility = showFloating ? 'visible' : 'hidden';
+    if (ptr)    ptr.style.visibility    = showFloating ? 'visible' : 'hidden';
+  }
+
+  /* 省略：其余不变 */
+
+  document.addEventListener('DOMContentLoaded', init);
+
+})();
+</script>
+</body>
+</html>

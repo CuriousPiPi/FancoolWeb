@@ -35,13 +35,13 @@
       --shadow-strong:0 8px 24px rgba(0,0,0,0.45);
     }
 
-    /* 主页同款：X 轴切换控件容器（覆盖标题“转速/噪音”两字） */
+    /**/
     .chart-xaxis-overlay{
       position:absolute;
       z-index:2147483641;
       visibility:hidden;
       transform: translate(-65%, -37%);
-    }
+    } 
 
     .switch-container { position:relative; width:76px; height:32px; }
     .switch-track { width:100%; height:100%; background:var(--border-color); border-radius:12px; position:relative; overflow:hidden; }
@@ -283,11 +283,9 @@
   const FIT_ALGO_NAME = '趋势拟合';
   let showRawCurves = true;    // “ECHARTS曲线”
   let showFitCurves = false;   // “PCHIP 拟合”
-  const FIT_TENSION = 0.85;    // 仅代码参数
 
   const xQueryByMode = { rpm: null, noise_db: null };
   const fitModelsCache = { rpm: new Map(), noise_db: new Map() };
-  const fitSamplesCache = { rpm: new Map(), noise_db: new Map(), sampleCount: 0, domain: { rpm:[null,null], noise_db:[null,null] } };
   let fitUIInstalled = false;
 
   function init() {
@@ -529,48 +527,48 @@
   function render(payload){
     if (!chart) init();
 
-  // 记录前后 x 模式与空状态，用于决定是否需要彻底清空以避免残留
-  const prevXMode = currentXModeFromPayload(lastPayload);
-  const prevEmpty = !!(lastOption && lastOption.__empty);
-
-  lastPayload = payload || lastPayload;
-  syncThemeAttr((lastPayload && lastPayload.theme) || 'light');
-
-  if (!fitUIInstalled) {
-    ensureFitUI();
-    fitUIInstalled = true;
+    // 记录前后 x 模式与空状态，用于决定是否需要彻底清空以避免残留
+    const prevXMode = currentXModeFromPayload(lastPayload);
+    const prevEmpty = !!(lastOption && lastOption.__empty);
+    
+    lastPayload = payload || lastPayload;
+    syncThemeAttr((lastPayload && lastPayload.theme) || 'light');
+    
+    if (!fitUIInstalled) {
+      ensureFitUI();
+      fitUIInstalled = true;
+    }
+  
+    const option = buildOption(lastPayload);
+    const nextXMode = currentXModeFromPayload(lastPayload);
+    const nextEmpty = !!option.__empty;
+  
+    // 关键：当“轴模式变化”或“空/非空状态变化”时，先 clear 再 setOption，避免 ECharts 内部残留（例如 0 处指示线）
+    if (prevXMode !== nextXMode || prevEmpty !== nextEmpty) {
+      try { chart.clear(); } catch(_) {}
+    }
+  
+    chart.setOption(option, true);
+    chart.resize();
+  
+    requestAnimationFrame(() => updateAxisSwitchPosition());
+    // 空图时，主动撤销轴指示线的残留（双保险）
+    if (option.__empty) {
+      try { chart.dispatchAction({ type: 'updateAxisPointer', currTrigger: 'leave' }); } catch(_) {}
+    }
+  
+    const { x, y, visible } = computePrefixCenter(option);
+    placeAxisOverlayAt(x, y, visible && !option.__empty);
+  
+    lastOption = option;
+    lastIsNarrow = layoutIsNarrow();
+  
+    toggleFitUI(showFitCurves && !layoutIsNarrow());
+    placeFitUI();
+    repaintPointer();
+    if (showFitCurves) refreshFitBubble();
+  
   }
-
-  const option = buildOption(lastPayload);
-  const nextXMode = currentXModeFromPayload(lastPayload);
-  const nextEmpty = !!option.__empty;
-
-  // 关键：当“轴模式变化”或“空/非空状态变化”时，先 clear 再 setOption，避免 ECharts 内部残留（例如 0 处指示线）
-  if (prevXMode !== nextXMode || prevEmpty !== nextEmpty) {
-    try { chart.clear(); } catch(_) {}
-  }
-
-  chart.setOption(option, true);
-  chart.resize();
-
-  requestAnimationFrame(() => updateAxisSwitchPosition());
-  // 空图时，主动撤销轴指示线的残留（双保险）
-  if (option.__empty) {
-    try { chart.dispatchAction({ type: 'updateAxisPointer', currTrigger: 'leave' }); } catch(_) {}
-  }
-
-  const { x, y, visible } = computePrefixCenter(option);
-  placeAxisOverlayAt(x, y, visible && !option.__empty);
-
-  lastOption = option;
-  lastIsNarrow = layoutIsNarrow();
-
-  toggleFitUI(showFitCurves && !layoutIsNarrow());
-  placeFitUI();
-  repaintPointer();
-  if (showFitCurves) refreshFitBubble();
-
-}
 
   async function enterFullscreen(){
     const el = document.documentElement;
@@ -625,21 +623,50 @@
     return inPay;
   }
 
+  // 统一的小于 0 的占位值与最小可见 x
+  const X_PLACEHOLDER_NEG = -1;
+  const X_MIN_CLAMP = 0;
+
+  // 新增：数值校验工具
+  function isFiniteNumber(v){ const n = Number(v); return Number.isFinite(n); }
+
+  // REPLACE: 构建系列，缺失 x -> 用占位 x=-1；不把占位计入 xMin/xMax
   function buildSeries(rawSeries, xMode) {
     let maxAir = 0;
     let minX = +Infinity, maxX = -Infinity;
+
     const series = rawSeries.map(s => {
-      const xArr = (s[xMode] || []).map(Number);
-      const yArr = (s.airflow || []).map(Number);
-      const tipArr = (xMode === 'rpm' ? s.noise_db : s.rpm) || [];
-      const len = Math.min(xArr.length, yArr.length, tipArr.length || xArr.length);
+      const xSrc  = Array.isArray(s[xMode]) ? s[xMode] : [];
+      const ySrc  = Array.isArray(s.airflow) ? s.airflow : [];
+      const tipSrc = Array.isArray(xMode === 'rpm' ? s.noise_db : s.rpm)
+        ? (xMode === 'rpm' ? s.noise_db : s.rpm) : [];
+
+      const n = Math.min(xSrc.length, ySrc.length);
       const data = [];
-      for (let i = 0; i < len; i++) {
-        const x = xArr[i], y = yArr[i], tip = Number(tipArr[i]);
-        if (Number.isFinite(x)) { minX = Math.min(minX, x); maxX = Math.max(maxX, x); }
-        if (Number.isFinite(y)) { maxAir = Math.max(maxAir, y); }
-        data.push({ value: [x, y], tip });
+      for (let i = 0; i < n; i++) {
+        const xRaw = xSrc[i];
+        const yRaw = ySrc[i];
+        const yv = Number(yRaw);
+        const xv = Number(xRaw);
+
+        if (isFiniteNumber(yv)) {
+          // 有效 x 且不等于占位 -1 才参与最小/最大值计算；x===-1 视为占位点
+          if (isFiniteNumber(xv) && xv !== X_PLACEHOLDER_NEG) {
+            minX = Math.min(minX, xv);
+            maxX = Math.max(maxX, xv);
+            maxAir = Math.max(maxAir, yv);
+            const tipRaw = tipSrc[i];
+            const tip = isFiniteNumber(Number(tipRaw)) ? Number(tipRaw) : undefined;
+            data.push({ value: [xv, yv], tip });
+          } else {
+            // 缺失 x 或占位 -1：使用占位 x=-1，y 计入 y 轴上限，但不更新 xMin/xMax
+            maxAir = Math.max(maxAir, yv);
+            data.push({ value: [X_PLACEHOLDER_NEG, yv], tip: undefined, __missingX: true });
+          }
+        }
+        // 若 y 也无效则跳过该点
       }
+
       return {
         name: s.name,
         type: 'line',
@@ -676,6 +703,7 @@
     return { series, xMin: Math.max(minX - pad, 0), xMax: maxX + pad, yMax: Math.ceil(maxAir * 1.4) };
   }
 
+  // REPLACE: 构建 option，x 轴最小值与 dataZoom 起点强制 > 0；
   function buildOption(payload) {
     const { chartData, theme } = payload || {};
     const t = tokens(theme||'light');
@@ -685,13 +713,8 @@
     let isNarrow = chart && typeof chart.getWidth === 'function'
       ? (chart.getWidth() < 600)
       : (typeof window !== 'undefined' ? window.innerWidth < 600 : false);
-
     if (isFs && isMobile()) isNarrow = false;
-    if (isNarrow) {
-        // 窄屏：固定只显示 ECHARTS 曲线
-        if (!showRawCurves) showRawCurves = true;
-        if (showFitCurves) showFitCurves = false;
-        }
+    if (isNarrow) { if (!showRawCurves) showRawCurves = true; if (showFitCurves) showFitCurves = false; }
 
     const exportBg = (payload && payload.chartBg) || getExportBg();
     const bgNormal = isFs ? exportBg : 'transparent';
@@ -703,32 +726,19 @@
         backgroundColor: bgNormal,
         title:{ text:'暂无数据', left:'center', top:'middle',
           textStyle:{ color:t.axisLabel, fontFamily:t.fontFamily } },
-        toolbox:{
-           feature:{ 
-            saveAsImage:{ 
-              backgroundColor:exportBg, 
-              pixelRatio: window.devicePixelRatio || 1 
-            } 
-          } 
-        },
+        toolbox:{ feature:{ saveAsImage:{ backgroundColor:exportBg, pixelRatio: window.devicePixelRatio || 1 } } },
         tooltip:{ show:false, triggerOn:'none' }
       };
     }
 
     const built = buildSeries(sList, xMode);
+
     const xName = xMode==='rpm' ? '转速(RPM)' : '噪音(dB)';
     const titlePrefix = xMode==='rpm' ? '转速' : '噪音';
-    const bgColor = (payload && payload.chartBg) || getExportBg();
-
-    const titleTop = 10;
-    const titleFontSize = 20;
-    const titleFontWeight = 600;
+    const titleTop = 10, titleFontSize = 20, titleFontWeight = 600;
     const titleText = `${titlePrefix}${TITLE_GLUE}风量曲线`;
     const titleMeasure = measureText(titleText, titleFontSize, titleFontWeight, t.fontFamily);
     const gridTop = Math.max(54, titleTop + Math.ceil(titleMeasure.height) + 12);
-
-    const legendReserveRightPx = isNarrow ? 20 : 260;
-    const legendReserveBottomPx = isNarrow ? Math.min(320, 50 + (sList.length || 1) * 22) : 40;
 
     const legendMeta = {};
     sList.forEach(s=>{
@@ -753,6 +763,7 @@
       if (right) return `{m1|${left}} {m1|-} {m2|${right}}`;
       return `{m1|${left||name}}`;
     }
+
     const isN = isNarrow;
     const legendCfg = isN ? {
       type: 'scroll',
@@ -775,13 +786,11 @@
                 l2:{ fontSize:11,fontWeight:500,color:t.axisName,lineHeight:14 } } },
       formatter: desktopLegendFormatter
     };
+    legendCfg.data = sList.map(s => s.name);
     try {
       const prevSel = chart && chart.getOption && chart.getOption().legend && chart.getOption().legend[0] && chart.getOption().legend[0].selected;
       if (prevSel) legendCfg.selected = prevSel;
     } catch(_){}
-
-    const iconEnter = 'path://M3 10v-7h7M3 3l7 7M21 14v7h-7M21 21l-7-7';
-    const iconExit  = 'path://M3 7v7h7M3 14l7-7M21 17v-7h-7M21 10l-7 7';
 
     const finalSeries = [];
     if (showRawCurves) {
@@ -789,62 +798,43 @@
     }
 
     if (showFitCurves) {
-    ensureFitModels(sList, xMode);
-      
-    const width = Math.max(300, chart.getWidth ? chart.getWidth() : 800);
-    const sampleCount = computeSampleCount(width);
-    if (fitSamplesCache.sampleCount !== sampleCount) fitSamplesCache.sampleCount = sampleCount;
-      
-    sList.forEach(s => {
-      const model = fitModelsCache[xMode].get(s.name);
-      if (!model || model.x0 == null || model.x1 == null) return;
-      const sMin = Math.min(model.x0, model.x1);
-      const sMax = Math.max(model.x0, model.x1);
-      const xmin = Math.max(built.xMin, sMin);
-      const xmax = Math.min(built.xMax, sMax);
-      if (!(xmax > xmin)) return;
-    
-      const pts = resampleSingle(model, xmin, xmax, sampleCount, FIT_TENSION);
-      fitSamplesCache[xMode].set(s.name, pts);
-    
-      finalSeries.push({
-        id: `fit-line:${xMode}:${s.name}`,
-        name: s.name,
-        type: 'line',
-        smooth: false,
-        showSymbol: false,
-        connectNulls: false,
-        data: pts.map(p => [p.x, p.y]),
-        lineStyle: { width: 2.5, type:'dashed', color: s.color, opacity: 0.95 },
-        itemStyle: { color: s.color },
-        // 去掉切换动画（echarts 对虚线过渡有限），保留 legend 悬停高亮
-        legendHoverLink: true,
-        emphasis: {
-          focus: 'series',
-          blurScope: 'coordinateSystem',
-          lineStyle: { width: 3.5, opacity: 1 },
-          itemStyle: { opacity: 1 }
-        },
-        blur: {
-          lineStyle: { opacity: 0.2 },
-          itemStyle: { opacity: 0.2 }
-        },
-        silent: false,
-        tooltip: { show: false },
-        z: 3
+      ensureFitModels(sList, xMode);
+      const width = Math.max(300, chart.getWidth ? chart.getWidth() : 800);
+      const sampleCount = computeSampleCount(width);
+      sList.forEach(s => {
+        const model = fitModelsCache[xMode].get(s.name);
+        if (!model || model.x0 == null || model.x1 == null) return;
+        const sMin = Math.min(model.x0, model.x1);
+        const sMax = Math.max(model.x0, model.x1);
+        const xmin = Math.max(built.xMin, sMin);
+        const xmax = Math.min(built.xMax, sMax);
+        if (!(xmax > xmin)) return;
+
+        const pts = resampleSingle(model, xmin, xmax, sampleCount);
+        finalSeries.push({
+          id: `fit-line:${xMode}:${s.name}`,
+          name: s.name,
+          type: 'line',
+          smooth: false,
+          showSymbol: false,
+          connectNulls: false,
+          data: pts.map(p => [p.x, p.y]),
+          lineStyle: { width: 2.5, type:'dashed', color: s.color, opacity: 0.95 },
+          itemStyle: { color: s.color },
+          legendHoverLink: true,
+          emphasis: { focus: 'series', blurScope: 'coordinateSystem', lineStyle: { width: 3.5, opacity: 1 }, itemStyle: { opacity: 1 } },
+          blur: { lineStyle: { opacity: 0.2 }, itemStyle: { opacity: 0.2 } },
+          silent: false,
+          tooltip: { show: false },
+          z: 3
+        });
       });
-    });
-  }
+    }
 
-
+    const xMinForAxis = Math.max(X_MIN_CLAMP, built.xMin);
     return {
       __empty:false,
       __titlePrefix:titlePrefix,
-      __themeTokens:t,
-      __titleTop: titleTop,
-      __titleFontSize: titleFontSize,
-      __titleFontWeight: titleFontWeight,
-      __titleFamily: t.fontFamily,
 
       backgroundColor: bgNormal,
       color: sList.map(s=>s.color),
@@ -868,7 +858,8 @@
         axisLabel:{ color:t.axisLabel, fontSize:12, fontFamily:t.fontFamily, margin:10 },
         axisLine:{ lineStyle:{ color:t.axisLine }},
         splitLine:{ show:true, lineStyle:{ color:t.gridLine }},
-        min: 0, max: built.xMax * 1.2
+        min: xMinForAxis,
+        max: built.xMax * 1.2
       },
       yAxis:{
         type:'value', name:'风量(CFM)', min:0, max: built.yMax * 1.3,
@@ -878,12 +869,7 @@
       },
 
       tooltip:{
-        axisPointer: {
-          type: "cross", 
-          label: {
-          color: t.tooltipText
-          }
-        },
+        axisPointer: { type: "cross", label: { color: t.tooltipText } },
         trigger:'item',
         backgroundColor:t.tooltipBg,
         borderColor:t.tooltipBorder,
@@ -905,21 +891,18 @@
         feature:{
           dataZoom:{ yAxisIndex:'none' },
           restore:{},
-          saveAsImage:{ 
-            backgroundColor:exportBg, 
-            pixelRatio: window.devicePixelRatio || 1 
-          },
+          saveAsImage:{ backgroundColor:exportBg, pixelRatio: window.devicePixelRatio || 1 },
           myFullscreen: {
             show: true,
             title: !!document.fullscreenElement ? '退出全屏' : '全屏查看',
-            icon: !!document.fullscreenElement ? iconExit : iconEnter,
+            icon: !!document.fullscreenElement ? 'path://M3 7v7h7M3 14l7-7M21 17v-7h-7M21 10l-7 7' : 'path://M3 10v-7h7M3 3l7 7M21 14v7h-7M21 21l-7-7',
             onclick: () => toggleFullscreen()
           }
         }
       },
 
       dataZoom: [
-        { type: 'inside', xAxisIndex: 0, throttle: 50, zoomOnMouseWheel: true, moveOnMouseWheel: true, moveOnMouseMove: true ,filterMode: "none", startValue: built.xMin, endValue: built.xMax },
+        { type: 'inside', xAxisIndex: 0, throttle: 50, zoomOnMouseWheel: true, moveOnMouseWheel: true, moveOnMouseMove: true ,filterMode: "none", startValue: xMinForAxis, endValue: built.xMax },
         { type: 'inside', yAxisIndex: 0, throttle: 50, zoomOnMouseWheel: 'alt', moveOnMouseWheel: 'alt', moveOnMouseMove: true ,filterMode: "none", endValue: built.yMax}
       ],
 
@@ -1159,7 +1142,6 @@
     window.addEventListener('blur', endDrag);
   }
 
-
   function toggleFitUI(showFit){
   const btns = document.getElementById('fitButtons');
   const bubble = document.getElementById('fitBubble');
@@ -1167,10 +1149,8 @@
   const narrow = layoutIsNarrow();
   const empty  = !lastOption || lastOption.__empty;
 
-  // 窄屏一律隐藏按钮；仅在非空且非窄屏时显示
   if (btns) btns.style.visibility = (empty || narrow) ? 'hidden' : 'visible';
 
-  // 气泡与指针：仅在非窄屏且拟合开启时显示
   const showFloating = showFit && !narrow && !empty;
   if (bubble) bubble.style.visibility = showFloating ? 'visible' : 'hidden';
   if (ptr)    ptr.style.visibility    = showFloating ? 'visible' : 'hidden';
@@ -1356,19 +1336,18 @@
     }
     clampXQueryIntoVisibleRange();
 
-    // 数据 -> 像素
     const xPixel = dataToPxX(xQueryByMode[mode]);
+    if (!Number.isFinite(xPixel)) { ptr.style.visibility = 'hidden'; return; }
 
     ptr.style.left = xPixel + 'px';
     ptr.style.top = top + 'px';
     ptr.style.height = height + 'px';
     ptr.style.visibility = 'visible';
 
-    // 同步输入框与列表
     syncBubbleInput();
     if (showFitCurves) refreshFitBubble();
   }
-
+  
   function syncBubbleInput(){
     const inp = document.getElementById('fitXInput');
     if (!inp) return;
@@ -1404,7 +1383,7 @@
     refreshFitBubble();
   }
 
-  // refreshFitBubble：在风量后追加以第一名为基准的百分比（右对齐，含括号）
+  /* 替换：气泡实时值来源改为 PCHIP 模型 */
   function refreshFitBubble(){
     const bubble = document.getElementById('fitBubble');
     if (!bubble || !showFitCurves || !lastPayload || !chart) return;
@@ -1423,21 +1402,18 @@
       const visible = (selMap[s.name] !== false);
       if (!visible) return;
       const model = fitModelsCache[mode].get(s.name);
-      if (!model || model.x0 == null || model.x1 == null) return;
+      if (!model) return;
 
-      // NEW: x 越界则判为“无值”
-      const x0 = Math.min(model.x0, model.x1);
-      const x1 = Math.max(model.x0, model.x1);
+      const dom0 = Math.min(model.x0, model.x1);
+      const dom1 = Math.max(model.x0, model.x1);
       let y = NaN;
-      if (x >= x0 && x <= x1) {
-        y = evalModelY(model, x);
+      if (x >= dom0 && x <= dom1) {
+        y = evalPchipJS(model, x);
       }
       items.push({ name: s.name, color: s.color, y });
     });
 
     const fmt = (v)=> Math.round(v);
-
-    // NEW: 仅用“有值”的条目决定排序与百分比基准
     const withVal = items.filter(it => Number.isFinite(it.y)).sort((a,b)=> b.y - a.y);
     const noVal   = items.filter(it => !Number.isFinite(it.y));
 
@@ -1448,7 +1424,6 @@
     const maxValChars = valTexts.reduce((m,s)=>Math.max(m, s.length), 1);
     const pctWidthCh = 6; // "(100%)"
 
-    // NEW: 拼接“有值”在前、“无值”在后（显示 '-'）
     const ordered = withVal.concat(noVal);
     rowsEl.innerHTML = ordered.map(it => {
       const has = Number.isFinite(it.y);
@@ -1468,187 +1443,75 @@
     }).join('');
   }
 
+  /* 替换：从后端 series.pchip 读取模型，存入本地缓存 */
   function ensureFitModels(sList, xMode){
     const models = fitModelsCache[xMode];
-
     sList.forEach(s => {
-      if (models.has(s.name)) return;
-
-      // 取原始点并清洗：升序 + 合并重复 x（y 取均值）
-      const xsRaw = (s[xMode] || []).map(Number);
-      const ysRaw = (s.airflow || []).map(Number);
-      const pairs = [];
-      const n = Math.min(xsRaw.length, ysRaw.length);
-      for (let i=0;i<n;i++){
-        const x = xsRaw[i], y = ysRaw[i];
-        if (Number.isFinite(x) && Number.isFinite(y)) pairs.push([x, y]);
-      }
-      if (!pairs.length) return;
-
-      pairs.sort((a,b)=> a[0]-b[0]);
-      const xs = [], ys = [];
-      for (let i=0;i<pairs.length;i++){
-        const [x,y] = pairs[i];
-        if (xs.length && Math.abs(x - xs[xs.length-1]) < 1e-9){
-          ys[ys.length-1] = (ys[ys.length-1] + y) / 2;
-        } else {
-          xs.push(x); ys.push(y);
-        }
-      }
-
-      const U = xs.length;
-      const x0 = xs[0], x1 = xs[U-1];
-
-      if (U === 1){
-        models.set(s.name, { type:'linear', a: ys[0], b: 0, x0, x1: x0 + 1 });
-        return;
-      }
-
-      if (xMode === 'rpm'){
-        // 一次直线（单调非降：b<0 夹到 0）
-        const { a, b: bRaw } = olsLinear(xs, ys);
-        const b = Math.max(0, Number.isFinite(bRaw) ? bRaw : 0);
-        models.set(s.name, { type:'linear', a, b, x0, x1 });
-        return;
-      }
-
-      // 噪音：二次 vs 对数，取 SSE 更小者
-      let best = null;
-
-      const q = olsQuadratic(xs, ys);
-      if (q){
-        const sseQ = xs.reduce((acc, xv, i)=>{ const r = ys[i] - (q.a + q.b*xv + q.c*xv*xv); return acc + r*r; }, 0);
-        best = { type:'quad', a:q.a, b:q.b, c:q.c, sse:sseQ };
-      }
-
-      const lg = olsLog(xs, ys);
-      if (lg){
-        const sseL = xs.reduce((acc, xv, i)=>{ const r = ys[i] - (lg.a + lg.b*Math.log(Math.max(1e-9, xv - lg.shift))); return acc + r*r; }, 0);
-        if (!best || sseL < best.sse) best = { type:'log', a:lg.a, b:lg.b, shift:lg.shift, sse:sseL };
-      }
-
-      if (!best){
-        const { a, b } = olsLinear(xs, ys);
-        models.set(s.name, { type:'linear', a, b: Math.max(0,b), x0, x1 });
-        return;
-      }
-
-      // 存储所选模型参数（渲染时按公式采样）
-      if (best.type === 'quad') {
-        models.set(s.name, { type:'quad', a:best.a, b:best.b, c:best.c, x0, x1 });
+      const ph = s && s.pchip ? (xMode === 'noise_db' ? s.pchip.noise_db : s.pchip.rpm) : null;
+      if (ph && Array.isArray(ph.x) && Array.isArray(ph.y) && Array.isArray(ph.m) && ph.x0 != null && ph.x1 != null) {
+        models.set(s.name, ph);
       } else {
-        models.set(s.name, { type:'log', a:best.a, b:best.b, shift:best.shift, x0, x1 });
+        models.delete(s.name);
       }
     });
   }
+
+  /* 新增：前端 PCHIP 求值（与后端 eval_pchip 同步） */
+  function evalPchipJS(model, x){
+    if (!model || !Array.isArray(model.x) || !Array.isArray(model.y) || !Array.isArray(model.m)) return NaN;
+    const xs = model.x, ys = model.y, ms = model.m;
+    const n = xs.length;
+    if (n === 0) return NaN;
+    if (n === 1) return ys[0];
+
+    let xv = x;
+    if (xv <= xs[0]) xv = xs[0];
+    if (xv >= xs[n - 1]) xv = xs[n - 1];
+
+    // 二分找到区间 i: xs[i] <= x <= xs[i+1]
+    let lo = 0, hi = n - 2, i = 0;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (xs[mid] <= xv && xv <= xs[mid + 1]) { i = mid; break; }
+      if (xv < xs[mid]) hi = mid - 1; else lo = mid + 1;
+    }
+    if (lo > hi) i = Math.max(0, Math.min(n - 2, lo));
+
+    const x0 = xs[i], x1 = xs[i + 1];
+    const h = (x1 - x0) || 1;
+    const t = (xv - x0) / h;
+    const y0 = ys[i], y1 = ys[i + 1];
+    const m0 = ms[i] * h, m1 = ms[i + 1] * h;
+
+    const h00 = (2 * t*t*t - 3 * t*t + 1);
+    const h10 = (t*t*t - 2 * t*t + t);
+    const h01 = (-2 * t*t*t + 3 * t*t);
+    const h11 = (t*t*t - t*t);
+    return h00 * y0 + h10 * m0 + h01 * y1 + h11 * m1;
+  }
+
 
   function computeSampleCount(widthPx){
     const n = Math.round(widthPx / 1.5);
     return Math.max(200, Math.min(1200, n));
   }
 
-  function resampleSingle(model, xmin, xmax, count /* tension ignored */){
-    const n = Math.max(2, count|0);
+  /* 替换：用后端 PCHIP 模型进行采样，绘制虚线拟合曲线 */
+  function resampleSingle(model, xmin, xmax, count){
+    const n = Math.max(2, (count|0));
     const pts = [];
-    const x0 = Math.max(xmin, model.x0 ?? xmin);
-    const x1 = Math.min(xmax, model.x1 ?? xmax);
-    for (let i=0;i<n;i++){
-      const t = i/(n-1);
+    const dom0 = Math.min(model.x0, model.x1);
+    const dom1 = Math.max(model.x0, model.x1);
+    const x0 = Math.max(xmin, dom0);
+    const x1 = Math.min(xmax, dom1);
+    if (!(x1 > x0)) return pts;
+    for (let i = 0; i < n; i++){
+      const t = (n === 1) ? 0 : (i / (n - 1));
       const x = x0 + (x1 - x0) * t;
-      const y = evalModelY(model, x);
-      pts.push({ x, y });
+      const y = evalPchipJS(model, x);
+      pts.push({ x, y: Number.isFinite(y) ? y : NaN });
     }
     return pts;
-  }
-
-  // ====== 简单曲线拟合工具（直线/二次/对数）======
-
-  function evalModelY(model, x){
-    if (!model) return NaN;
-    switch (model.type) {
-      case 'linear':
-        return model.a + model.b * x;
-      case 'quad':
-        return model.a + model.b * x + model.c * x * x;
-      case 'log':
-        return model.a + model.b * Math.log(Math.max(1e-9, x - model.shift));
-      default:
-        return NaN;
-    }
-  }
-
-  // 直线 OLS：y = a + b x
-  function olsLinear(xs, ys){
-    const n = xs.length;
-    let sumx=0,sumy=0,sumxx=0,sumxy=0;
-    for (let i=0;i<n;i++){ const x=xs[i], y=ys[i]; sumx+=x; sumy+=y; sumxx+=x*x; sumxy+=x*y; }
-    const denom = n*sumxx - sumx*sumx;
-    let b = (Math.abs(denom) > 1e-12) ? (n*sumxy - sumx*sumy)/denom : 0;
-    let a = (sumy - b*sumx)/n;
-    return { a, b };
-  }
-
-  // 二次 OLS：y = a + b x + c x^2  -> 解 3x3 正规方程
-  function olsQuadratic(xs, ys){
-    const n = xs.length;
-    let S1=0,Sx=0,Sxx=0,Sxxx=0,Sxxxx=0,Sy=0,Sxy=0,Sxxy=0;
-    for (let i=0;i<n;i++){
-      const x = xs[i], y = ys[i];
-      const x2 = x*x, x3 = x2*x, x4 = x2*x2;
-      S1   += 1;
-      Sx   += x;
-      Sxx  += x2;
-      Sxxx += x3;
-      Sxxxx+= x4;
-      Sy   += y;
-      Sxy  += x*y;
-      Sxxy += x2*y;
-    }
-    const M = [
-      [ S1,   Sx,   Sxx  ],
-      [ Sx,   Sxx,  Sxxx ],
-      [ Sxx,  Sxxx, Sxxxx ]
-    ];
-    const b = [ Sy, Sxy, Sxxy ];
-    const sol = solve3x3(M, b);
-    if (!sol) return null;
-    return { a: sol[0], b: sol[1], c: sol[2] };
-  }
-
-  // 对数 OLS：y = a + b ln(x - xmin + 1)（保证自变量>0）
-  function olsLog(xs, ys){
-    const n = xs.length;
-    const xmin = Math.min.apply(null, xs);
-    const shift = xmin - 1; // ln(x - shift) == ln(x - xmin + 1)
-    let sumz=0,sumzz=0,sumy=0,sumzy=0;
-    for (let i=0;i<n;i++){
-      const z = Math.log(Math.max(1e-9, xs[i] - shift));
-      const y = ys[i];
-      sumz += z; sumzz += z*z; sumy += y; sumzy += z*y;
-    }
-    const denom = n*sumzz - sumz*sumz;
-    if (Math.abs(denom) < 1e-12) return null;
-    const b = (n*sumzy - sumz*sumy)/denom;
-    const a = (sumy - b*sumz)/n;
-    return { a, b, shift };
-  }
-
-  // 3x3 高斯消元
-  function solve3x3(M, b){
-    const A = [M[0].slice(), M[1].slice(), M[2].slice()];
-    const y = b.slice();
-    for (let i=0;i<3;i++){
-      // 选主元
-      let piv=i; for (let r=i+1;r<3;r++) if (Math.abs(A[r][i])>Math.abs(A[piv][i])) piv=r;
-      if (Math.abs(A[piv][i])<1e-12) return null;
-      if (piv!==i){ const t=A[i]; A[i]=A[piv]; A[piv]=t; const ty=y[i]; y[i]=y[piv]; y[piv]=ty; }
-      const div=A[i][i];
-      for (let c=i;c<3;c++) A[i][c]/=div; y[i]/=div;
-      for (let r=i+1;r<3;r++){ const f=A[r][i]; for (let c=i;c<3;c++) A[r][c]-=f*A[i][c]; y[r]-=f*y[i]; }
-    }
-    const x = new Array(3);
-    for (let i=2;i>=0;i--){ let s=y[i]; for (let c=i+1;c<3;c++) s-=A[i][c]*x[c]; x[i]=s; }
-    return x;
   }
 
   function clampXDomain(val){

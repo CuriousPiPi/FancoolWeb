@@ -2315,6 +2315,40 @@ document.addEventListener('click', async e=>{
     if (!ensureCanAdd(1)){
       return;
     }
+
+     // 从最近移除列表中找出该条目的模型标识，做一次存在性预检查
+    const removedList = LocalState.getRecentlyRemoved();
+    const orig = Array.isArray(removedList) ? removedList.find(it => it && it.key === fanKey) : null;
+
+    async function removeFromRecentlyRemovedUI(){
+      try { LocalState.removeFromRecentlyRemoved(fanKey); } catch(_) {}
+      rebuildRemovedFans(LocalState.getRecentlyRemoved());
+      showInfo('该数据已不可用，已从“最近移除”列表剔除');
+    }
+
+    if (orig && Number.isInteger(orig.model_id) && Number.isInteger(orig.condition_id)) {
+      try {
+        const chk = await fetch('/api/curves', {
+          method: 'POST',
+          headers: { 'Content-Type':'application/json' },
+          body: JSON.stringify({ pairs: [{ model_id: orig.model_id, condition_id: orig.condition_id }] })
+        });
+        const j = await chk.json();
+        const n = normalizeApiResponse(j);
+        if (n.ok) {
+          const data = n.data || {};
+          const miss = Array.isArray(data.missing) ? data.missing : [];
+          const isMissing = miss.some(m => String(m.model_id) === String(orig.model_id) && String(m.condition_id) === String(orig.condition_id));
+          if (isMissing) {
+            await removeFromRecentlyRemovedUI();
+            return; // 不再执行恢复流程
+          }
+        }
+      } catch(_) {
+        // 检查失败则回落到原恢复流程
+      }
+    }
+
     const result = LocalState.restoreKey(fanKey);
     if (result.ok){
       await logNewPairs([ result.item ]);
@@ -2329,7 +2363,7 @@ document.addEventListener('click', async e=>{
       showInfo('已在图表中，已从最近移除列表剔除');
       rebuildRemovedFans(LocalState.getRecentlyRemoved());
     } else {
-      showInfo('无法恢复');
+      await removeFromRecentlyRemovedUI();
     }
     return;
   }
@@ -3371,7 +3405,6 @@ async function fetchExpandPairs(brand, model, resType, resLoc){
 async function refreshChartFromLocal(showToast=false){
   const pairs = LocalState.getSelectionPairs();
   if (pairs.length === 0) {
-    // 发送空图
     postChartData({ x_axis_type: LocalState.getXAxisType(), series: [] });
     return;
   }
@@ -3388,11 +3421,30 @@ async function refreshChartFromLocal(showToast=false){
       return;
     }
     const data = n.data || {};
+    // 新增：处理 missing
+    if (Array.isArray(data.missing) && data.missing.length) {
+      const removed = [];
+      data.missing.forEach(it => {
+        const key = `${it.model_id}_${it.condition_id}`;
+        const sel = LocalState.getSelected();
+        const victim = sel.find(s => `${s.model_id}_${s.condition_id}` === key);
+        if (victim && LocalState.removeKey(victim.key)) {
+          removed.push(victim);
+        }
+      });
+      if (removed.length) {
+        rebuildSelectedFans(LocalState.getSelected());
+        rebuildRemovedFans(LocalState.getRecentlyRemoved());
+        syncQuickActionButtons();
+        applySidebarColors();
+        showInfo(`已移除 ${removed.length} 组不存在的数据`);
+      }
+    }
     const chartData = {
       x_axis_type: LocalState.getXAxisType(),
       series: data.series || []
     };
-    lastChartData = chartData; // 复用旧变量
+    lastChartData = chartData;
     postChartData(chartData);
     if (showToast) showSuccess('已刷新曲线');
   } catch(e){

@@ -5,6 +5,9 @@ import time
 import threading
 import hmac
 import hashlib
+import math
+import signal
+from curves import pchip_cache
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Any
 
@@ -22,9 +25,24 @@ app = Flask(__name__)
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 app.secret_key = os.getenv('APP_SECRET', 'replace-me-in-prod')
 app.config['SESSION_COOKIE_SECURE'] = os.getenv('SESSION_COOKIE_SECURE', '0') == '1'
-app.config['TEMPLATES_AUTO_RELOAD'] = True
-app.jinja_env.auto_reload = True
-app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0
+app.config['TEMPLATES_AUTO_RELOAD'] = True      #生产环境注释这行
+app.jinja_env.auto_reload = True    #生产环境注释这行
+app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0     #生产环境注释这行
+
+
+
+def _on_sighup(signum, frame):
+    try:
+        pchip_cache.reload_curve_params_from_env()
+        app.logger.info("Reloaded curve params from env via SIGHUP")
+    except Exception as e:
+        app.logger.exception("Reload curve params failed: %s", e)
+
+try:
+    signal.signal(signal.SIGHUP, _on_sighup)
+except Exception:
+    # Windows / 一些环境不支持 SIGHUP，可忽略
+    pass
 
 # 将 curves.pchip_cache 日志接到 Flask 的 handlers 上
 def _hook_curve_logger_to_flask():
@@ -342,7 +360,6 @@ def _effective_value_for_series(series_rows: list, model_id: int, condition_id: 
          * 若 limit >= max_x → 取 max_x 的原始点 → raw
          * 否则（位于域内且无原始点）→ 拟合值（fit, PCHIP）
     """
-    import math
     ax = 'noise_db' if axis == 'noise' else axis
     xs, ys, rpm_list = [], [], []
     for r in series_rows:
@@ -725,23 +742,109 @@ def api_curves():
                 continue
             seen.add(t)
             uniq.append(t)
+
         bucket = get_curves_for_pairs(uniq)
         series = []
+        missing = []  # 新增：记录在库中不存在的 pair
+
+        def _thin_model(m: dict | None) -> dict | None:
+            if not m or not isinstance(m, dict):
+                return None
+            return {
+                'type': m.get('type', 'pchip_v1'),
+                'axis': m.get('axis'),
+                'x': m.get('x') or [],
+                'y': m.get('y') or [],
+                'm': m.get('m') or [],
+                'x0': m.get('x0'),
+                'x1': m.get('x1'),
+            }
+
+        def _collect_axis_points(b: dict, axis_key: str) -> tuple[list[float], list[float]]:
+            xs, ys = [], []
+            x_arr = b.get(axis_key) or []
+            y_arr = b.get('airflow') or []
+            n = min(len(x_arr), len(y_arr))
+            for i in range(n):
+                x = x_arr[i]
+                y = y_arr[i]
+                try:
+                    xf = float(x) if x is not None else None
+                    yf = float(y) if y is not None else None
+                except Exception:
+                    continue
+                if xf is None or yf is None:
+                    continue
+                if not (math.isfinite(xf) and math.isfinite(yf)):
+                    continue
+                xs.append(xf)
+                ys.append(yf)
+            return xs, ys
+
+        # 新增：对不存在的 pair 主动清理缓存，返回 missing
+        wanted_keys = {f"{m}_{c}": (m, c) for (m, c) in uniq}
+        existing_keys = set(bucket.keys())
+        for key, (mid, cid) in wanted_keys.items():
+            if key not in existing_keys:
+                missing.append({'model_id': mid, 'condition_id': cid})
+                try:
+                    pchip_cache.delete_cached_model(mid, cid, 'rpm')
+                    pchip_cache.delete_cached_model(mid, cid, 'noise_db')
+                except Exception:
+                    pass  # 日志已在 deleteCached 内部记录
+
         for mid, cid in uniq:
             k = f"{mid}_{cid}"
             b = bucket.get(k)
             if not b:
                 continue
             info = b['info']
+
+            # 构建/读取 PCHIP 模型（两个轴各一份）
+            rpm_xs, rpm_ys = _collect_axis_points(b, 'rpm')
+            noise_xs, noise_ys = _collect_axis_points(b, 'noise_db')
+
+            # 新增：如果某轴已无点，清理该轴缓存
+            if not rpm_xs:
+                try: pchip_cache.delete_cached_model(info['model_id'], info['condition_id'], 'rpm')
+                except Exception: pass
+            if not noise_xs:
+                try: pchip_cache.delete_cached_model(info['model_id'], info['condition_id'], 'noise_db')
+                except Exception: pass
+
+            rpm_model = get_or_build_pchip(info['model_id'], info['condition_id'], 'rpm', rpm_xs, rpm_ys) if rpm_xs else None
+            noise_model = get_or_build_pchip(info['model_id'], info['condition_id'], 'noise_db', noise_xs, noise_ys) if noise_xs else None
+
+            def _to_placeholder_array(arr):
+                out = []
+                for v in (arr or []):
+                    try:
+                        if v is None:
+                            out.append(-1.0)
+                        else:
+                            fv = float(v)
+                            if math.isnan(fv):
+                                out.append(-1.0)
+                            else:
+                                out.append(fv)
+                    except Exception:
+                        out.append(-1.0)
+                return out
+
             series.append(dict(
                 key=k,
                 name=f"{info['brand']} {info['model']} - {info['res_type']}({info['res_loc']})",
                 brand=info['brand'], model=info['model'],
                 res_type=info['res_type'], res_loc=info['res_loc'],
                 model_id=info['model_id'], condition_id=info['condition_id'],
-                rpm=b['rpm'], noise_db=b['noise_db'], airflow=b['airflow']
+                # 仅返回给前端的原始数组做占位；模型依然用清洗后的 xs/ys
+                rpm=_to_placeholder_array(b['rpm']),
+                noise_db=_to_placeholder_array(b['noise_db']),
+                airflow=b['airflow'],
+                pchip={'rpm': _thin_model(rpm_model), 'noise_db': _thin_model(noise_model)
+                }
             ))
-        return resp_ok({'series': series})
+        return resp_ok({'series': series, 'missing': missing})
     except Exception as e:
         app.logger.exception(e)
         return resp_err('INTERNAL_ERROR', f'后端异常: {e}', 500)
