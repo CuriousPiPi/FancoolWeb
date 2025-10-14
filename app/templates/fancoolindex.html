@@ -332,6 +332,7 @@
                               <button class="fc-btn-icon-add js-ranking-add fc-tooltip-target"
                                       title="添加到图表"
                                       data-add-type="ranking"
+                                      data-log-source="top_query"
                                       data-brand="{{ query.brand_name_zh }}"
                                       data-model="{{ query.model_name }}"
                                       data-res-type="{{ query.resistance_type_zh }}"
@@ -483,6 +484,8 @@
   </main>
   
   <script src="{{ url_for('static', filename='js/local-state.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/sidebar.js') }}"></script>
   <script src="{{ url_for('static', filename='js/fancool.js') }}"></script>
+  
 </body>
 </html>

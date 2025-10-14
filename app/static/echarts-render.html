@@ -35,7 +35,7 @@
       --shadow-strong:0 8px 24px rgba(0,0,0,0.45);
     }
 
-    /**/
+    /*x轴切换开关*/
     .chart-xaxis-overlay{
       position:absolute;
       z-index:2147483641;
@@ -192,7 +192,7 @@
       margin-top: 6px;
     }
 
-    /* 可拖指针（带矩形把手 + 向下箭头） */
+    /* 可拖指针（带矩形把手 + 向上箭头） */
     .fit-pointer{
       position: absolute;
       z-index: 1000;
@@ -660,7 +660,6 @@
             data.push({ value: [xv, yv], tip });
           } else {
             // 缺失 x 或占位 -1：使用占位 x=-1，y 计入 y 轴上限，但不更新 xMin/xMax
-            maxAir = Math.max(maxAir, yv);
             data.push({ value: [X_PLACEHOLDER_NEG, yv], tip: undefined, __missingX: true });
           }
         }
