@@ -182,7 +182,7 @@ select.fc-field::-ms-expand { display:none; }
 input.fc-field, select.fc-field { appearance:none; }
 input.fc-field::-webkit-inner-spin-button,
 input.fc-field::-webkit-outer-spin-button { appearance:none; margin:0; }
-input.fc-field[type=number] { -moz-appearance:textfield; }
+input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
 
 [data-theme="dark"] .fc-field,
 [data-theme="dark"] .fc-select {
