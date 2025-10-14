@@ -883,6 +883,11 @@ def api_curves():
 def api_log_query():
     try:
         data = request.get_json(force=True, silent=True) or {}
+        source = (data.get('source') or '').strip() or None
+        # 简单限制长度，避免异常值
+        if source and len(source) > 64:
+            source = source[:64]
+
         raw_pairs = data.get('pairs') or []
         cleaned, seen = [], set()
         for p in raw_pairs:
@@ -896,10 +901,11 @@ def api_log_query():
                 continue
             seen.add(t)
             cleaned.append({'model_id': mid, 'condition_id': cid})
+
         logged = 0
         if cleaned:
             user_id = get_or_create_user_identifier()
-            sql = "INSERT INTO query_logs (user_identifier, model_id, condition_id, batch_id) VALUES (:u,:m,:c,:b)"
+            sql = "INSERT INTO query_logs (user_identifier, model_id, condition_id, batch_id, source) VALUES (:u,:m,:c,:b,:s)"
             batch = str(uuid.uuid4())
             with engine.begin() as conn:
                 for pair in cleaned:
@@ -907,7 +913,8 @@ def api_log_query():
                         'u': user_id,
                         'm': pair['model_id'],
                         'c': pair['condition_id'],
-                        'b': batch
+                        'b': batch,
+                        's': source
                     })
                     logged += 1
         return resp_ok({'logged': logged})

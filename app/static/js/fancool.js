@@ -1015,7 +1015,8 @@ function rebuildSelectedIndex(){
   });
 }
 rebuildSelectedIndex();
-function buildQuickBtnHTML(addType, brand, model, resType, resLoc, modelId, conditionId){
+
+function buildQuickBtnHTML(addType, brand, model, resType, resLoc, modelId, conditionId, logSource){
   const raw = (resLoc ?? '');
   const normResLoc = (String(raw).trim() === '') ? '无' : raw;
   const mapKey = `${escapeHtml(brand)}||${escapeHtml(model)}||${escapeHtml(resType)}||${escapeHtml(normResLoc)}`;
@@ -1023,17 +1024,29 @@ function buildQuickBtnHTML(addType, brand, model, resType, resLoc, modelId, cond
   const mode = isDup?'remove':'add';
   const title = isDup?'从图表移除':'添加到图表';
   const icon = isDup?'<i class="fa-solid fa-xmark"></i>':'<i class="fa-solid fa-plus"></i>';
+
+  // 默认来源映射（可被实参 logSource 覆盖）
+  const defaultSourceMap = {
+    likes: 'liked',
+    rating: 'top_rating',
+    ranking: 'top_query',
+    search: 'search'
+  };
+  const sourceAttr = logSource || defaultSourceMap[addType] || 'unknown';
+
   let cls;
   if (isDup) cls='js-list-remove';
   else if (addType==='search') cls='js-search-add';
   else if (addType==='rating') cls='js-rating-add';
   else if (addType==='ranking') cls='js-ranking-add';
   else cls='js-likes-add';
+
   return `
     <button class="fc-btn-icon-add ${cls} fc-tooltip-target"
             title="${title}"
             data-mode="${mode}"
             data-add-type="${addType}"
+            data-log-source="${escapeHtml(sourceAttr)}"
             data-brand="${escapeHtml(brand)}"
             data-model="${escapeHtml(model)}"
             data-res-type="${escapeHtml(resType)}"
@@ -1043,6 +1056,7 @@ function buildQuickBtnHTML(addType, brand, model, resType, resLoc, modelId, cond
       ${icon}
     </button>`;
 }
+
 function toRemoveState(btn){
   btn.dataset.mode='remove';
   btn.classList.remove('js-ranking-add','js-rating-add','js-search-add','js-likes-add');
@@ -1291,6 +1305,7 @@ function reloadTopRatings(debounce=true){
     .catch(err=>showError('获取点赞排行异常: '+err.message))
     .finally(()=>{ _rtPending=false; });
 }
+
 function applyRatingTable(resp){
   const tbody = document.getElementById('ratingRankTbody');
   if (!tbody) return;
@@ -1337,6 +1352,7 @@ function applyRatingTable(resp){
                   title="${btnTitle}"
                   data-mode="${btnMode}"
                   data-add-type="rating"
+                  data-log-source="top_rating"
                   data-brand="${escapeHtml(r.brand_name_zh)}"
                   data-model="${escapeHtml(r.model_name)}"
                   data-res-type="${escapeHtml(r.resistance_type_zh)}"
@@ -1353,6 +1369,7 @@ function applyRatingTable(resp){
   likesTabLastLoad = Date.now();
   syncQuickActionButtons();
 }
+
 function loadLikesIfNeeded(){
   if (!needReloadLikes()) return;
   showLoading('rating-refresh','加载好评榜...');
@@ -1433,9 +1450,7 @@ function applyRecentUpdatesTable(resp) {
     const sizeText = `${escapeHtml(r.size)}x${escapeHtml(r.thickness)}`;
     const locRaw = r.resistance_location_zh || '';
     const scen = formatScenario(r.resistance_type_zh, locRaw);
-    const updateText = escapeHtml(r.update_date); // 保留后端返回的日期格式
-
-    // 与“近期热门”一致：空位置用“无”，按钮用 js-ranking-add（沿用同一处理逻辑）
+    const updateText = escapeHtml(r.update_date);
     const resLocForBtn = locRaw && String(locRaw).trim() !== '' ? locRaw : '无';
 
     html += `
@@ -1450,6 +1465,7 @@ function applyRecentUpdatesTable(resp) {
                   title="添加到图表"
                   data-mode="add"
                   data-add-type="ranking"
+                  data-log-source="update_notice"
                   data-brand="${escapeHtml(brand)}"
                   data-model="${escapeHtml(model)}"
                   data-res-type="${escapeHtml(r.resistance_type_zh)}"
@@ -1494,6 +1510,13 @@ function fillSearchTable(tbody, list){
     tbody.innerHTML='<tr><td colspan="8" class="text-center text-gray-500 py-6">没有符合条件的结果</td></tr>';
     return;
   }
+
+  // 根据 tbody.id 区分来源
+  const logSource =
+    (tbody.id === 'searchAirflowTbody') ? 'search_airflow' :
+    (tbody.id === 'searchLikesTbody')   ? 'search_rating'  :
+                                          'search';
+
   tbody.innerHTML = list.map(r=>{
     const brand = r.brand_name_zh;
     const model = r.model_name;
@@ -1501,7 +1524,6 @@ function fillSearchTable(tbody, list){
     const resLocRaw = r.resistance_location_zh || '';
     const scenLabel = formatScenario(resType, resLocRaw);
 
-    // x 信息列
     const axis = (r.effective_axis === 'noise') ? 'noise_db' : (r.effective_axis || 'rpm');
     const unit = axis === 'noise_db' ? 'dB' : 'RPM';
     const xVal = Number(r.effective_x);
@@ -1521,7 +1543,7 @@ function fillSearchTable(tbody, list){
         <td class="nowrap">${xCell}</td>
         <td class="text-blue-600 font-medium text-sm">${airflowText}</td>
         <td class="text-blue-600 font-medium">${r.like_count ?? 0}</td>
-        <td>${buildQuickBtnHTML('search', brand, model, resType, resLocRaw, r.model_id, r.condition_id)}</td>
+        <td>${buildQuickBtnHTML('search', brand, model, resType, resLocRaw, r.model_id, r.condition_id, logSource)}</td>
       </tr>`;
   }).join('');
 }
@@ -1855,59 +1877,65 @@ document.addEventListener('click', async e=>{
   }
 
   {
-    const picker = ['.js-ranking-add','.js-search-add','.js-rating-add','.js-likes-add'];
-    for (const sel of picker){
-      const btn = safeClosest(e.target, sel);
-      if (!btn) continue;
-      const midAttr = btn.dataset.modelId;
-      const cidAttr = btn.dataset.conditionId;
-      if (!(midAttr && cidAttr)){
-        showError('缺少标识：按钮未包含 model_id / condition_id');
+  const picker = ['.js-ranking-add','.js-search-add','.js-rating-add','.js-likes-add'];
+      for (const sel of picker){
+        const btn = safeClosest(e.target, sel);
+        if (!btn) continue;
+        const midAttr = btn.dataset.modelId;
+        const cidAttr = btn.dataset.conditionId;
+        if (!(midAttr && cidAttr)){
+          showError('缺少标识：按钮未包含 model_id / condition_id');
+          return;
+        }
+        showLoading('op','添加中...');
+        try {
+          let resLoc = btn.dataset.resLoc || '';
+          if (resLoc === '无') resLoc = '';
+          const pairs = [{
+            model_id: Number(midAttr),
+            condition_id: Number(cidAttr),
+            brand: btn.dataset.brand ? unescapeHtml(btn.dataset.brand) : '',
+            model: btn.dataset.model ? unescapeHtml(btn.dataset.model) : '',
+            res_type: btn.dataset.resType ? unescapeHtml(btn.dataset.resType) : '',
+            res_loc: resLoc ? unescapeHtml(resLoc) : ''
+          }];
+          const newPairs = computeNewPairsAfterDedup(pairs);
+          if (newPairs.length === 0){
+            hideLoading('op'); showInfo('已存在'); return;
+          }
+          if (!ensureCanAdd(newPairs.length)){
+            hideLoading('op'); return;
+          }
+          const addedSummary = LocalState.addPairs(pairs);
+
+          // NEW: 读取来源（优先 data-log-source，其次按 addType 映射）
+          const addType = btn.dataset.addType || '';
+          const fallbackMap = { likes:'liked', rating:'top_rating', ranking:'top_query', search:'search' };
+          const logSource = btn.dataset.logSource || fallbackMap[addType] || 'unknown';
+
+          await logNewPairs(addedSummary.addedDetails, logSource);
+          hideLoading('op');
+          if (addedSummary.added > 0){
+            showSuccess(`新增 ${addedSummary.added} 组`);
+            window.__APP.sidebar.maybeAutoOpenSidebarOnAdd && window.__APP.sidebar.maybeAutoOpenSidebarOnAdd();
+          } else {
+            showInfo('已存在，无新增');
+          }
+          rebuildSelectedFans(LocalState.getSelected());
+          ensureLikeStatusBatch(addedSummary.addedDetails.map(d => ({
+            model_id: d.model_id, condition_id: d.condition_id
+          })));
+          rebuildRemovedFans(LocalState.getRecentlyRemoved());
+          syncQuickActionButtons();
+          applySidebarColors();
+          refreshChartFromLocal(false);
+        } catch(err){
+          hideLoading('op');
+          showError('添加失败: '+err.message);
+        }
         return;
       }
-      showLoading('op','添加中...');
-      try {
-        let resLoc = btn.dataset.resLoc || '';
-        if (resLoc === '无') resLoc = '';
-        const pairs = [{
-          model_id: Number(midAttr),
-          condition_id: Number(cidAttr),
-          brand: btn.dataset.brand ? unescapeHtml(btn.dataset.brand) : '',
-          model: btn.dataset.model ? unescapeHtml(btn.dataset.model) : '',
-          res_type: btn.dataset.resType ? unescapeHtml(btn.dataset.resType) : '',
-          res_loc: resLoc ? unescapeHtml(resLoc) : ''
-        }];
-        const newPairs = computeNewPairsAfterDedup(pairs);
-        if (newPairs.length === 0){
-          hideLoading('op'); showInfo('已存在'); return;
-        }
-        if (!ensureCanAdd(newPairs.length)){
-          hideLoading('op'); return;
-        }
-        const addedSummary = LocalState.addPairs(pairs);
-        await logNewPairs(addedSummary.addedDetails);
-        hideLoading('op');
-        if (addedSummary.added > 0){
-          showSuccess(`新增 ${addedSummary.added} 组`);
-          window.__APP.sidebar.maybeAutoOpenSidebarOnAdd && window.__APP.sidebar.maybeAutoOpenSidebarOnAdd();
-        } else {
-          showInfo('已存在，无新增');
-        }
-        rebuildSelectedFans(LocalState.getSelected());
-        ensureLikeStatusBatch(addedSummary.addedDetails.map(d => ({
-          model_id: d.model_id, condition_id: d.condition_id
-        })));
-        rebuildRemovedFans(LocalState.getRecentlyRemoved());
-        syncQuickActionButtons();
-        applySidebarColors();
-        refreshChartFromLocal(false);
-      } catch(err){
-        hideLoading('op');
-        showError('添加失败: '+err.message);
-      }
-      return;
     }
-  }
 
   const removeBtn = safeClosest(e.target, '.js-remove-fan');
   if (removeBtn){
@@ -1969,7 +1997,7 @@ document.addEventListener('click', async e=>{
 
     const result = LocalState.restoreKey(fanKey);
     if (result.ok){
-      await logNewPairs([ result.item ]);
+      await logNewPairs([ result.item ], 'recover'); // NEW: 标记来源
       showSuccess('已恢复');
       rebuildSelectedFans(LocalState.getSelected());
       ensureLikeStatusBatch([{ model_id: result.item.model_id, condition_id: result.item.condition_id }]);
@@ -2065,7 +2093,7 @@ if (fanForm){
         }
       }
       const addedSummary = LocalState.addPairs(pairs);
-      await logNewPairs(addedSummary.addedDetails);
+      await logNewPairs(addedSummary.addedDetails, 'direct'); // NEW: 标记来源
       hideLoading('op');
       if (addedSummary.added>0){
         showSuccess(`新增 ${addedSummary.added} 组`);
@@ -2921,13 +2949,16 @@ async function refreshChartFromLocal(showToast=false){
   }
 }
 
-async function logNewPairs(addedDetails){
+async function logNewPairs(addedDetails, source='unknown'){
   if (!addedDetails || !addedDetails.length) return;
   try{
     await fetch('/api/log_query', {
       method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ pairs: addedDetails.map(d=>({ model_id:d.model_id, condition_id:d.condition_id })) })
+      body: JSON.stringify({
+        source,
+        pairs: addedDetails.map(d=>({ model_id:d.model_id, condition_id:d.condition_id }))
+      })
     });
   }catch(e){
     // 静默失败即可
