@@ -25,8 +25,9 @@ app = Flask(__name__)
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 app.secret_key = os.getenv('APP_SECRET', 'replace-me-in-prod')
 app.config['SESSION_COOKIE_SECURE'] = os.getenv('SESSION_COOKIE_SECURE', '0') == '1'
+
 app.config['TEMPLATES_AUTO_RELOAD'] = True      #生产环境注释这行
-app.jinja_env.auto_reload = True    #生产环境注释这行
+app.jinja_env.auto_reload = True                #生产环境注释这行
 app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0     #生产环境注释这行
 
 
@@ -71,7 +72,7 @@ engine = create_engine(
     future=True
 )
 
-SIZE_OPTIONS = ["不限", "120", "140"]
+SIZE_OPTIONS = ["不限", "120"] #, "140"]
 TOP_QUERIES_LIMIT = 10
 RECENT_LIKES_LIMIT = 50
 CLICK_COOLDOWN_SECONDS = 0.5
@@ -944,7 +945,7 @@ def search_models(query):
 @app.route('/get_models/<brand>')
 def get_models(brand):
     rows = fetch_all(
-        "SELECT DISTINCT model_name FROM fan_model m JOIN fan_brand b ON b.brand_id=m.brand_id WHERE b.brand_name_zh=:b",
+        "SELECT DISTINCT model_name FROM fan_model m JOIN fan_brand b ON b.is_valid=1 AND b.brand_id=m.brand_id WHERE m.is_valid=1 AND b.brand_name_zh=:b",
         {'b': brand}
     )
     return _maybe_raw_array([r['model_name'] for r in rows])
@@ -1181,10 +1182,10 @@ def legal():
 # =========================================
 @app.route('/')
 def index():
-    brands_rows = fetch_all("SELECT DISTINCT brand_name_zh FROM fan_brand")
+    brands_rows = fetch_all("SELECT DISTINCT brand_name_zh FROM fan_brand WHERE is_valid=1")
     brands = [r['brand_name_zh'] for r in brands_rows]
-    res_types_rows = fetch_all("SELECT DISTINCT resistance_type_zh FROM working_condition")
-    res_locs_rows = fetch_all("SELECT DISTINCT resistance_location_zh FROM working_condition")
+    res_types_rows = fetch_all("SELECT DISTINCT resistance_type_zh FROM working_condition WHERE is_valid=1")
+    res_locs_rows = fetch_all("SELECT DISTINCT resistance_location_zh FROM working_condition WHERE is_valid=1")
 
     top_queries = get_top_queries(limit=TOP_QUERIES_LIMIT)
     top_ratings = get_top_ratings(limit=TOP_QUERIES_LIMIT)
