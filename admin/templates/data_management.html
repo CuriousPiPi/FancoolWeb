@@ -1,0 +1,679 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <meta name="theme-color" content="#0b1220" />
+  <title>数据管理</title>
+  <style>
+    :root{
+      --maxw: 1200px;
+      --space-1: 6px;
+      --space-2: 10px;
+      --space-3: 14px;
+      --space-4: 18px;
+      --space-5: 24px;
+      --radius: 12px;
+      --radius-sm: 8px;
+      --h: 44px;
+      --fs: 15px;
+
+      --bg: #0b1220;
+      --card: #0f172a;
+      --text: #e5e7eb;
+      --muted: #757a84;
+      --border: #1f2937;
+
+      --primary: #38bdf8;
+      --primary-600: #0ea5e9;
+      --primary-50: #062c3e;
+
+      --ok: #22c55e;
+      --err: #ef4444;
+      --warn: #f59e0b;
+
+      --shadow: 0 10px 30px rgba(0,0,0,.35);
+      --shadow-sm: 0 6px 16px rgba(0,0,0,.3);
+      --shadow-inset: inset 0 0 0 1px var(--border);
+    }
+
+    /* 顶部标题右侧用户信息条 */
+      .page-header{
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        margin-bottom: var(--space-4);
+      }
+      .page-header h2{ margin: 0; }
+      .userbar{
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        color: var(--muted);
+        font-size: 13px;
+        white-space: nowrap;
+      }
+      .btn-ghost.small{
+        height: 30px;
+        padding: 0 10px;
+        font-size: 13px;
+        border-radius: 8px;
+        display: inline-flex;
+        align-items: center;
+        text-decoration: none;
+      }
+
+    *, *::before, *::after{ box-sizing: border-box; }
+    html, body{ height: 100%; }
+    body{
+      margin: 0;
+      font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+      font-size: var(--fs);
+      color: var(--text);
+      background: radial-gradient(1200px 800px at 70% -200px, var(--primary-50), transparent) no-repeat, var(--bg);
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+    }
+
+    .container{ max-width: var(--maxw); margin: 0 auto; padding: clamp(16px, 3vw, 28px); }
+    h2{ margin: 0 0 var(--space-4); font-size: clamp(22px, 2.4vw, 28px); letter-spacing: .2px; }
+
+    .tabs{
+      position: sticky; top: 0; z-index: 20; display: flex; gap: 8px; padding: 6px; border-radius: 999px;
+      background: color-mix(in oklab, var(--card), transparent 30%); backdrop-filter: blur(6px);
+      border: 1px solid var(--border); margin-bottom: var(--space-4); box-shadow: var(--shadow-sm); overflow-x: auto;
+    }
+    .tab{ white-space: nowrap; padding: 8px 14px; border-radius: 999px; border: 1px solid transparent; background: transparent; color: var(--muted); cursor: pointer; user-select: none; transition: .18s ease; }
+    .tab:hover{ color: var(--text); background: color-mix(in oklab, var(--primary-50), transparent 60%); }
+    .tab.active{ color: #0b1220; background: linear-gradient(180deg, var(--primary), var(--primary-600)); box-shadow: 0 6px 14px color-mix(in oklab, var(--primary), transparent 80%); }
+
+    .panel{ background: var(--card); border-radius: var(--radius); border: 1px solid var(--border); box-shadow: var(--shadow); padding: clamp(14px, 2.5vw, 22px); margin-bottom: clamp(16px, 2.5vw, 24px); }
+    .panel h3{ margin: 0 0 var(--space-3); font-size: clamp(18px, 2vw, 22px); }
+
+    label{ display: block; font-weight: 600; margin: 10px 0 6px; }
+    input, select, button{ height: var(--h); font-size: var(--fs); }
+    input[type="text"], input[type="number"], input[type="search"], select{
+      width: 100%; padding: 0 12px; color: var(--text); background: color-mix(in oklab, var(--card), transparent 0%); border: 1px solid var(--border);
+      border-radius: 10px; outline: none; transition: .16s ease; box-shadow: var(--shadow-inset);
+    }
+    input::placeholder{ color: color-mix(in oklab, var(--muted), transparent 15%); }
+    input:focus, select:focus{ border-color: color-mix(in oklab, var(--primary), #000 10%); box-shadow: 0 0 0 3px color-mix(in oklab, var(--primary), transparent 80%); }
+    select{ appearance: none; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%), linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-position: calc(100% - 18px) 17px, calc(100% - 12px) 17px; background-size: 6px 6px, 6px 6px; background-repeat: no-repeat; }
+
+    button{
+      padding: 0 16px; border-radius: 10px; border: 1px solid color-mix(in oklab, var(--primary-600), #000 6%);
+      color: #0b1220; background: linear-gradient(180deg, var(--primary), var(--primary-600));
+      box-shadow: 0 6px 14px color-mix(in oklab, var(--primary), transparent 80%); cursor: pointer; transition: .16s ease; white-space: nowrap;
+    }
+    button:hover{ transform: translateY(-1px); }
+    button:active{ transform: translateY(0); filter: brightness(.98); }
+    button:disabled{ opacity: .6; cursor: not-allowed; transform: none; filter: none; }
+    .btn-ghost{ background: transparent; color: var(--text); border-color: var(--border); box-shadow: none; }
+    .btn-ghost:hover{ background: color-mix(in oklab, var(--primary-50), transparent 60%); }
+
+    .hint{ color: var(--muted); font-size: 13px; }
+    .ok{ color: var(--ok); } .err{ color: var(--err); } .warn{ color: var(--warn); }
+    .badge{ display: inline-flex; align-items: center; justify-content: center; min-width: 78px; height: 24px; padding: 0 10px; border-radius: 999px; font-size: 12px; background: color-mix(in oklab, var(--muted), transparent 85%); color: var(--text); border: 1px solid var(--border); }
+    .badge-grey{ background: color-mix(in oklab, var(--muted), transparent 0%); }
+    .badge-green{ background: color-mix(in oklab, var(--ok), transparent 0%); color: #065f46; }
+
+    .restore{ position: sticky; top: 8px; z-index: 15; display: flex; gap: 8px; align-items: center; justify-content: space-between;
+      background: color-mix(in oklab, var(--warn), var(--card) 75%); border: 1px solid color-mix(in oklab, var(--warn), var(--border) 70%); color: color-mix(in oklab, var(--warn), #000 40%);
+      padding: 10px 12px; border-radius: 10px; box-shadow: var(--shadow-sm); }
+    .restore button{ height: 36px; padding: 0 12px; font-size: 14px; }
+    .restore-actions{ display: flex; gap: 8px; }
+
+    .row{ display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; }
+    .row > *{ flex: 1 1 280px; }
+    .row.actions > *{ flex: 0 0 auto; }
+    .row.align-bottom{ align-items: flex-end; }
+    .align-end{ display:flex; align-items:flex-end; gap:8px; flex: 0 0 auto; }
+
+    .table-wrap{ margin-top: var(--space-2); border: 1px solid var(--border); border-radius: var(--radius-sm); overflow: hidden; background: var(--card); box-shadow: var(--shadow-inset); }
+    .table-scroll{ overflow-x: auto; overflow-y: hidden; -webkit-overflow-scrolling: touch; }
+    table{ width: 100%; border-collapse: separate; border-spacing: 0; min-width: 720px; background: var(--card); }
+    thead th{ position: sticky; top: 0; z-index: 1; background: color-mix(in oklab, var(--card), var(--primary-50) 12%); color: var(--text); text-align: center; font-weight: 700; border-bottom: 1px solid var(--border); padding: 10px 8px; }
+    tbody td{ text-align: center; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+    tr:hover td{ background: color-mix(in oklab, var(--primary-50), transparent 80%); }
+
+    .w-small{ width: 120px; }
+    .actions-col{ width: 72px; }
+    #perfTable td:last-child button{ white-space: nowrap; }
+
+    /* 统一三个管理页签下子页签（seg 分段控件）外观：高度贴合文字、激活块与外边框对齐 */
+      .seg{
+        display: inline-flex;
+        align-items: center;
+        gap: 0;
+        padding: 2px;                 /* 内边距留出“高亮块”与外边框之间的缓冲，避免尺寸不一致 */
+        border: 1px solid var(--border);
+        border-radius: 999px;         /* 完整胶囊外轮廓 */
+        background: color-mix(in oklab, var(--card), transparent 0%);
+        box-shadow: none;             /* 去掉内阴影以免视觉高度被放大 */
+      }
+      .seg input{ display: none; }
+      .seg label{
+        margin: 0;                    /* 去掉默认外边距，避免拉高整体行高 */
+        padding: 6px 14px;            /* 以文字为主的紧凑高度 */
+        height: auto;
+        line-height: 1.2;
+        border-radius: 999px;         /* 让激活块成为内层胶囊，尺寸与外框匹配 */
+        cursor: pointer;
+        color: var(--muted);
+        white-space: nowrap;
+        transition: background .16s ease, color .16s ease, box-shadow .16s ease;
+      }
+      .seg label:hover{
+        background: color-mix(in oklab, var(--primary-50), transparent 75%);
+        color: var(--text);
+      }
+      .seg input:checked + label{
+        background: color-mix(in oklab, var(--primary-50), transparent 0%);
+        color: var(--text);
+        box-shadow: 0 0 0 1px color-mix(in oklab, var(--primary), transparent 70%) inset; /* 激活块边线与外边框对齐感更强 */
+      }
+      .seg input:focus-visible + label{
+        outline: none;
+        box-shadow:
+          0 0 0 1px color-mix(in oklab, var(--primary), transparent 70%) inset,
+          0 0 0 3px color-mix(in oklab, var(--primary), transparent 80%);  /* 键盘可达性可见 */
+      }
+
+    /* 历史数据操作行：压缩垂直空间、与控件对齐到同一行 */
+      #existsBox .options-line{
+        display: flex;
+        flex-wrap: wrap;
+        gap: var(--space-2);
+        align-items: center;
+        margin-top: 8px;
+      }
+      #existsBox .options-line .options-label{
+        flex: 0 0 auto;
+        font-weight: 600;
+        margin: 0;
+      }
+      #existsBox .options-line .seg{
+        flex: 0 0 auto;
+      }
+      #existsBox .options-line .hint{
+        flex: 1 1 100%;
+        margin: 2px 0 0;
+      }
+      /* 避免该行内部 label 自带的上/下外边距拉高行高 */
+      #existsBox .options-line label{ margin: 0; }
+
+    .charts{
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: var(--space-3);
+        align-items: start;
+      }
+      .chart canvas{
+        width: 100%;
+        height: auto; /* 自适应容器宽度，保持比例 */
+      }
+
+    @media (max-width: 900px){ .actions-col{ width: 80px; } }
+    @media (max-width: 640px){
+      .tabs{ border-radius: 12px; }
+      .restore{ top: 6px; flex-direction: column; align-items: flex-start; gap: 10px; }
+      .restore-actions{ width: 100%; justify-content: flex-end; }
+      .charts{ grid-template-columns: 1fr; }
+      .table-wrap{ border-radius: 10px; }
+      thead th, tbody td{ padding: 10px 8px; }
+      .hint{ font-size: 12px; }
+      .panel{ padding: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="page-header">
+      <h2>数据管理</h2>
+      <div class="userbar">
+        <span>当前管理员：{{ admin_name }}</span>
+        <a class="btn-ghost small" href="/admin/logout" title="注销当前账户">注销</a>
+      </div>
+    </div>
+
+    <div class="tabs" role="tablist">
+      <div class="tab active" data-tab="upload">上传测试数据</div>
+      <div class="tab" data-tab="brand">品牌管理</div>
+      <div class="tab" data-tab="model">型号管理</div>
+      <div class="tab" data-tab="condition">工况管理</div>
+    </div>
+
+    <!-- 上传测试数据（保持不变） -->
+    <div id="panel-upload" class="panel">
+      <h3>上传测试数据</h3>
+      <div id="restoreBar" class="restore" style="display:none;">
+        <div style="color: var(--text); font-size: 14px; padding-bottom: 5px;">检测到未提交的本地草稿。</div>
+        <div class="restore-actions">
+          <button id="restoreBtn" type="button">恢复草稿</button>
+          <button id="discardBtn" type="button" class="btn-ghost">丢弃草稿</button>
+        </div>
+      </div>
+      <div class="row">
+        <div>
+          <label for="upBrandInput">品牌</label>
+          <input id="upBrandInput" type="search" placeholder="输入品牌关键字" list="upBrandOptions" autocomplete="off" />
+          <datalist id="upBrandOptions"></datalist>
+          <input type="hidden" id="upBrandId" />
+        </div>
+        <div>
+          <label for="upModelInput">型号</label>
+          <input id="upModelInput" type="search" placeholder="选择品牌后可输入型号关键字" list="upModelOptions" autocomplete="off" disabled />
+          <datalist id="upModelOptions"></datalist>
+          <input type="hidden" id="upModelId" />
+        </div>
+        <div>
+          <label for="upConditionSelect">工况（类型 - 位置）</label>
+          <select id="upConditionSelect" disabled>
+            <option value="">请选择工况</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="hint" id="uploadSelectHint" style="margin-top:8px;">请依次选择品牌、型号与工况。</div>
+
+      <div id="existsBox" class="box" style="display:none; margin-top: 12px; border: 1px dashed var(--border); border-radius: var(--radius-sm); padding: 10px;">
+        <div class="options-line">
+          <div class="options-label">检测到该型号该工况已有历史数据，请选择操作</div>
+          <div class="seg" role="group" aria-label="历史数据操作方式">
+            <input type="radio" id="optReupload" name="existOpt" value="reupload" checked />
+            <label for="optReupload">重新上传</label>
+            <input type="radio" id="optEdit" name="existOpt" value="edit" />
+            <label for="optEdit">编辑（仅补空值）</label>
+          </div>
+          <div class="hint">说明：编辑模式下已有值会锁定；新增/删除行将自动切换为“重新上传”。</div>
+        </div>
+
+        <div id="groupPicker" style="margin-top:10px; display:none;">
+          <div class="row align-bottom">
+            <div>
+              <label for="groupSelect">选择历史数据组</label>
+              <select id="groupSelect">
+                <option value="">请选择历史组</option>
+              </select>
+            </div>
+            <div class="align-end">
+              <button type="button" id="loadGroupBtn">载入该组</button>
+            </div>
+          </div>
+          <div class="hint" id="groupTips" style="margin-top:6px;"></div>
+        </div>
+      </div>
+
+      <div id="perfExistsMsg" class="err" style="margin-top:8px;"></div>
+
+      <div id="perfEditor" class="disabled" style="margin-top:16px;">
+        <div class="flex-inline">
+          <button id="addRowBtn" type="button">+ 添加一行</button>
+          <span class="hint">rpm>0 且整数；CFM>0；若填写 total/ambient 则 total≥ambient；同次提交内 rpm 不重复。</span>
+          <span id="modeBadge" class="badge badge-grey" style="margin-left:auto;">模式：新建</span>
+        </div>
+
+        <div class="table-wrap">
+          <div class="table-scroll">
+            <table id="perfTable">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>转速 (rpm) *</th>
+                  <th>风量 (airflow_cfm) *</th>
+                  <th>等效噪音 (noise_db)</th>
+                  <th>总噪音 (total_db)</th>
+                  <th>环境噪音 (ambient_db)</th>
+                  <th class="actions-col">操作</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="row align-bottom" style="margin-top:16px;">
+          <div style="flex:0 0 260px; min-width: 220px;">
+            <label for="isValidSelect">是否有效 (is_valid)</label>
+            <select id="isValidSelect">
+              <option value="0" selected>0（暂不公开）</option>
+              <option value="1">1（即刻公开）</option>
+            </select>
+          </div>
+          <div class="align-end" style="min-width: 220px;">
+            <button id="perfSubmitBtn" type="button">预览</button>
+            <span id="perfSubmitMsg" style="margin-left:12px;"></span>
+          </div>
+        </div>
+
+        <div id="previewArea" style="display:none; margin-top:16px;">
+          <h4 style="margin:0 0 8px;">预览（换算后等效噪音 noise_db，保留 1 位）</h4>
+          <div class="table-wrap">
+            <div class="table-scroll">
+              <table id="previewTable">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>rpm</th>
+                    <th>airflow_cfm</th>
+                    <th>noise_db</th>
+                  </tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="charts">
+            <div class="chart">
+              <div class="hint" style="margin: 4px 0 8px;">转速-风量 (rpm vs airflow)</div>
+              <canvas id="chartRpmAir" width="420" height="240"></canvas>
+            </div>
+            <div class="chart">
+              <div class="hint" style="margin: 4px 0 8px;">噪音-风量 (noise_db vs airflow)</div>
+              <canvas id="chartNoiseAir" width="420" height="240"></canvas>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 品牌管理 -->
+    <div id="panel-brand" class="panel" style="display:none">
+      <h3>品牌管理</h3>
+      <div class="seg" role="tablist" aria-label="品牌管理模式">
+        <input type="radio" id="bmAdd" name="brandMgmtMode" value="add" checked />
+        <label for="bmAdd">添加品牌</label>
+        <input type="radio" id="bmEdit" name="brandMgmtMode" value="edit" />
+        <label for="bmEdit">编辑品牌</label>
+      </div>
+
+      <!-- 添加品牌 -->
+      <div id="brandAddBox" style="margin-top:12px;">
+        <form id="brandForm">
+          <div class="row">
+            <div>
+              <label for="zh">中文品牌名（必填）</label>
+              <input id="zh" required />
+            </div>
+            <div>
+              <label for="en">英文品牌名（必填）</label>
+              <input id="en" required />
+            </div>
+          </div>
+          <div class="row align-bottom actions" style="margin-top:12px;">
+            <div>
+              <label for="brandIsValid">是否有效 (is_valid)</label>
+              <select id="brandIsValid">
+                <option value="0" selected>0（暂不公开）</option>
+                <option value="1">1（即刻公开）</option>
+              </select>
+            </div>
+            <button type="submit" id="brandSubmitBtn">提交</button>
+            <span id="brandMsg" class="hint"></span>
+          </div>
+        </form>
+      </div>
+
+      <!-- 编辑品牌 -->
+      <div id="brandEditBox" style="display:none; margin-top:12px;">
+        <label for="brandEditInput">选择品牌</label>
+        <input id="brandEditInput" type="search" placeholder="输入关键字或展开全部" list="brandEditOptions" autocomplete="off" />
+        <datalist id="brandEditOptions"></datalist>
+        <input type="hidden" id="brandEditId" />
+        <div class="hint" id="brandEditHint" style="margin-top:4px;">未选择品牌</div>
+
+        <form id="brandEditForm" class="disabled" style="margin-top:10px;">
+          <div class="row">
+            <div>
+              <label for="brandEditZh">中文品牌名</label>
+              <input id="brandEditZh" />
+            </div>
+            <div>
+              <label for="brandEditEn">英文品牌名</label>
+              <input id="brandEditEn" />
+            </div>
+          </div>
+          <div class="row align-bottom actions" style="margin-top:12px;">
+            <div>
+              <label for="brandEditIsValid">是否有效 (is_valid)</label>
+              <select id="brandEditIsValid">
+                <option value="0">0（未公开）</option>
+                <option value="1">1（公开）</option>
+              </select>
+            </div>
+            <button type="submit" id="brandEditSubmitBtn">提交修改</button>
+            <span id="brandEditMsg" class="hint"></span>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- 型号管理 -->
+    <div id="panel-model" class="panel" style="display:none">
+      <h3>型号管理</h3>
+
+      <div class="seg" role="tablist" aria-label="型号管理模式">
+        <input type="radio" id="mmAdd" name="modelMgmtMode" value="add" checked />
+        <label for="mmAdd">添加型号</label>
+        <input type="radio" id="mmEdit" name="modelMgmtMode" value="edit" />
+        <label for="mmEdit">编辑现有型号</label>
+      </div>
+
+      <!-- 添加型号 -->
+      <div id="modelAddBox" style="margin-top:12px;">
+        <label for="brandInput">品牌（先选择，才能填写下面内容）</label>
+        <input id="brandInput" type="search" placeholder="输入中文/英文可模糊匹配" list="brandOptions" autocomplete="off" />
+        <datalist id="brandOptions"></datalist>
+        <input type="hidden" id="brandId" />
+        <div class="hint" id="brandChosenHint" style="margin-top:4px;">未选择品牌</div>
+
+        <form id="modelForm" class="disabled" style="margin-top: 10px;">
+          <div class="row">
+            <div>
+              <label for="modelName">型号（必填）</label>
+              <input id="modelName" autocomplete="off" />
+              <span id="modelExistMsg" class="inline err"></span>
+            </div>
+            <div>
+              <label for="maxSpeed">最大转速（必填，整数）</label>
+              <input id="maxSpeed" type="number" inputmode="numeric" />
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <label for="size">尺寸(mm)（必填，整数）</label>
+              <input id="size" type="number" inputmode="numeric" />
+            </div>
+            <div>
+              <label for="thickness">厚度(mm)（必填，整数）</label>
+              <input id="thickness" type="number" inputmode="numeric" />
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <label for="rgbLight">RGB灯效（默认“无”）</label>
+              <select id="rgbLight">
+                <option value="无" selected>无</option>
+                <option value="扇叶">扇叶</option>
+                <option value="扇框">扇框</option>
+                <option value="扇叶+扇框">扇叶+扇框</option>
+              </select>
+            </div>
+            <div>
+              <label for="refPrice">参考价（选填）</label>
+              <input id="refPrice" type="text" inputmode="decimal" />
+            </div>
+          </div>
+          <label for="comment">备注（选填）</label>
+          <input id="comment" type="text" />
+          <div class="row align-bottom actions" style="margin-top:12px;">
+            <div>
+              <label for="modelIsValid">是否有效 (is_valid)</label>
+              <select id="modelIsValid">
+                <option value="0" selected>0（暂不公开）</option>
+                <option value="1">1（即刻公开）</option>
+              </select>
+            </div>
+            <button type="submit" id="modelSubmitBtn">提交</button>
+            <span id="modelMsg" class="hint"></span>
+          </div>
+        </form>
+      </div>
+
+      <!-- 编辑型号 -->
+      <div id="modelEditBox" style="display:none; margin-top:12px;">
+        <label for="editModelBrandInput">品牌（先确定品牌）</label>
+        <input id="editModelBrandInput" type="search" placeholder="输入品牌关键字或直接展开下拉" list="editModelBrandOptions" autocomplete="off" />
+        <datalist id="editModelBrandOptions"></datalist>
+        <input type="hidden" id="editModelBrandId" />
+        <div class="hint" id="editModelBrandHint" style="margin-top:4px;">未选择品牌</div>
+            
+        <label for="editModelSelect" style="margin-top:8px;">型号（选择上方品牌后下拉）</label>
+        <select id="editModelSelect" disabled>
+          <option value="">请选择型号</option>
+        </select>
+        <input type="hidden" id="editModelId" />
+        <div class="hint" id="editModelHint" style="margin-top:4px;">未选择型号</div>
+
+          <form id="modelEditForm" class="disabled" style="margin-top:10px;">
+            <div class="row">
+              <div>
+                <label for="editModelName">型号（必填）</label>
+                <input id="editModelName" autocomplete="off" />
+              </div>
+              <div>
+                <label for="editMaxSpeed">最大转速（必填，整数）</label>
+                <input id="editMaxSpeed" type="number" inputmode="numeric" />
+              </div>
+            </div>
+            <div class="row">
+              <div>
+                <label for="editSize">尺寸(mm)（必填，整数）</label>
+                <input id="editSize" type="number" inputmode="numeric" />
+              </div>
+              <div>
+                <label for="editThickness">厚度(mm)（必填，整数）</label>
+                <input id="editThickness" type="number" inputmode="numeric" />
+              </div>
+            </div>
+            <div class="row">
+              <div>
+                <label for="editRgbLight">RGB灯效（默认“无”）</label>
+                <select id="editRgbLight">
+                  <option value="无">无</option>
+                  <option value="扇叶">扇叶</option>
+                  <option value="扇框">扇框</option>
+                  <option value="扇叶+扇框">扇叶+扇框</option>
+                </select>
+              </div>
+              <div>
+                <label for="editRefPrice">参考价（选填）</label>
+                <input id="editRefPrice" type="text" inputmode="decimal" />
+              </div>
+            </div>
+            <label for="editComment">备注（选填）</label>
+            <input id="editComment" type="text" />
+            <div class="row align-bottom actions" style="margin-top:12px;">
+              <div>
+                <label for="modelEditIsValid">是否有效 (is_valid)</label>
+                <select id="modelEditIsValid">
+                  <option value="0" selected>0（暂不公开）</option>
+                  <option value="1">1（即刻公开）</option>
+                </select>
+              </div>
+              <button type="submit" id="modelEditSubmitBtn">提交修改</button>
+              <span id="modelEditMsg" class="hint"></span>
+            </div>
+          </form>
+        </div>
+    </div>
+
+    <!-- 工况管理 -->
+    <div id="panel-condition" class="panel" style="display:none">
+      <h3>工况管理</h3>
+
+      <div class="seg" role="tablist" aria-label="工况管理模式">
+        <input type="radio" id="cmAdd" name="condMgmtMode" value="add" checked />
+        <label for="cmAdd">添加工况</label>
+        <input type="radio" id="cmEdit" name="condMgmtMode" value="edit" />
+        <label for="cmEdit">编辑工况</label>
+      </div>
+
+      <!-- 添加工况 -->
+      <div id="condAddBox" style="margin-top:12px;">
+        <form id="condForm">
+          <div class="row">
+            <div>
+              <label for="rtZh">风阻类型中文（必填）</label>
+              <input id="rtZh" required />
+            </div>
+            <div>
+              <label for="rtEn">风阻类型英文（必填）</label>
+              <input id="rtEn" required />
+            </div>
+          </div>
+          <div class="row align-bottom actions" style="margin-top:12px;">
+            <div>
+              <label for="condIsValid">是否有效 (is_valid)</label>
+              <select id="condIsValid">
+                <option value="0" selected>0（暂不公开）</option>
+                <option value="1">1（即刻公开）</option>
+              </select>
+            </div>
+            <button type="submit" id="condSubmitBtn">提交</button>
+            <span id="condMsg" class="hint"></span>
+          </div>
+        </form>
+        <p class="hint">说明：提交后自动插入出风/进风两条记录。</p>
+      </div>
+
+      <!-- 编辑工况 -->
+      <div id="condEditBox" style="display:none; margin-top:12px;">
+        <label for="condEditInput">选择工况类型</label>
+        <input id="condEditInput" type="search" placeholder="输入类型关键字或展开全部" list="condEditOptions" autocomplete="off" />
+        <datalist id="condEditOptions"></datalist>
+        <input type="hidden" id="condOutId" />
+        <input type="hidden" id="condInId" />
+        <div class="hint" id="condEditHint" style="margin-top:4px;">未选择工况</div>
+
+        <form id="condEditForm" class="disabled" style="margin-top:10px;">
+          <div class="row">
+            <div>
+              <label for="rtZhEdit">风阻类型中文</label>
+              <input id="rtZhEdit" />
+            </div>
+            <div>
+              <label for="rtEnEdit">风阻类型英文</label>
+              <input id="rtEnEdit" />
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <label for="condEditIsValidOut">出风 is_valid</label>
+              <select id="condEditIsValidOut">
+                <option value="0">0（未公开）</option>
+                <option value="1">1（公开）</option>
+              </select>
+            </div>
+            <div>
+              <label for="condEditIsValidIn">进风 is_valid</label>
+              <select id="condEditIsValidIn">
+                <option value="0">0（未公开）</option>
+                <option value="1">1（公开）</option>
+              </select>
+            </div>
+          </div>
+          <div class="row align-bottom actions" style="margin-top:12px;">
+            <button type="submit" id="condEditSubmitBtn">提交修改</button>
+            <span id="condEditMsg" class="hint"></span>
+          </div>
+        </form>
+      </div>
+    </div>
+
+  <script defer src="/static/js/data_management.js?v=4"></script>
+</div>
+</body>
+</html>
