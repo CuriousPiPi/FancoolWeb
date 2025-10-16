@@ -1153,31 +1153,6 @@ function rebuildSelectedFans(fans){
   reconcileActiveColorIndices();
   syncQuickActionButtons && syncQuickActionButtons();
 }
-function rebuildRemovedFans(list){
-  removedListEl.innerHTML='';
-  if (!list || list.length===0){
-    removedListEl.innerHTML='<p class="text-gray-500 text-center py-6 empty-removed">暂无最近移除的风扇</p>';
-    requestAnimationFrame(prepareSidebarMarquee);
-    return;
-  }
-  list.forEach(item=>{
-    if (selectedKeySet.has(item.key)) return;
-    const div = document.createElement('div');
-    div.className='fan-item flex items-center justify-between p-3 border border-gray-200 rounded-md';
-    div.dataset.fanKey = item.key;
-    div.innerHTML=`
-      <div class="truncate">
-        <span class="font-medium">${escapeHtml(item.brand)} ${escapeHtml(item.model)}</span> - 
-        <span class="text-gray-600 text-sm">${formatScenario(item.res_type, item.res_loc)}</span>
-      </div>
-      <button class="fc-icon-restore text-lg js-restore-fan" data-fan-key="${item.key}" title="恢复至图表">
-        <i class="fa-solid fa-rotate-left"></i>
-      </button>`;
-    removedListEl.appendChild(div);
-  });
-  requestAnimationFrame(syncTopTabsViewportHeight);
-  requestAnimationFrame(prepareSidebarMarquee);
-}
 
 /* =========================================================
    统一状态处理
@@ -1216,7 +1191,7 @@ function processState(data, successMsg){
     rebuildSelectedFans(data.selected_fans);
   }
   if ('recently_removed_fans' in data){
-    rebuildRemovedFans(data.recently_removed_fans);
+    window.__APP.features.recentlyRemoved.rebuild(data.recently_removed_fans);
   }
   if ('share_meta' in data && data.share_meta){
     pendingShareMeta = {
@@ -1866,7 +1841,7 @@ document.addEventListener('click', async e=>{
     if (ok){
       showSuccess('已移除');
       rebuildSelectedFans(LocalState.getSelected());
-      rebuildRemovedFans(LocalState.getRecentlyRemoved());
+      window.__APP.features.recentlyRemoved.rebuild(LocalState.getRecentlyRemoved());
       syncQuickActionButtons();
       applySidebarColors();
       refreshChartFromLocal(false);
@@ -1925,7 +1900,7 @@ document.addEventListener('click', async e=>{
           ensureLikeStatusBatch(addedSummary.addedDetails.map(d => ({
             model_id: d.model_id, condition_id: d.condition_id
           })));
-          rebuildRemovedFans(LocalState.getRecentlyRemoved());
+          window.__APP.features.recentlyRemoved.rebuild(LocalState.getRecentlyRemoved());
           syncQuickActionButtons();
           applySidebarColors();
           refreshChartFromLocal(false);
@@ -1945,71 +1920,12 @@ document.addEventListener('click', async e=>{
     if (ok){
       showSuccess('已移除');
       rebuildSelectedFans(LocalState.getSelected());
-      rebuildRemovedFans(LocalState.getRecentlyRemoved());
+      window.__APP.features.recentlyRemoved.rebuild(LocalState.getRecentlyRemoved());
       syncQuickActionButtons();
       applySidebarColors();
       refreshChartFromLocal(false);
     } else {
       showInfo('条目不存在');
-    }
-    return;
-  }
-
-  const restoreBtn = safeClosest(e.target,'.js-restore-fan');
-  if (restoreBtn){
-    const fanKey = restoreBtn.dataset.fanKey;
-    if (!ensureCanAdd(1)){
-      return;
-    }
-
-     // 从最近移除列表中找出该条目的模型标识，做一次存在性预检查
-    const removedList = LocalState.getRecentlyRemoved();
-    const orig = Array.isArray(removedList) ? removedList.find(it => it && it.key === fanKey) : null;
-
-    async function removeFromRecentlyRemovedUI(){
-      try { LocalState.removeFromRecentlyRemoved(fanKey); } catch(_) {}
-      rebuildRemovedFans(LocalState.getRecentlyRemoved());
-      showInfo('该数据已不可用，已从“最近移除”列表剔除');
-    }
-
-    if (orig && Number.isInteger(orig.model_id) && Number.isInteger(orig.condition_id)) {
-      try {
-        const chk = await fetch('/api/curves', {
-          method: 'POST',
-          headers: { 'Content-Type':'application/json' },
-          body: JSON.stringify({ pairs: [{ model_id: orig.model_id, condition_id: orig.condition_id }] })
-        });
-        const j = await chk.json();
-        const n = normalizeApiResponse(j);
-        if (n.ok) {
-          const data = n.data || {};
-          const miss = Array.isArray(data.missing) ? data.missing : [];
-          const isMissing = miss.some(m => String(m.model_id) === String(orig.model_id) && String(m.condition_id) === String(orig.condition_id));
-          if (isMissing) {
-            await removeFromRecentlyRemovedUI();
-            return; // 不再执行恢复流程
-          }
-        }
-      } catch(_) {
-        // 检查失败则回落到原恢复流程
-      }
-    }
-
-    const result = LocalState.restoreKey(fanKey);
-    if (result.ok){
-      await logNewPairs([ result.item ], 'recover'); // NEW: 标记来源
-      showSuccess('已恢复');
-      rebuildSelectedFans(LocalState.getSelected());
-      ensureLikeStatusBatch([{ model_id: result.item.model_id, condition_id: result.item.condition_id }]);
-      rebuildRemovedFans(LocalState.getRecentlyRemoved());
-      syncQuickActionButtons();
-      applySidebarColors();
-      refreshChartFromLocal(false);
-    } else if (result.reason === 'already_selected'){
-      showInfo('已在图表中，已从最近移除列表剔除');
-      rebuildRemovedFans(LocalState.getRecentlyRemoved());
-    } else {
-      await removeFromRecentlyRemovedUI();
     }
     return;
   }
@@ -2040,7 +1956,7 @@ document.addEventListener('click', async e=>{
       hideLoading('op');
       showSuccess('已全部移除');
       rebuildSelectedFans(LocalState.getSelected());
-      rebuildRemovedFans(LocalState.getRecentlyRemoved());
+      window.__APP.features.recentlyRemoved.rebuild(LocalState.getRecentlyRemoved());
       syncQuickActionButtons();
       applySidebarColors();
       refreshChartFromLocal(false);
@@ -2101,7 +2017,7 @@ if (fanForm){
         ensureLikeStatusBatch(
           addedSummary.addedDetails.map(d => ({ model_id: d.model_id, condition_id: d.condition_id }))
         );
-        rebuildRemovedFans(LocalState.getRecentlyRemoved());
+        window.__APP.features.recentlyRemoved.rebuild(LocalState.getRecentlyRemoved());
         syncQuickActionButtons();
         applySidebarColors();
         refreshChartFromLocal(false);
@@ -2349,7 +2265,7 @@ function scheduleAdjust(){
 (function initLocalSelectionBoot(){
   rebuildSelectedFans(LocalState.getSelected());
   primeSelectedLikeStatus();
-  rebuildRemovedFans(LocalState.getRecentlyRemoved());
+  window.__APP.features.recentlyRemoved.rebuild(LocalState.getRecentlyRemoved());
   applySidebarColors();
   refreshChartFromLocal(false);
   syncQuickActionButtons && syncQuickActionButtons();
@@ -2588,6 +2504,8 @@ window.__APP.modules = {
     resizeChart: typeof resizeChart === 'function' ? resizeChart : function(){}
   }
 };
+
+window.__APP.features?.recentlyRemoved?.mount?.();
 
 /* 滚动条宽度测量 */
 (function setRealScrollbarWidth(){
@@ -2931,7 +2849,7 @@ async function refreshChartFromLocal(showToast=false){
       });
       if (removed.length) {
         rebuildSelectedFans(LocalState.getSelected());
-        rebuildRemovedFans(LocalState.getRecentlyRemoved());
+        window.__APP.features.recentlyRemoved.rebuild(LocalState.getRecentlyRemoved());
         syncQuickActionButtons();
         applySidebarColors();
         showInfo(`已移除 ${removed.length} 组不存在的数据`);

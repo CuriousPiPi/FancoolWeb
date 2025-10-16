@@ -228,6 +228,13 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
 [data-theme="dark"] .fc-btn--danger { background:var(--fc-color-danger)!important; }
 [data-theme="dark"] .fc-btn--danger:hover { background:var(--fc-color-danger-hover)!important; }
 
+#sidebar .like-button,
+#sidebar .fc-icon-remove,
+#sidebar .fc-icon-restore,
+#recentlyRemovedList .js-restore-fan {
+  cursor: pointer;
+}
+
 /* 4. 小型添加按钮 / 图标按钮 */
 .fc-btn-icon-add {
   background:transparent!important;
