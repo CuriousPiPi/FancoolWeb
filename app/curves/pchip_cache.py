@@ -22,8 +22,8 @@ logger = logging.getLogger("curves.pchip_cache")  # 继承上层日志配置
 #0.0：保持原始 PCHIP 段斜率
 #1.0：将段斜率压为 0（段内近似直线，但仍穿“平滑后的节点”）
 _ALPHA = {
-    "rpm": float(os.getenv("CURVE_SMOOTH_ALPHA_RPM", "0.2")),
-    "noise_db": float(os.getenv("CURVE_SMOOTH_ALPHA_NOISE", "0.5")),
+    "rpm": float(os.getenv("CURVE_SMOOTH_ALPHA_RPM", "0.6")),
+    "noise_db": float(os.getenv("CURVE_SMOOTH_ALPHA_NOISE", "0.2")),
 }
 _TAU = {
     "rpm": float(os.getenv("CURVE_TENSION_TAU_RPM", "0.0")),
