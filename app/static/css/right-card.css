@@ -1,0 +1,159 @@
+/* =========================================================
+   Right Card (右侧主容器) 专用样式
+   依赖：先加载 fancool.css，再加载本文件
+   作用域：仅限 .fc-right-card 及其子元素
+   ========================================================= */
+
+/* 1) 右侧主容器定高（可按需调整 clamp 数值） */
+.fc-right-card {
+  display: flex;
+  flex-direction: column;
+  height: clamp(480px, 62vh, 600px);
+  min-height: 0; /* 允许子元素在 flex 布局下收缩 */
+}
+
+@media (max-width:600px) {
+  .fc-right-card {
+    height: clamp(640px, 55vh, 640px);
+  }
+}
+
+/* 2) 右侧页签（近期热门 / 搜索结果 / 近期更新）排布：同一行不换行 */
+.fc-right-card > nav.fc-tabs { margin-bottom: 6px; }
+
+.fc-tabs[data-tab-group="right-panel"] {
+  flex-wrap: wrap;
+}
+.fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group {
+  display: flex;
+  flex-wrap: nowrap;     /* 组内不换行 */
+  gap: .5rem;
+  flex: 1 1 auto;        /* 占据可用宽度 */
+  min-width: 0;
+}
+.fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group .fc-tabs__item {
+  flex: 0 0 auto !important; /* 覆盖小屏下“自动50%占位” */
+}
+
+/* ===== 恢复：窄容器（rp-narrow）补充：三大页签等分一行，子页签换到下一行 ===== */
+.fc-right-card.rp-narrow > nav.fc-tabs {
+  flex-wrap: wrap;
+  row-gap: 8px;
+  column-gap: 10px;
+  align-items: flex-start;
+}
+.fc-right-card.rp-narrow > nav.fc-tabs .flex-1 { display: none; }
+.fc-right-card.rp-narrow > nav.fc-tabs .fc-tabs__item {
+  flex: 1 1 calc(50% - 10px);
+  text-align: center;
+  padding: .55rem .8rem;
+}
+.fc-right-card.rp-narrow .fc-tabs__subseg {
+  order:3;
+  flex:1 1 100%;
+  width:100%;
+  display:flex;
+  justify-content:center;
+  margin-top:2px;
+}
+.fc-right-card.rp-narrow .fc-rank-box { padding-top:0; }
+
+.fc-right-card.rp-narrow > nav.fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group {
+  flex: 1 1 100%;
+  width: 100%;
+  justify-content: space-between;
+}
+.fc-right-card.rp-narrow > nav.fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group .fc-tabs__item {
+  flex: 1 1 0 !important;
+  text-align: center;
+}
+
+
+/* 3) 内容区 Flex 链：把高度从容器传导到滚动层 */
+.fc-right-card .fc-tab-container {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.fc-right-card .fc-tab-wrapper,
+.fc-right-card .fc-tab-pane {
+  height: 100%;
+}
+.fc-right-card .fc-tab-pane {
+  display: flex;
+  flex-direction: column;
+}
+.fc-right-card .fc-rank-box {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding-top: 0;
+  display: flex;
+  flex-direction: column;
+}
+.fc-right-card .fc-rank-panel.active {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* 4) 滚动层：只在这一层产生滚动，强制取消任何 max-height 限制 */
+.fc-right-card .fc-rank-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  max-height: none !important;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable both-edges;
+}
+
+/* 右侧卡片内滚动条样式 */
+.fc-right-card .fc-rank-scroll::-webkit-scrollbar { width: 8px; }
+.fc-right-card .fc-rank-scroll::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 4px;
+}
+.fc-right-card .fc-rank-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+/* 5) 表头/操作列与遮罩：仅作用于右侧卡片的表格 */
+.fc-right-card .fc-rank-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  background: var(--bg-secondary);
+  box-shadow: 0 2px 3px -1px rgba(0,0,0,.08);
+  backdrop-filter:saturate(120%) blur(8px);
+}
+[data-theme="dark"] .fc-right-card .fc-rank-table thead th {
+  box-shadow: 0 2px 3px -1px rgba(0,0,0,.45);
+}
+
+.fc-right-card .fc-rank-table thead th:last-child {
+  top: 0;
+  z-index: 11;
+  box-shadow: 0 2px 3px -1px rgba(0,0,0,.45);
+}
+.fc-right-card .fc-rank-table th:last-child,
+.fc-right-card .fc-rank-table td:last-child {
+  text-align: center;
+  width: 60px;
+  position: sticky;
+  right: 0;
+  background: var(--bg-secondary);
+}
+.fc-right-card .fc-rank-table td:last-child {
+  padding: 8px;
+  background: linear-gradient(to left, transparent 30px, rgba(0,0,0,0) 50px);
+}
+
+.fc-right-card .fc-rank-box { position: relative; }
+.fc-right-card .fc-rank-box::after {
+  content: "";
+  position: absolute;
+  top: 0; right: -2px; bottom: 0;
+  width: calc(var(--sbw) + 3px);
+  background: transparent;
+  pointer-events: none;
+  z-index: 20;
+}

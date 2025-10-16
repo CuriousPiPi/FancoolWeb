@@ -26,9 +26,9 @@ app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 app.secret_key = os.getenv('APP_SECRET', 'replace-me-in-prod')
 app.config['SESSION_COOKIE_SECURE'] = os.getenv('SESSION_COOKIE_SECURE', '0') == '1'
 
-app.config['TEMPLATES_AUTO_RELOAD'] = True      #生产环境注释这行
-app.jinja_env.auto_reload = True                #生产环境注释这行
-app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0     #生产环境注释这行
+#app.config['TEMPLATES_AUTO_RELOAD'] = True      #生产环境注释这行
+#app.jinja_env.auto_reload = True                #生产环境注释这行
+#app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0     #生产环境注释这行
 
 
 
@@ -1249,7 +1249,8 @@ def index():
     top_queries = get_top_queries(limit=TOP_QUERIES_LIMIT)
     top_ratings = get_top_ratings(limit=TOP_QUERIES_LIMIT)
 
-    return render_template(
+    # 1. 先生成 HTML 内容（和原来的 render_template 逻辑一致）
+    html_content = render_template(
         'fancoolindex.html',
         brands=brands,
         all_res_types=[r['resistance_type_zh'] for r in res_types_rows],
@@ -1259,6 +1260,18 @@ def index():
         size_options=SIZE_OPTIONS,
         current_year=datetime.now().year
     )
+
+    # 2. 用 make_response 包装成响应对象
+    response = make_response(html_content)
+
+    # 3. 新增：添加防缓存响应头（核心修改）
+    # 告诉浏览器：不缓存此 HTML，每次都请求最新版本
+    response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, proxy-revalidate'
+    response.headers['Expires'] = '0'  # 立即过期，不缓存
+    response.headers['Pragma'] = 'no-cache'  # 兼容旧浏览器（可选，增加可靠性）
+
+    # 4. 返回响应对象（代替原来直接返回 html_content）
+    return response
 
 # 3) 新增：近期更新 API（懒加载页签调用）
 @app.route('/api/recent_updates', methods=['GET'])
@@ -1276,4 +1289,4 @@ def api_recent_updates():
 # =========================================
 if __name__ == '__main__':
     app.logger.setLevel(logging.INFO)
-    app.run(host='0.0.0.0', port=5001, debug=True, use_reloader=False)
+    app.run(host='0.0.0.0', port=5001, debug=False, use_reloader=False)

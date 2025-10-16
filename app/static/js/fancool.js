@@ -2226,7 +2226,7 @@ document.addEventListener('click',(e)=>{
   if (!('ResizeObserver' in window)) return;
   const container = document.getElementById('main-panels');
   if (!container) return;
-  const THRESHOLD = 800;
+  const THRESHOLD = 860;
   function apply(width){
     if (width < THRESHOLD) {
       container.classList.add('fc-force-col');
