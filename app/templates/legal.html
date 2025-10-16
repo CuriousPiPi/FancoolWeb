@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
   <title>版权及免责声明 - 风扇库</title>
   <link rel="icon" type="image/png" href="/static/logo.png">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/tailwind.css') }}">
   <script>
     (function () {
       const savedTheme = localStorage.getItem('theme');
@@ -13,7 +14,6 @@
       document.documentElement.setAttribute('data-theme', theme);
     })();
   </script>
-  <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/fancool.css') }}">
   <style>
     .legal-container h1 { font-size:1.9rem; font-weight:700; margin-bottom:1.2rem; }

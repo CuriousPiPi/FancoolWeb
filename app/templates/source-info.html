@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
   <title>数据来源与说明 - 风扇库</title>
   <link rel="icon" type="image/png" href="/static/logo.png">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/tailwind.css') }}">
   <!-- 主题同步（与主页 / legal.html 一致） -->
   <script>
     (function () {
@@ -14,7 +15,6 @@
       document.documentElement.setAttribute('data-theme', theme);
     })();
   </script>
-  <script src="https://cdn.tailwindcss.com"></script>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/fancool.css') }}">
   <style>
     /* 比 legal.html 更宽一些 */
