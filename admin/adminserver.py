@@ -16,8 +16,8 @@ app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_for=1)
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 app.secret_key = os.getenv('APP_SECRET', 'replace-me-in-prod')  # 与前台保持一致的 secret
-app.config['TEMPLATES_AUTO_RELOAD'] = True
-app.jinja_env.auto_reload = True
+#app.config['TEMPLATES_AUTO_RELOAD'] = True
+#app.jinja_env.auto_reload = True
 app.register_blueprint(data_mgmt_bp)
 
 # 将后台会话与前台隔离（独立 Cookie 名称与 Path）
@@ -461,4 +461,4 @@ def api_health():
 if __name__ == '__main__':
     # 仅用于开发调试；生产请用 gunicorn + Nginx，并将 ADMIN_SESSION_COOKIE_* 设置为安全值
     port = int(os.getenv('ADMIN_PORT', '6001'))
-    app.run(host='0.0.0.0', port=port, debug=True, use_reloader=False)
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
