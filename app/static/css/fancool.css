@@ -83,7 +83,7 @@ html, body { height:100%; overflow-x:hidden; }
   --tooltip-bg:#ffffff;
   --tooltip-text:#1f2937;
   --tooltip-border:rgba(0,0,0,.18);
-  --tooltip-shadow:0 8px 24px rgba(0,0,0,0.18);
+  --tooltip-shadow:0 8px 24px rgba(0,0,0,.18);
 }
 
 [data-theme="dark"] {
@@ -106,7 +106,9 @@ html, body { height:100%; overflow-x:hidden; }
 
 /* ===== 修改：拆分背景，允许注入渐变 ===== */
 body {
+  /* 基础底色：亮色使用 --bg-primary；暗色时 JS 会把 --dark-rand-base 改成深色并保留在 background-color */
   background-color:var(--bg-primary)!important;
+  /* 渐变层：默认 none，暗色模式 JS 写入 --dark-rand-gradient */
   background-image:var(--dark-rand-gradient)!important;
   background-attachment:fixed;
   background-size:cover;
@@ -115,6 +117,7 @@ body {
   color:var(--text-primary);
   font-family:system-ui,-apple-system,"Segoe UI","Helvetica Neue","Microsoft YaHei",Arial,sans-serif;
   transition:background-color .5s, color .3s;
+  /* 给渐变出现一个轻微淡入体验 */
   animation:fc-bg-fade-in .6s ease;
 }
 
@@ -292,9 +295,7 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
 .fc-tabs[data-tab-group="left-panel"] { gap:0!important; }
 .fc-tabs[data-tab-group="sidebar-top"] .fc-tabs__item,
 .fc-tabs[data-tab-group="left-panel"] .fc-tabs__item {
-  flex:1 1 0;
-  text-align:center;
-  white-space: nowrap; /* 禁止换行 */
+  flex:1 1 0; text-align:center;
 }
 
 .fc-seg {
@@ -345,7 +346,7 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
   text-align:center;
 }
 
-/* 6. 排行 / 表格（通用，保留） */
+/* 6. 排行 / 表格 */
 .fc-rank-panel { display:none; animation:fadePanel .25s ease; }
 .fc-rank-panel.active { display:block; }
 @keyframes fadePanel { from { opacity:0; transform:translateY(8px);} to {opacity:1; transform:translateY(0);} }
@@ -553,7 +554,7 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
   cursor:ew-resize;
   z-index:70;
   pointer-events:auto;
-  touch-action:none; /* 修正：确保JS完全控制拖动 */
+  touch-action:none;
 }
 #sidebar-resizer:hover { background:rgba(0,0,0,.08); }
 
@@ -863,6 +864,7 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
   z-index:350;
   touch-action:none;
   cursor:ew-resize;
+  background:linear-gradient(to left, rgba(80,80,80,0.4), rgba(80,80,80,0));
 }
 
 /* 顶部 Tab 补丁 */
@@ -902,7 +904,58 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
   scroll-snap-stop:always;
 }
 
-/* ===== 恢复：强制竖排 (自适应) ===== */
+#query-count-display {
+  position:absolute;
+  top:0; right:0;
+  z-index:10;
+  font-size:12px;
+  color:#666;
+  background:rgba(255,255,255,0);
+  padding:2px 8px;
+}
+
+/* 搜索建议 */
+#searchSuggestions {
+  font-size:14px;
+  line-height:1.4;
+  background:var(--bg-secondary);
+  color:var(--text-primary);
+  border:1px solid var(--border-color);
+  border-radius:8px;
+  overflow:hidden;
+  z-index:100;
+}
+#searchSuggestions > div { padding:8px 12px; cursor:pointer; }
+#searchSuggestions > div:hover { background:rgba(59,130,246,.08); }
+[data-theme="dark"] #searchSuggestions > div:hover { background:#2a3545; }
+
+/* 图表容器 */
+.fc-chart-container {
+  position:relative!important;
+  min-height:0!important;
+  height:clamp(480px,62vh,720px)!important;
+  background:var(--bg-secondary)!important;
+}
+#chartRoot, #chartFrame { height:100%!important; }
+#chartFrame { display:block; }
+
+/* Info 按钮 */
+.fc-info-btn {
+  width:24px; height:24px;
+  opacity:.55;
+  transition:opacity .25s ease, transform .25s ease;
+}
+.fc-info-btn:hover,
+.fc-info-btn:focus {
+  opacity:1;
+  transform:translateY(-2px);
+}
+.fc-info-btn:focus {
+  outline:none;
+  box-shadow:0 0 0 2px rgba(0,0,0,.12);
+}
+
+/* 强制竖排 (自适应) */
 .fc-force-col { flex-direction:column!important; }
 .fc-force-col > * {
   width:100%!important;
@@ -912,6 +965,64 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
 @media (min-width:1024px){
   .fc-force-col > * { width:100%!important; }
 }
+
+/* 最近点赞标题遮罩 */
+#recentLikesList .fc-group-header {
+  position:relative;
+  display:flex;
+  align-items:center;
+  gap:8px;
+}
+#recentLikesList .fc-group-header .fc-title-wrap {
+  position:relative;
+  flex:1 1 auto;
+  min-width:0;
+}
+#recentLikesList .fc-group-header .fc-title-wrap .truncate {
+  position:relative;
+  z-index:3;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+#recentLikesList .fc-group-header .fc-title-wrap::before {
+  content:"";
+  position:absolute;
+  top:0; bottom:0; left:0;
+  width:var(--title-w, 0px);
+  background:var(--bg-secondary);
+  z-index:1;
+}
+#recentLikesList .fc-group-header .fc-title-wrap::after {
+  content:"";
+  position:absolute;
+  top:0; bottom:0;
+  left:var(--title-w, 0px);
+  width:var(--fade-w, 28px);
+  background:linear-gradient(to right, var(--bg-secondary) 0%, rgba(0,0,0,0) 100%);
+  z-index:2;
+}
+#recentLikesList .fc-group-header .fc-meta-right {
+  position:absolute;
+  right:0; top:0; bottom:0;
+  display:flex;
+  align-items:center;
+  white-space:nowrap;
+  text-align:right;
+  pointer-events:none;
+  overflow:hidden;
+  text-overflow:clip;
+  z-index:0;
+}
+#recentLikesList .scenario-row .scenario-text {
+  min-width:0;
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+
+/* 拖拽垂直分隔时关闭动画 */
+body.is-vert-dragging #bottom-panel { transition:none!important; }
 
 /* 13. 工具色类 */
 .fc-bg-primary { background:var(--fc-color-primary)!important; color:#fff!important; }
@@ -964,49 +1075,14 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
     transition: background .25s, box-shadow .25s, transform .2s;
   }
 
-  #recentLikesList .recent-like-group .actions .fc-btn-icon-add {
+    #recentLikesList .recent-like-group .actions .fc-btn-icon-add {
     background:transparent !important;
     box-shadow:none !important;
     border:none !important;
+
   }
 }
 
-/* ===== 恢复：响应式布局 ===== */
-@media (max-width:600px) {
-  .fc-tabs {
-    flex-wrap:wrap;
-    row-gap:8px;
-    column-gap:10px;
-    align-items:flex-start;
-  }
-  .fc-tabs .flex-1 { display:none; }
-  .fc-tabs .fc-tabs__item {
-    flex:1 1 calc(50% - 10px);
-    text-align:center;
-    padding:.55rem .8rem;
-  }
-  .fc-tabs__subseg {
-    order:3;
-    flex:1 1 100%;
-    width:100%;
-    display:flex;
-    justify-content:center;
-    margin-top:2px;
-  }
-  .fc-right-card > nav.fc-tabs { margin-bottom:4px; }
-
-  .fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group {
-    flex: 1 1 100%;
-    width: 100%;
-    justify-content: space-between;
-  }
-  .fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group .fc-tabs__item {
-    flex: 1 1 0 !important;
-    text-align: center;
-  }
-}
-
-/* Toast 毛玻璃效果 */
 :root {
   --toast-glass-bg: rgba(255,255,255,0.70);
   --toast-glass-border: rgba(255,255,255,0.55);
@@ -1018,6 +1094,8 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
   --toast-glass-shadow: 0 4px 22px -4px rgba(0,0,0,0.65), 0 0 0 1px rgba(255,255,255,0.06);
 }
 
+
+/*Toast 毛玻璃效果*/
 .fc-toast {
   background: var(--toast-glass-bg) !important;
   backdrop-filter: blur(8px) saturate(120%);
@@ -1079,21 +1157,4 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
 }
 @keyframes toast-out {
   to { opacity:0; transform:translateY(-6px) scale(.96); }
-}
-
-/* 图表容器高度 */
-.fc-chart-container {
-  position: relative;
-  min-height: 0;
-  height: clamp(480px, 62vh, 720px);
-  background: var(--bg-secondary);
-}
-#chartRoot,
-#chartFrame {
-  height: 100%;
-}
-#chartFrame {
-  display: block;
-  width: 100%;
-  border: 0;
 }

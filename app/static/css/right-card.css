@@ -4,21 +4,19 @@
    作用域：仅限 .fc-right-card 及其子元素
    ========================================================= */
 
-/* 1) 右侧主容器定高（可按需调整 clamp 数值） */
+/* 1) 右侧主容器定高 */
 .fc-right-card {
   display: flex;
   flex-direction: column;
   height: clamp(480px, 62vh, 600px);
-  min-height: 0; /* 允许子元素在 flex 布局下收缩 */
+  min-height: 0;
 }
 
-@media (max-width:600px) {
-  .fc-right-card {
-    height: clamp(640px, 55vh, 640px);
-  }
+@media (max-width: 600px) {
+  .fc-right-card {height: clamp(500px, 80vh, 650px);}
 }
 
-/* 2) 右侧页签（近期热门 / 搜索结果 / 近期更新）排布：同一行不换行 */
+/* 2) 右侧页签排布 */
 .fc-right-card > nav.fc-tabs { margin-bottom: 6px; }
 
 .fc-tabs[data-tab-group="right-panel"] {
@@ -26,16 +24,16 @@
 }
 .fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group {
   display: flex;
-  flex-wrap: nowrap;     /* 组内不换行 */
+  flex-wrap: nowrap;
   gap: .5rem;
-  flex: 1 1 auto;        /* 占据可用宽度 */
+  flex: 1 1 auto;
   min-width: 0;
 }
 .fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group .fc-tabs__item {
-  flex: 0 0 auto !important; /* 覆盖小屏下“自动50%占位” */
+  flex: 0 0 auto !important;
 }
 
-/* ===== 恢复：窄容器（rp-narrow）补充：三大页签等分一行，子页签换到下一行 ===== */
+/* 窄容器（rp-narrow）布局 */
 .fc-right-card.rp-narrow > nav.fc-tabs {
   flex-wrap: wrap;
   row-gap: 8px;
@@ -57,7 +55,6 @@
   margin-top:2px;
 }
 .fc-right-card.rp-narrow .fc-rank-box { padding-top:0; }
-
 .fc-right-card.rp-narrow > nav.fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group {
   flex: 1 1 100%;
   width: 100%;
@@ -68,8 +65,21 @@
   text-align: center;
 }
 
+/* 屏幕宽度 ≤600px 时的布局 */
+@media (max-width: 600px) {
+  .fc-right-card > nav.fc-tabs { margin-bottom: 4px; }
+  .fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group {
+    flex: 1 1 100%;
+    width: 100%;
+    justify-content: space-between;
+  }
+  .fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group .fc-tabs__item {
+    flex: 1 1 0 !important;
+    text-align: center;
+  }
+}
 
-/* 3) 内容区 Flex 链：把高度从容器传导到滚动层 */
+/* 3) 内容区 Flex 高度链 */
 .fc-right-card .fc-tab-container {
   flex: 1 1 auto;
   min-height: 0;
@@ -96,7 +106,7 @@
   min-height: 0;
 }
 
-/* 4) 滚动层：只在这一层产生滚动，强制取消任何 max-height 限制 */
+/* 4) 滚动层 */
 .fc-right-card .fc-rank-scroll {
   flex: 1 1 auto;
   min-height: 0;
@@ -106,7 +116,6 @@
   scrollbar-gutter: stable both-edges;
 }
 
-/* 右侧卡片内滚动条样式 */
 .fc-right-card .fc-rank-scroll::-webkit-scrollbar { width: 8px; }
 .fc-right-card .fc-rank-scroll::-webkit-scrollbar-thumb {
   background: var(--border-color);
@@ -116,17 +125,17 @@
   background: var(--text-secondary);
 }
 
-/* 5) 表头/操作列与遮罩：仅作用于右侧卡片的表格 */
+/* 5) 表头/操作列与遮罩 */
 .fc-right-card .fc-rank-table thead th {
   position: sticky;
   top: 0;
   z-index: 8;
   background: var(--bg-secondary);
   box-shadow: 0 2px 3px -1px rgba(0,0,0,.08);
-  backdrop-filter:saturate(120%) blur(8px);
 }
 [data-theme="dark"] .fc-right-card .fc-rank-table thead th {
   box-shadow: 0 2px 3px -1px rgba(0,0,0,.45);
+  backdrop-filter:saturate(120%) blur(8px);
 }
 
 .fc-right-card .fc-rank-table thead th:last-child {
@@ -156,4 +165,41 @@
   background: transparent;
   pointer-events: none;
   z-index: 20;
+}
+
+/* 响应式 ≤600px */
+@media (max-width:600px) {
+  .fc-tabs {
+    flex-wrap:wrap;
+    row-gap:8px;
+    column-gap:10px;
+    align-items:flex-start;
+  }
+  .fc-tabs .flex-1 { display:none; }
+  .fc-tabs .fc-tabs__item {
+    flex:1 1 calc(50% - 10px);
+    text-align:center;
+    padding:.55rem .8rem;
+  }
+  .fc-tabs__subseg {
+    order:3;
+    flex:1 1 100%;
+    width:100%;
+    display:flex;
+    justify-content:center;
+    margin-top:2px;
+  }
+  .fc-right-card > nav.fc-tabs { margin-bottom:4px; }
+  .fc-right-card .fc-rank-box { padding-top:0; }
+
+  /* ≤600px 时，继续确保三大页签不被拆到两行（仅对 right-panel 生效） */
+  .fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group {
+    flex: 1 1 100%;
+    width: 100%;
+    justify-content: space-between;
+  }
+  .fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group .fc-tabs__item {
+    flex: 1 1 0 !important;   /* 三项等分一行 */
+    text-align: center;
+  }
 }
