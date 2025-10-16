@@ -561,6 +561,7 @@ def api_visit_start():
         dpr = float(data.get('device_pixel_ratio') or 0) or None
         language = (data.get('language') or '').strip() or None
         is_touch = 1 if data.get('is_touch') else 0
+        ui_theme = (data.get('theme') or '').strip() or None   # NEW: 加载时主题
 
         ua_raw = request.headers.get('User-Agent', '') or None
         dev = _parse_device_basic(ua_raw or '')
@@ -569,11 +570,13 @@ def api_visit_start():
         INSERT INTO visit_logs
         (user_identifier, uid_source, visit_index, is_new_user,
          user_agent_raw, os_name, device_type,
-         screen_w, screen_h, device_pixel_ratio, language, is_touch)
+         screen_w, screen_h, device_pixel_ratio, language, is_touch,
+         ui_theme)  -- NEW
         VALUES
         (:uid, :usrc, :vidx, :isnew,
          :ua, :osn, :dtype,
-         :sw, :sh, :dpr, :lang, :touch)
+         :sw, :sh, :dpr, :lang, :touch,
+         :theme)  -- NEW
         """
         exec_write(sql, {
             'uid': uid,
@@ -587,13 +590,69 @@ def api_visit_start():
             'sh': screen_h,
             'dpr': dpr,
             'lang': language,
-            'touch': is_touch
+            'touch': is_touch,
+            'theme': ui_theme     # NEW
         })
         return resp_ok({'visit_index': visit_index, 'is_new_user': is_new_user})
     except Exception as e:
         app.logger.exception(e)
         return resp_err('INTERNAL_ERROR', str(e), 500)
 
+# =========================================
+# Helpers for events (NEW)
+# =========================================
+def _get_latest_visit_id_for_user(uid: str) -> int | None:
+    try:
+        rows = fetch_all("SELECT id FROM visit_logs WHERE user_identifier=:u ORDER BY id DESC LIMIT 1", {'u': uid})
+        if rows:
+            return int(rows[0]['id'])
+    except Exception:
+        pass
+    return None
+
+# =========================================
+# Event Logging API (NEW)
+# =========================================
+@app.post('/api/log_event')
+def api_log_event():
+    try:
+        user_id = get_or_create_user_identifier()
+        data = request.get_json(force=True, silent=True) or {}
+
+        event_type_code = (data.get('event_type_code') or '').strip()
+        if not event_type_code:
+            return resp_err('INVALID_EVENT', '缺少 event_type_code')
+
+        # 轻度清洗与长度保护
+        if len(event_type_code) > 64:
+            event_type_code = event_type_code[:64]
+        page_key = (data.get('page_key') or 'home').strip() or 'home'
+        if len(page_key) > 64:
+            page_key = page_key[:64]
+        target_url = (data.get('target_url') or '').strip() or None
+        if target_url and len(target_url) > 512:
+            target_url = target_url[:512]
+
+        visit_id = _get_latest_visit_id_for_user(user_id)
+
+        sql = """
+        INSERT INTO event_logs
+          (user_identifier, visit_id, event_type_code, occurred_at, page_key, target_url)
+        VALUES
+          (:u, :vid, :type, NOW(), :page_key, :target_url)
+        """
+        exec_write(sql, {
+            'u': user_id,
+            'vid': visit_id,
+            'type': event_type_code,
+            'page_key': page_key,
+            'target_url': target_url
+        })
+        return resp_ok({'logged': 1})
+    except Exception as e:
+        app.logger.exception(e)
+        return resp_err('INTERNAL_ERROR', str(e), 500)
+    
 # =========================================
 # Like APIs
 # =========================================

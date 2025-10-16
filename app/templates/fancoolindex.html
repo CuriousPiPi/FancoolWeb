@@ -109,7 +109,9 @@
       </header>
 
       <div style="position: fixed; top: 20px; right: 100px; z-index: 1000;">
-        <a href="/source-info" class="fc-info-btn bg-white text-gray-700 hover:text-blue-600 p-2 rounded-full shadow-md border border-gray-200 flex items-center justify-center" title="数据来源与说明">
+        <a href="/source-info" data-track-id="link_source_info"
+           class="fc-info-btn bg-white text-gray-700 hover:text-blue-600 p-2 rounded-full shadow-md border border-gray-200 flex items-center justify-center"
+           title="数据来源与说明">
           <i class="fa-solid fa-circle-info text-lg"></i>
         </a>
       </div>
@@ -474,7 +476,7 @@
         <span>© {{ current_year or 2025 }} 风扇库</span>
         <span class="opacity-70">沪ICP备2025145529号-1</span>
         <span>交流及反馈QQ群：1070155380</span>
-        <a href="https://github.com/CuriousPiPi/FancoolWeb.git" class="underline hover:text-blue-600">GitHub代码开源</a>
+        <a href="https://github.com/CuriousPiPi/FancoolWeb.git" data-track-id="link_github_open_source" class="underline hover:text-blue-600">GitHub代码开源</a>
       </div>
       <div class="flex flex-col md:flex-row md:items-center gap-2 md:gap-4">
         <a href="/legal" class="underline hover:text-blue-600">版权及免责声明</a>
@@ -487,6 +489,8 @@
   <script src="{{ url_for('static', filename='js/sidebar.js') }}"></script>
   <script src="{{ url_for('static', filename='js/features/recently-removed.js') }}"></script>
   <script src="{{ url_for('static', filename='js/fancool.js') }}"></script>
+  
+  <script src="{{ url_for('static', filename='js/analytics.js') }}"></script>
   
 </body>
 </html>

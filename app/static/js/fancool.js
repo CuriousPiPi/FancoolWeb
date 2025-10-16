@@ -2610,26 +2610,6 @@ window.addEventListener('message', (e) => {
   }
 });
 
-/* visit_start */
-(function initVisitStartMinimal(){
-  try { if (sessionStorage.getItem('visit_started') === '1') return; } catch(_) {}
-  const payload = {
-    screen_w: (screen && screen.width) || null,
-    screen_h: (screen && screen.height) || null,
-    device_pixel_ratio: window.devicePixelRatio || null,
-    language: (navigator.languages && navigator.languages[0]) || navigator.language || null,
-    is_touch: ('ontouchstart' in window) || (navigator.maxTouchPoints > 0)
-  };
-  fetch('/api/visit_start', {
-    method: 'POST',
-    headers: { 'Content-Type':'application/json' },
-    body: JSON.stringify(payload),
-    keepalive: true
-  }).catch(()=>{}).finally(()=>{
-    try { sessionStorage.setItem('visit_started','1'); } catch(_){}
-  });
-})();
-
 /* 搜索工况位置联动（按负载筛选） */
 (function initScenarioCascading(){
   const form = document.getElementById('searchForm');
@@ -2867,20 +2847,16 @@ async function refreshChartFromLocal(showToast=false){
   }
 }
 
-async function logNewPairs(addedDetails, source='unknown'){
+async function logNewPairs(addedDetails, source = 'unknown') {
   if (!addedDetails || !addedDetails.length) return;
-  try{
-    await fetch('/api/log_query', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
-        source,
-        pairs: addedDetails.map(d=>({ model_id:d.model_id, condition_id:d.condition_id }))
-      })
-    });
-  }catch(e){
-    // 静默失败即可
+  const pairs = addedDetails.map(d => ({ model_id: d.model_id, condition_id: d.condition_id }));
+
+  if (!window.Analytics || typeof window.Analytics.logQueryPairs !== 'function') {
+    // Fail fast：显式暴露缺陷，便于定位问题
+    throw new Error('Analytics module not loaded: window.Analytics.logQueryPairs is unavailable');
   }
+
+  await window.Analytics.logQueryPairs(source, pairs);
 }
 
 function generateDarkGradient() {
