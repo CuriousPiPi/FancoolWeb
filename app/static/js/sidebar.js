@@ -600,18 +600,24 @@
       const titleMB = title ? px(getComputedStyle(title).marginBottom):0;
       const contentPT = content ? px(getComputedStyle(content).paddingTop):0;
       const footerH = !isHidden(footer)? hRect(footer):0;
-      let rows=0,rowH=56,gapY=0,listPT=0,listPB=0;
+      let rows = 0, rowH = 56, gapY = 0, listPT = 0, listPB = 0;
       if (list){
         const items = list.querySelectorAll('.fan-item');
         rows = items.length;
-        if (rows>0){
+        if (rows > 0){
           rowH = hRect(items[0]);
-          if (rows>1) gapY = px(getComputedStyle(items[1]).marginTop);
+          let mt = 0;
+          const s1 = getComputedStyle(items[0]);
+          mt = px(s1.marginBottom);
+          gapY = mt;
         }
         const ls = getComputedStyle(list);
-        listPT = px(ls.paddingTop); listPB = px(ls.paddingBottom);
+        listPT = px(ls.paddingTop);
+        listPB = px(ls.paddingBottom);
       }
-      const listContentH = rows>0 ? rows*rowH + Math.max(0,rows-1)*gapY + listPT + listPB : 0;
+      const listContentH = rows > 0
+        ? rows * rowH + Math.max(0, rows - 1) * gapY + listPT + listPB
+        : 0;
       const chromeH = contentPT + titleH + titleMB + footerH;
       const maxBottomByRatio = winH * CFG.MAX_RATIO;
       const maxBottomByTopReserve = winH - CFG.MIN_TOP_SPACE_PX;
