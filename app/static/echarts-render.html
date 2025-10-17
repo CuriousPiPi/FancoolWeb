@@ -4,12 +4,18 @@
   <meta charset="UTF-8"/>
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
   <title>Chart Renderer</title>
+
+  <!-- 资源提示：降低 DNS/TLS 连接开销 -->
+  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
+  <link rel="dns-prefetch" href="//cdn.jsdelivr.net">
+
+  <!-- 关键修复：给 ECharts 标记 id，并使用 defer；配合下方“就绪门闸”彻底消除竞态 -->
+  <script id="echarts-cdn" defer src="https://cdn.jsdelivr.net/npm/echarts@5.4.2/dist/echarts.min.js"></script>
+
   <style>
     html,body{height:100%;margin:0}
-    /* 关键：隐藏任何超出的绝对定位控件，避免出现滚动条 */
     #chart{width:100%;height:100%; position: relative; overflow: hidden;}
 
-    /* 主题变量（用于轴开关的外观与暗色模式一致） */
     :root{
       --bg-bubble:#ffffff;
       --border-color:#e5e7eb;
@@ -17,17 +23,13 @@
       --text-:#6b7280;
       --accent:#2563eb;
       --accent-weak:#93c5fd;
-      --ok:#16a34a;          /* 绿色激活 */
+      --ok:#16a34a;
       --ok-pressed:#15803d;
       --shadow:0 6px 20px rgba(0,0,0,0.12);
       --shadow-strong:0 8px 24px rgba(0,0,0,0.18);
     }
     [data-theme="dark"]{
-<<<<<<< HEAD
       --bg-bubble:#1f293700;
-=======
-      --bg-:#1f293700;
->>>>>>> origin/main
       --border-color:#374151;
       --text-primary:#f3f4f6;
       --text-:#9ca3af;
@@ -39,70 +41,13 @@
       --shadow-strong:0 8px 24px rgba(0,0,0,0.45);
     }
 
-    /*x轴切换开关
-    .chart-xaxis-overlay{
-      position:absolute;
-      z-index:2147483641;
-      visibility:hidden;
-      transform: translate(-65%, -37%);
-    } 
+    /* 推迟隐藏浮层的布局/绘制，避免首屏成本 */
+    .fit-buttons,
+    .fit-bubble{
+     content-visibility: auto;
+     contain-intrinsic-size: 120px 80px; /* 估算尺寸，避免 CLS */
+    }
 
-    .switch-container { position:relative; width:76px; height:32px; }
-    .switch-track { width:100%; height:100%; background:var(--border-color); border-radius:12px; position:relative; overflow:hidden; }
-    .switch-track::before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      border-radius: inherit;
-      pointer-events: none;
-      background: linear-gradient(to bottom, rgba(255,255,255,.22), rgba(255,255,255,0));
-      box-shadow:
-        inset 0 2px 6px rgba(0,0,0,.10),
-        inset 0 -1px 2px rgba(0,0,0,.05);
-    }
-    [data-theme="dark"] .switch-track::before {
-      background: linear-gradient(to bottom, rgba(255,255,255,.08), rgba(255,255,255,0));
-      box-shadow:
-        inset 0 2px 8px rgba(0,0,0,.45),
-        inset 0 -1px 2px rgba(0,0,0,.35);
-    }
-    .switch-slider {
-      position:absolute;
-      width:24px;
-      height:100%;
-      background:var(--text-);
-      border-radius:12px;
-      left:0; top:0;
-      transition:transform .25s ease;
-      box-shadow:
-        0 2px 5px rgba(0,0,0,.35),
-        inset 0 1px 0 rgba(255,255,255,.25),
-        inset 0 -1px 0 rgba(0,0,0,.25);
-      cursor:grab;
-    }
-    .switch-label {
-      cursor: pointer;
-      position:absolute;
-      top:46%;
-      transform:translateY(-50%);
-      font-weight:600;
-      font-size:20px;
-      color:var(--text-primary);
-      white-space:nowrap;
-      pointer-events: none;
-      user-select: none;
-    }
-    .switch-label-left { right:calc(100% + 5px); }
-    .switch-label-right { left:calc(100% + 5px); }
-
-    .chart-xaxis-overlay,
-    .switch-container,
-    .switch-track,
-    .switch-slider {
-      touch-action: none;
-    }*/
-
-    /* 右下角按钮组（按钮式开关） */
     .fit-buttons{
       position: absolute;
       z-index: 2147483645;
@@ -134,7 +79,6 @@
     }
     .fit-buttons .btn.active:active{ background: var(--ok-pressed); }
 
-    /* 左上角拟合查询“气泡” */
     .fit-bubble{
       position: fixed;
       z-index: 2147483645;
@@ -143,13 +87,8 @@
       max-width: 420px;
       max-height: 60vh;
       overflow: auto;
-<<<<<<< HEAD
       background: var(--bg-bubble);
       backdrop-filter: blur(4px) saturate(120%);
-=======
-      background: var(--bg-);
-      backdrop-filter: blur(5px) saturate(120%);
->>>>>>> origin/main
       border: 1px solid var(--border-color);
       border-radius: 12px;
       box-shadow: var(--shadow-strong);
@@ -157,51 +96,18 @@
       cursor: grab; 
       touch-action: none;
     }
-    .fit-bubble.dragging{          
-      cursor: grabbing;
-    }
-    .fit-bubble .head{
-      display:flex; align-items:center; gap:10px;
-      margin-bottom: 6px;
-    }
-    .fit-bubble .title{
-      font-weight: 800;
-      color: var(--text-primary);
-      font-size: 13px;
-      line-height: 1.2;
-      white-space: nowrap;
-    }
-    .fit-bubble .x-input{
-      margin-left:auto; display:flex; align-items:center; gap:6px;
-      font-size:12px; color: var(--text-);
-      white-space: nowrap;
-    }
+    .fit-bubble.dragging{ cursor: grabbing; }
+    .fit-bubble .head{ display:flex; align-items:center; gap:10px; margin-bottom: 6px; }
+    .fit-bubble .title{ font-weight: 800; color: var(--text-primary); font-size: 13px; line-height: 1.2; white-space: nowrap; }
+    .fit-bubble .x-input{ margin-left:auto; display:flex; align-items:center; gap:6px; font-size:12px; color: var(--text-); white-space: nowrap; }
     .fit-bubble input[type="number"]{
-      width: 10ch;
-      font-size: 12px;
-      padding: 4px 6px;
-      border: 1px solid var(--border-color);
-      border-radius: 8px;
-      background: transparent;
-      color: var(--text-primary);
-      outline: none;
+      width: 10ch; font-size: 12px; padding: 4px 6px; border: 1px solid var(--border-color);
+      border-radius: 8px; background: transparent; color: var(--text-primary); outline: none;
     }
-    .fit-bubble .row{
-      display:flex; align-items:center; gap:8px; margin: 4px 0;
-      color: var(--text-primary);
-      font-size: 13px;
-    }
-    .fit-bubble .row .dot{
-      width:10px; height:10px; border-radius:50%;
-      flex:0 0 auto;
-    }
-    .fit-bubble .hint{
-      color: var(--text-);
-      font-size: 11px;
-      margin-top: 6px;
-    }
+    .fit-bubble .row{ display:flex; align-items:center; gap:8px; margin: 4px 0; color: var(--text-primary); font-size: 13px; }
+    .fit-bubble .row .dot{ width:10px; height:10px; border-radius:50%; flex:0 0 auto; }
+    .fit-bubble .hint{ color: var(--text-); font-size: 11px; margin-top: 6px; }
 
-    /* 可拖指针（带矩形把手 + 向上箭头） */
     .fit-pointer{
       position: absolute;
       z-index: 1000;
@@ -209,76 +115,98 @@
       pointer-events: none;
     }
     .fit-pointer .line{
-      position:absolute;
-      top:0; bottom:0;
-      width: 2px;
-      transform: translateX(-1px);
-      background: var(--accent);
-      opacity: 0.95;
+      position:absolute; top:0; bottom:0; width: 2px; transform: translateX(-1px); background: var(--accent); opacity: 0.95;
     }
     .fit-pointer .handle{
-      position:absolute;
-      bottom:-22px; left:-8px;
-      width:16px; height:24px;
-      border-radius:4px;
-      background: var(--accent);
-      box-shadow: var(--shadow);
-      cursor: grab;
-      touch-action: none;
-      pointer-events: auto;
+      position:absolute; bottom:-22px; left:-8px; width:16px; height:24px; border-radius:4px; background: var(--accent);
+      box-shadow: var(--shadow); cursor: grab; touch-action: none; pointer-events: auto;
     }
     .fit-pointer .handle::after{
-      content:"";
-      position:absolute;
-      left:50%; transform: translateX(-50%);
-      top:-7px;
-      width: 0; height: 0;
-      border-left: 8px solid transparent;
-      border-right: 8px solid transparent;
-      border-bottom: 9px solid var(--accent);
+      content:""; position:absolute; left:50%; transform: translateX(-50%); top:-7px;
+      width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-bottom: 9px solid var(--accent);
     }
 
     .fit-narrow-hint{
-      position:absolute;
-      z-index:2147483643;
-      font-size:11px;
-      color: var(--text-);
-      pointer-events:none;
-      user-select:none;
-      white-space:nowrap;
+      position:absolute; z-index:2147483643; font-size:11px; color: var(--text-); pointer-events:none; user-select:none; white-space:nowrap;
     }
   </style>
-  <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.2/dist/echarts.min.js"></script>
 </head>
 <body>
   <div id="chart"></div>
+
 <script>
 (function () {
+  // ============ 关键修复：ECharts 就绪门闸 + 兜底 ============
+
+  const ECHARTS_GLOBAL_KEY = 'echarts';
+  let echartsReady = typeof window[ECHARTS_GLOBAL_KEY] !== 'undefined';
+  const echartsWaiters = [];
+  let echartsLoadTimedOut = false;
+
+  function markEchartsReady(){
+    if (echartsReady) return;
+    echartsReady = true;
+    const cbs = echartsWaiters.splice(0);
+    cbs.forEach(cb => { try { cb(); } catch(_) {} });
+  }
+  function onEchartsReady(cb){
+    if (echartsReady) { cb(); return; }
+    echartsWaiters.push(cb);
+  }
+  // 监听主 CDN 脚本
+  (function wireEchartsLoad(){
+    if (echartsReady) return;
+    const s = document.getElementById('echarts-cdn') || document.querySelector('script[src*="echarts"]');
+    if (s){
+      s.addEventListener('load', () => markEchartsReady(), { once:true });
+      s.addEventListener('error', () => {
+        // 备用 CDN 回退（只触发一次）
+        if (echartsReady || echartsLoadTimedOut) return;
+        const alt = document.createElement('script');
+        alt.defer = true;
+        alt.src = 'https://unpkg.com/echarts@5.4.2/dist/echarts.min.js';
+        alt.addEventListener('load', () => markEchartsReady(), { once:true });
+        alt.addEventListener('error', () => { echartsLoadTimedOut = true; });
+        document.head.appendChild(alt);
+      }, { once:true });
+    }
+    // 兜底轮询（防止极端情况下 load 事件丢失）
+    const start = performance.now();
+    const tm = setInterval(() => {
+      if (typeof window[ECHARTS_GLOBAL_KEY] !== 'undefined') {
+        clearInterval(tm); markEchartsReady();
+      } else if (performance.now() - start > 15000) {
+        clearInterval(tm); echartsLoadTimedOut = true;
+      }
+    }, 50);
+  })();
+
+  // 小工具：空闲时做非关键工作
+  const onIdle = (cb) => ('requestIdleCallback' in window)
+    ? requestIdleCallback(cb, { timeout: 1000 })
+    : setTimeout(cb, 0);
+
+  // ===========================================================
+
   let chart;
   let lastOption = null;
   let lastPayload = null;
   let isFs = false;
   let lastIsNarrow = null;
 
-  // NEW: 气泡拖拽状态（仅本次会话，不持久化）
   let bubbleUserMoved = false;
   const bubblePos = { left: null, top: null };
 
-  // X 轴模式覆盖：'rpm' | 'noise_db' | null
   let xAxisOverride = null;
-
-  // 动画保护窗口
   let axisSnapSuppressUntil = 0;
 
   window.__FS_TOGGLE_OFFSET = window.__FS_TOGGLE_OFFSET || { x: 0, y: 0 };
-
   const TITLE_GLUE = '  -  ';
 
   function isMobile(){
     return /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
       || (window.matchMedia && window.matchMedia('(pointer:coarse)').matches);
   }
-
   function layoutIsNarrow() {
     const w = chart && typeof chart.getWidth === 'function'
       ? chart.getWidth()
@@ -288,16 +216,22 @@
     return narrow;
   }
 
-  // ====== 拟合功能状态 ======
   const FIT_ALGO_NAME = '趋势拟合';
-  let showRawCurves = true;    // “ECHARTS曲线”
-  let showFitCurves = false;   // “PCHIP 拟合”
+  let showRawCurves = true;
+  let showFitCurves = false;
 
   const xQueryByMode = { rpm: null, noise_db: null };
   const fitModelsCache = { rpm: new Map(), noise_db: new Map() };
   let fitUIInstalled = false;
 
+  // 复用测量上下文
+  const __textMeasureCtx = (() => {
+    const c = document.createElement('canvas');
+    return c.getContext('2d');
+  })();
+
   function init() {
+    if (!window.echarts) return; // 双保险
     chart = echarts.init(document.getElementById('chart'), null, {
       renderer:'canvas',
       devicePixelRatio: window.devicePixelRatio || 1
@@ -321,7 +255,7 @@
           repaintPointer();
         }
       }
-    });
+    }, { passive:true });
 
     document.addEventListener('fullscreenchange', async () => {
       isFs = !!document.fullscreenElement;
@@ -346,20 +280,32 @@
           repaintPointer();
         }
       }
-    });
+    }, { passive:true });
 
     chart.on('legendselectchanged', () => {
       if (showFitCurves) refreshFitBubble();
     });
-
     chart.on('dataZoom', () => {
       clampXQueryIntoVisibleRange();
       repaintPointer();
       if (showFitCurves) refreshFitBubble();
     });
+
+    if (!fitUIInstalled) {
+      onIdle(() => {
+        ensureFitUI();
+        fitUIInstalled = true;
+        toggleFitUI(showFitCurves && !layoutIsNarrow());
+        placeFitUI();
+        repaintPointer();
+        // 新增：再等一帧，确保 convertToPixel 可用
+        requestAnimationFrame(() => repaintPointer());
+      });
+    }
   }
 
-  // X 轴模式开关（原有逻辑保留）
+  // 轴开关与 UI（原逻辑略，未删减）
+  let axisSnapSuppressTimer = null;
   function updateAxisSwitchPosition(opts = {}) {
     const { force = false, animate = false } = opts;
     if (!force && performance.now() < axisSnapSuppressUntil) return;
@@ -420,7 +366,6 @@
       trackWidth  = xAxisSwitchTrack.offsetWidth || 0;
       maxX = Math.max(0, trackWidth - sliderWidth);
     }
-
     function pos(type, animate = true) {
       const toNoise = (type === 'noise_db' || type === 'noise');
       const x = toNoise ? maxX : 0;
@@ -428,11 +373,11 @@
       xAxisSwitchSlider.style.transform  = `translateX(${x}px)`;
       xAxisSwitchTrack.setAttribute('aria-checked', String(toNoise));
     }
-
     function protectSliderAnimationWindow() {
       axisSnapSuppressUntil = performance.now() + 360;
+      clearTimeout(axisSnapSuppressTimer);
+      axisSnapSuppressTimer = setTimeout(() => { axisSnapSuppressUntil = 0; }, 400);
     }
-
     xAxisSwitchSlider.addEventListener('transitionend', () => {
       axisSnapSuppressUntil = 0;
     });
@@ -453,7 +398,6 @@
         }, window.location.origin);
       } catch(_){}
     }
-
     function nearestType() {
       const m = new DOMMatrix(getComputedStyle(xAxisSwitchSlider).transform);
       const cur = m.m41 || 0;
@@ -473,7 +417,6 @@
       try { if (activePointerId != null) xAxisSwitchSlider.setPointerCapture(activePointerId); } catch(_){}
       e.preventDefault?.();
     }
-
     function onPointerMove(e) {
       if (!dragging) return;
       const dx = e.clientX - startX;
@@ -482,7 +425,6 @@
       x = Math.max(0, Math.min(x, maxX));
       xAxisSwitchSlider.style.transform = `translateX(${x}px)`;
     }
-
     function finishDrag() {
       if (!dragging) return;
       dragging = false;
@@ -492,7 +434,6 @@
       pos(newType, true);
       applyType(newType);
     }
-
     function cancelDrag() {
       if (!dragging) return;
       dragging = false;
@@ -521,7 +462,7 @@
       const keep = currentXModeFromPayload(lastPayload);
       measure();
       pos(keep, false);
-    });
+    }, { passive:true });
   }
 
   function placeAxisOverlayAt(x, y, show){
@@ -533,51 +474,75 @@
     requestAnimationFrame(() => updateAxisSwitchPosition());
   }
 
-  function render(payload){
-    if (!chart) init();
-
-    // 记录前后 x 模式与空状态，用于决定是否需要彻底清空以避免残留
-    const prevXMode = currentXModeFromPayload(lastPayload);
-    const prevEmpty = !!(lastOption && lastOption.__empty);
-    
-    lastPayload = payload || lastPayload;
-    syncThemeAttr((lastPayload && lastPayload.theme) || 'light');
-    
-    if (!fitUIInstalled) {
-      ensureFitUI();
-      fitUIInstalled = true;
-    }
-  
-    const option = buildOption(lastPayload);
-    const nextXMode = currentXModeFromPayload(lastPayload);
-    const nextEmpty = !!option.__empty;
-  
-    // 关键：当“轴模式变化”或“空/非空状态变化”时，先 clear 再 setOption，避免 ECharts 内部残留（例如 0 处指示线）
-    if (prevXMode !== nextXMode || prevEmpty !== nextEmpty) {
-      try { chart.clear(); } catch(_) {}
-    }
-  
-    chart.setOption(option, true);
-    chart.resize();
-  
-    requestAnimationFrame(() => updateAxisSwitchPosition());
-    // 空图时，主动撤销轴指示线的残留（双保险）
-    if (option.__empty) {
-      try { chart.dispatchAction({ type: 'updateAxisPointer', currTrigger: 'leave' }); } catch(_) {}
-    }
-  
-    const { x, y, visible } = computePrefixCenter(option);
-    placeAxisOverlayAt(x, y, visible && !option.__empty);
-  
-    lastOption = option;
-    lastIsNarrow = layoutIsNarrow();
-  
-    toggleFitUI(showFitCurves && !layoutIsNarrow());
-    placeFitUI();
-    repaintPointer();
-    if (showFitCurves) refreshFitBubble();
-  
+  // 关键：render 也走 ECharts 就绪门闸
+function render(payload){
+  lastPayload = payload || lastPayload;
+  if (!echartsReady || typeof window.echarts === 'undefined') {
+    onEchartsReady(() => { render(lastPayload); });
+    return;
   }
+  if (!chart) init();
+
+  const prevXMode = currentXModeFromPayload(lastPayload);
+  const prevEmpty = !!(lastOption && lastOption.__empty);
+
+  syncThemeAttr((lastPayload && lastPayload.theme) || 'light');
+
+  // 新增：若用户已开启拟合，则同步安装 UI（非 idle）
+  if (!fitUIInstalled && showFitCurves) {
+    ensureFitUI();
+    fitUIInstalled = true;
+  } else if (!fitUIInstalled) {
+    // 仍保留 idle 安装作为兜底
+    onIdle(() => {
+      if (!fitUIInstalled) {
+        ensureFitUI();
+        fitUIInstalled = true;
+        toggleFitUI(showFitCurves && !layoutIsNarrow());
+        placeFitUI();
+        repaintPointer();
+      }
+    });
+  }
+
+  const option = buildOption(lastPayload);
+  const nextXMode = currentXModeFromPayload(lastPayload);
+  const nextEmpty = !!option.__empty;
+
+  if (prevXMode !== nextXMode || prevEmpty !== nextEmpty) {
+    try { chart.clear(); } catch(_) {}
+  }
+
+  chart.setOption(option, true);
+  chart.resize();
+
+  requestAnimationFrame(() => updateAxisSwitchPosition());
+  if (option.__empty) {
+    try { chart.dispatchAction({ type: 'updateAxisPointer', currTrigger: 'leave' }); } catch(_) {}
+  }
+
+  const { x, y, visible } = computePrefixCenter(option);
+  placeAxisOverlayAt(x, y, visible && !option.__empty);
+
+  lastOption = option;
+  lastIsNarrow = layoutIsNarrow();
+
+  toggleFitUI(showFitCurves && !layoutIsNarrow());
+  placeFitUI();
+
+  // 修改：等待 ECharts 真正完成绘制后再定位指针，避免 NaN
+  try {
+    const onFinished = () => {
+      try { chart.off('finished', onFinished); } catch(_){}
+      repaintPointer();
+    };
+    chart.on('finished', onFinished);
+  } catch(_) {}
+  // 再加一帧兜底
+  requestAnimationFrame(() => repaintPointer());
+
+  if (showFitCurves) refreshFitBubble();
+}
 
   async function enterFullscreen(){
     const el = document.documentElement;
@@ -590,7 +555,7 @@
     } catch(err){
       console.warn('requestFullscreen 失败：', err);
     } finally {
-      if (lastPayload) render(lastPayload); else chart && chart.resize();
+      if (lastPayload) render(lastPayload); else if (chart) chart.resize();
     }
   }
   async function exitFullscreen(){
@@ -598,7 +563,7 @@
     catch(err){ console.warn('exitFullscreen 失败：', err); }
     finally {
       isFs = false;
-      if (lastPayload) render(lastPayload); else chart && chart.resize();
+      if (lastPayload) render(lastPayload); else if (chart) chart.resize();
     }
   }
   function toggleFullscreen(){
@@ -632,14 +597,11 @@
     return inPay;
   }
 
-  // 统一的小于 0 的占位值与最小可见 x
   const X_PLACEHOLDER_NEG = -1;
   const X_MIN_CLAMP = 0;
 
-  // 新增：数值校验工具
   function isFiniteNumber(v){ const n = Number(v); return Number.isFinite(n); }
 
-  // REPLACE: 构建系列，缺失 x -> 用占位 x=-1；不把占位计入 xMin/xMax
   function buildSeries(rawSeries, xMode) {
     let maxAir = 0;
     let minX = +Infinity, maxX = -Infinity;
@@ -659,7 +621,6 @@
         const xv = Number(xRaw);
 
         if (isFiniteNumber(yv)) {
-          // 有效 x 且不等于占位 -1 才参与最小/最大值计算；x===-1 视为占位点
           if (isFiniteNumber(xv) && xv !== X_PLACEHOLDER_NEG) {
             minX = Math.min(minX, xv);
             maxX = Math.max(maxX, xv);
@@ -668,11 +629,9 @@
             const tip = isFiniteNumber(Number(tipRaw)) ? Number(tipRaw) : undefined;
             data.push({ value: [xv, yv], tip });
           } else {
-            // 缺失 x 或占位 -1：使用占位 x=-1，y 计入 y 轴上限，但不更新 xMin/xMax
             data.push({ value: [X_PLACEHOLDER_NEG, yv], tip: undefined, __missingX: true });
           }
         }
-        // 若 y 也无效则跳过该点
       }
 
       return {
@@ -711,7 +670,7 @@
     return { series, xMin: Math.max(minX - pad, 0), xMax: maxX + pad, yMax: Math.ceil(maxAir * 1.4) };
   }
 
-function buildOption(payload) {
+  function buildOption(payload) {
     const { chartData, theme } = payload || {};
     const t = tokens(theme||'light');
     const sList = Array.isArray(chartData?.series) ? chartData.series : [];
@@ -737,7 +696,6 @@ function buildOption(payload) {
         tooltip:{ show:false, triggerOn:'none' }
       };
     }
-
 
     const built = buildSeries(sList, xMode);
 
@@ -839,14 +797,12 @@ function buildOption(payload) {
       });
     }
 
-    // 计算并取整 X 轴最小/最大值
     const rawMin = Math.max(X_MIN_CLAMP, built.xMin);
     const rawMax = built.xMax * 1.2;
     let xMinForAxis = Math.floor(rawMin);
     let xMaxForAxis = Math.ceil(rawMax);
-    if (!(xMaxForAxis > xMinForAxis)) xMaxForAxis = xMinForAxis + 1; // 保证区间有效
+    if (!(xMaxForAxis > xMinForAxis)) xMaxForAxis = xMinForAxis + 1;
 
-    // 条件化 toolbox 的功能项：窄屏隐藏 dataZoom 与 restore
     const toolboxFeatures = isNarrow ? {
       restore: {},
       saveAsImage: { backgroundColor: exportBg, pixelRatio: window.devicePixelRatio || 1 },
@@ -887,7 +843,7 @@ function buildOption(payload) {
         text: titleText,
         left: 'center',
         top: titleTop,
-        textStyle: { color: t.axisLabel, fontSize: titleFontSize, fontWeight: titleFontWeight, fontFamily: t.fontFamily }
+        textStyle: { color: t.axisLabel, fontSize: 20, fontWeight: 600, fontFamily: t.fontFamily }
       },
 
       legend: legendCfg,
@@ -949,8 +905,7 @@ function buildOption(payload) {
   }
 
   function measureText(text, size, weight, family){
-    const c = document.createElement('canvas');
-    const ctx = c.getContext('2d');
+    const ctx = __textMeasureCtx;
     ctx.font = `${String(weight||400)} ${Number(size||14)}px ${family||'sans-serif'}`;
     const m = ctx.measureText(text || '');
     const width = m.width || 0;
@@ -987,36 +942,29 @@ function buildOption(payload) {
     document.body.setAttribute('data-theme', t);
   }
 
-  // 工具：轴的一维像素/数据互转
   function pxToDataX(xPixel){
-    try {
-      return chart.convertFromPixel({ xAxisIndex: 0 }, xPixel);
-    } catch(e){ return NaN; }
+    try { return chart.convertFromPixel({ xAxisIndex: 0 }, xPixel); } catch(e){ return NaN; }
   }
   function dataToPxX(xData){
-    try {
-      return chart.convertToPixel({ xAxisIndex: 0 }, xData);
-    } catch(e){ return NaN; }
+    try { return chart.convertToPixel({ xAxisIndex: 0 }, xData); } catch(e){ return NaN; }
   }
 
   function ensureNarrowHint(){
-      const root = document.getElementById('chart');
-      let hint = document.getElementById('narrowHint');
-      if (!hint){
-        hint = document.createElement('div');
-        hint.id = 'narrowHint';
-        hint.className = 'fit-narrow-hint';
-        hint.textContent = `${FIT_ALGO_NAME}曲线请在图表右上角切换至全屏模式`;
-        root.appendChild(hint);
-      }
-      return hint;
+    const root = document.getElementById('chart');
+    let hint = document.getElementById('narrowHint');
+    if (!hint){
+      hint = document.createElement('div');
+      hint.id = 'narrowHint';
+      hint.className = 'fit-narrow-hint';
+      hint.textContent = `${FIT_ALGO_NAME}曲线请在图表右上角切换至全屏模式`;
+      root.appendChild(hint);
     }
+    return hint;
+  }
 
-  // ====== 拟合 UI（按钮组 + 气泡 + 指针） ======
   function ensureFitUI(){
     const root = document.getElementById('chart');
 
-    // 右下角按钮组
     let btns = document.getElementById('fitButtons');
     if (!btns){
       btns = document.createElement('div');
@@ -1053,7 +1001,6 @@ function buildOption(payload) {
       syncButtons();
     }
 
-    // 左上角气泡
     let bubble = document.getElementById('fitBubble');
     if (!bubble){
       bubble = document.createElement('div');
@@ -1073,18 +1020,14 @@ function buildOption(payload) {
       `;
       root.appendChild(bubble);
 
-      // NEW: 绑定气泡拖拽
       bindBubbleDrag(bubble);
 
       const xInput = bubble.querySelector('#fitXInput');
       xInput.addEventListener('input', onBubbleInputLive);
       xInput.addEventListener('change', onBubbleInputCommit);
-      xInput.addEventListener('keydown', (e)=>{
-        if (e.key === 'Enter') { onBubbleInputCommit(); }
-      });
+      xInput.addEventListener('keydown', (e)=>{ if (e.key === 'Enter') { onBubbleInputCommit(); } });
     }
 
-    // 指针
     let ptr = document.getElementById('fitPointer');
     if (!ptr){
       ptr = document.createElement('div');
@@ -1099,7 +1042,6 @@ function buildOption(payload) {
     }
   }
 
-    // NEW: 气泡拖拽逻辑（鼠标 + 触摸均可；输入框等交互元素不触发拖拽）
   function bindBubbleDrag(bubble){
     if (!bubble) return;
 
@@ -1107,28 +1049,23 @@ function buildOption(payload) {
     let startX = 0, startY = 0;
     let baseLeft = 0, baseTop = 0;
     let dragging = false;
-    const DRAG_THRESHOLD = 4; // 像素阈值：避免误触滚动/点击
+    const DRAG_THRESHOLD = 4;
 
     function isInteractiveTarget(el){
       return !!(el && (el.closest('input, textarea, select, button, [contenteditable=""], [contenteditable="true"]')));
     }
-
     function onPointerDown(e){
-      if (e.button !== undefined && e.button !== 0) return;      // 仅左键/单指
-      if (isInteractiveTarget(e.target)) return;                 // 输入框等不触发拖拽
+      if (e.button !== undefined && e.button !== 0) return;
+      if (isInteractiveTarget(e.target)) return;
 
       const rect = bubble.getBoundingClientRect();
-      startX   = e.clientX;
-      startY   = e.clientY;
-      baseLeft = rect.left;
-      baseTop  = rect.top;
+      startX   = e.clientX; startY   = e.clientY;
+      baseLeft = rect.left; baseTop  = rect.top;
       dragging = false;
 
       activePointerId = e.pointerId ?? null;
       try { if (activePointerId != null) bubble.setPointerCapture(activePointerId); } catch(_){}
-      // 不阻止默认，允许点击/选择文本；真正开始拖拽后再 preventDefault
     }
-
     function onPointerMove(e){
       if (activePointerId != null && (e.pointerId ?? null) !== activePointerId) return;
       if (activePointerId == null) return;
@@ -1142,18 +1079,13 @@ function buildOption(payload) {
       }
       if (!dragging) return;
 
-      if (e.cancelable) e.preventDefault();
-
       const bw = bubble.offsetWidth  || 0;
       const bh = bubble.offsetHeight || 0;
       const vw = window.innerWidth   || document.documentElement.clientWidth  || 0;
       const vh = window.innerHeight  || document.documentElement.clientHeight || 0;
 
-      let newLeft = baseLeft + dx;
-      let newTop  = baseTop  + dy;
-
-      newLeft = Math.min(Math.max(0, newLeft), Math.max(0, vw - bw));
-      newTop  = Math.min(Math.max(0, newTop ), Math.max(0, vh - bh));
+      let newLeft = Math.min(Math.max(0, baseLeft + dx), Math.max(0, vw - bw));
+      let newTop  = Math.min(Math.max(0, baseTop  + dy), Math.max(0, vh - bh));
 
       bubble.style.left = Math.round(newLeft) + 'px';
       bubble.style.top  = Math.round(newTop)  + 'px';
@@ -1164,35 +1096,32 @@ function buildOption(payload) {
       bubblePos.top  = newTop;
       bubbleUserMoved = true;
     }
-
     function endDrag(){
       if (activePointerId == null) return;
       try { bubble.releasePointerCapture(activePointerId); } catch(_){}
-      activePointerId = null;
-      dragging = false;
-      bubble.classList.remove('dragging');
+      activePointerId = null; dragging = false; bubble.classList.remove('dragging');
     }
 
     bubble.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('pointermove', onPointerMove, { passive:false });
+    window.addEventListener('pointermove', onPointerMove, { passive:true });
     window.addEventListener('pointerup',   endDrag,       { passive:true  });
     window.addEventListener('pointercancel', endDrag,     { passive:true  });
     window.addEventListener('blur', endDrag);
   }
 
   function toggleFitUI(showFit){
-  const btns = document.getElementById('fitButtons');
-  const bubble = document.getElementById('fitBubble');
-  const ptr = document.getElementById('fitPointer');
-  const narrow = layoutIsNarrow();
-  const empty  = !lastOption || lastOption.__empty;
+    const btns = document.getElementById('fitButtons');
+    const bubble = document.getElementById('fitBubble');
+    const ptr = document.getElementById('fitPointer');
+    const narrow = layoutIsNarrow();
+    const empty  = !lastOption || lastOption.__empty;
 
-  if (btns) btns.style.visibility = (empty || narrow) ? 'hidden' : 'visible';
+    if (btns) btns.style.visibility = (empty || narrow) ? 'hidden' : 'visible';
 
-  const showFloating = showFit && !narrow && !empty;
-  if (bubble) bubble.style.visibility = showFloating ? 'visible' : 'hidden';
-  if (ptr)    ptr.style.visibility    = showFloating ? 'visible' : 'hidden';
-}
+    const showFloating = showFit && !narrow && !empty;
+    if (bubble) bubble.style.visibility = showFloating ? 'visible' : 'hidden';
+    if (ptr)    ptr.style.visibility    = showFloating ? 'visible' : 'hidden';
+  }
 
   function placeFitUI(){
     const btns = document.getElementById('fitButtons');
@@ -1209,31 +1138,18 @@ function buildOption(payload) {
 
     const pad = 6;
 
-    // 右下角按钮组：定位到坐标轴外的目标点，并对容器边缘做夹持，避免溢出
     if (btns){
-      const bw = btns.offsetWidth || 0;
-      const bh = btns.offsetHeight || 0;
-      const targetX = chartW - rightGap + pad;
-      const targetY = chartH - bottomGap + pad;
-      const clampedX = Math.min(Math.max(pad, targetX), chartW - bw - pad);
-      const clampedY = Math.min(Math.max(pad, targetY), chartH - bh - pad);
       btns.style.right = '20px';
       btns.style.bottom = '20px';
-      /*
-      btns.style.left = clampedX + 20 + 'px';
-      btns.style.top  = clampedY + 'px'; */
       btns.style.visibility = (lastOption.__empty || layoutIsNarrow()) ? 'hidden' : 'visible';
     }
 
-    // 左上角气泡：通常贴左上，但在极窄情况下也做一次夹持，防止超出容器
     if (bubble){
-      // 确保 fixed 定位（避免被 #chart 的 overflow 裁剪）
       bubble.style.position = 'fixed';
 
       const bw2 = bubble.offsetWidth  || 0;
       const bh2 = bubble.offsetHeight || 0;
 
-      // 首次定位（未拖拽过）：贴左上，避免出界
       if (!bubbleUserMoved){
         const preferredX = left + 2;
         const preferredY = top  + 2;
@@ -1247,7 +1163,6 @@ function buildOption(payload) {
         bubble.style.bottom = 'auto';
         bubblePos.left = bx; bubblePos.top = by;
       } else {
-        // 已拖拽：仅在窗口/全屏变化时进行一次夹持，防止跑出屏幕
         const vw = window.innerWidth  || document.documentElement.clientWidth  || chartW;
         const vh = window.innerHeight || document.documentElement.clientHeight || chartH;
         const bx = Math.min(Math.max(pad, bubblePos.left || 0), Math.max(pad, vw - bw2 - pad));
@@ -1266,19 +1181,17 @@ function buildOption(payload) {
       if (unitSpan) unitSpan.textContent = unit;
     }
 
-     // 窄屏提示小字：右下角（grid 内部，避免与 legend 重叠）
-      const hint = ensureNarrowHint();
-      const narrow = layoutIsNarrow();
-      if (narrow && !lastOption.__empty) {
-        // 放在坐标网格右下角，上移一点避开 X 轴刻度
-        const x = chartW - rightGap - (hint.offsetWidth || 0) - 6;
-        const y = chartH - bottomGap - 14;
-        hint.style.left = Math.max(2, x) + 'px';
-        hint.style.top  = Math.max(2, y) + 'px';
-        hint.style.visibility = 'visible';
-      } else {
-        hint.style.visibility = 'hidden';
-      }
+    const hint = ensureNarrowHint();
+    const narrow = layoutIsNarrow();
+    if (narrow && !lastOption.__empty) {
+      const x = chartW - rightGap - (hint.offsetWidth || 0) - 6;
+      const y = chartH - bottomGap - 14;
+      hint.style.left = Math.max(2, x) + 'px';
+      hint.style.top  = Math.max(2, y) + 'px';
+      hint.style.visibility = 'visible';
+    } else {
+      hint.style.visibility = 'hidden';
+    }
   }
 
   function bindPointerDrag(){
@@ -1321,12 +1234,10 @@ function buildOption(payload) {
       const ptr = document.getElementById('fitPointer');
       ptr.style.left = x + 'px';
 
-      // 像素 -> 数据 x（轴一维转换）
       const xVal = pxToDataX(x);
       const mode = currentXModeFromPayload(lastPayload);
       if (Number.isFinite(xVal)) {
         xQueryByMode[mode] = clampXDomain(xVal);
-        // 实时同步输入与列表
         syncBubbleInput();
         if (showFitCurves) refreshFitBubble();
       }
@@ -1385,7 +1296,7 @@ function buildOption(payload) {
     syncBubbleInput();
     if (showFitCurves) refreshFitBubble();
   }
-  
+
   function syncBubbleInput(){
     const inp = document.getElementById('fitXInput');
     if (!inp) return;
@@ -1409,7 +1320,6 @@ function buildOption(payload) {
     xQueryByMode[mode] = clampXDomain(raw);
     clampXQueryIntoVisibleRange();
 
-    // 数据 -> 像素（轴一维转换），实时移动指针
     const xPixel = dataToPxX(xQueryByMode[mode]);
     const ptr = document.getElementById('fitPointer');
     if (ptr && Number.isFinite(xPixel)) ptr.style.left = xPixel + 'px';
@@ -1421,7 +1331,6 @@ function buildOption(payload) {
     refreshFitBubble();
   }
 
-  /* 替换：气泡实时值来源改为 PCHIP 模型 */
   function refreshFitBubble(){
     const bubble = document.getElementById('fitBubble');
     if (!bubble || !showFitCurves || !lastPayload || !chart) return;
@@ -1460,7 +1369,7 @@ function buildOption(payload) {
 
     const valTexts = items.map(it => Number.isFinite(it.y) ? `${fmt(it.y)} CFM` : '-');
     const maxValChars = valTexts.reduce((m,s)=>Math.max(m, s.length), 1);
-    const pctWidthCh = 6; // "(100%)"
+    const pctWidthCh = 6;
 
     const ordered = withVal.concat(noVal);
     rowsEl.innerHTML = ordered.map(it => {
@@ -1481,7 +1390,6 @@ function buildOption(payload) {
     }).join('');
   }
 
-  /* 替换：从后端 series.pchip 读取模型，存入本地缓存 */
   function ensureFitModels(sList, xMode){
     const models = fitModelsCache[xMode];
     sList.forEach(s => {
@@ -1494,7 +1402,6 @@ function buildOption(payload) {
     });
   }
 
-  /* 新增：前端 PCHIP 求值（与后端 eval_pchip 同步） */
   function evalPchipJS(model, x){
     if (!model || !Array.isArray(model.x) || !Array.isArray(model.y) || !Array.isArray(model.m)) return NaN;
     const xs = model.x, ys = model.y, ms = model.m;
@@ -1506,7 +1413,6 @@ function buildOption(payload) {
     if (xv <= xs[0]) xv = xs[0];
     if (xv >= xs[n - 1]) xv = xs[n - 1];
 
-    // 二分找到区间 i: xs[i] <= x <= xs[i+1]
     let lo = 0, hi = n - 2, i = 0;
     while (lo <= hi) {
       const mid = (lo + hi) >> 1;
@@ -1528,13 +1434,11 @@ function buildOption(payload) {
     return h00 * y0 + h10 * m0 + h01 * y1 + h11 * m1;
   }
 
-
   function computeSampleCount(widthPx){
     const n = Math.round(widthPx / 1.5);
     return Math.max(200, Math.min(1200, n));
   }
 
-  /* 替换：用后端 PCHIP 模型进行采样，绘制虚线拟合曲线 */
   function resampleSingle(model, xmin, xmax, count){
     const n = Math.max(2, (count|0));
     const pts = [];
@@ -1583,33 +1487,49 @@ function buildOption(payload) {
     if (xQueryByMode[mode] > vmax) xQueryByMode[mode] = vmax;
   }
 
-  // 消息通信（父页面 -> iframe）
+  // 父页通信：未就绪时排队等待
   window.addEventListener('message', (e)=>{
     if (e.origin !== window.location.origin) return;
     const { type, payload } = e.data || {};
-    if (type==='chart:update' && payload) render(payload);
-    if (type==='chart:resize' && chart) {
-      const nowNarrow = layoutIsNarrow();
-      if (lastIsNarrow === null) lastIsNarrow = nowNarrow;
-
-      if (nowNarrow !== lastIsNarrow) {
-        lastIsNarrow = nowNarrow;
-        if (lastPayload) render(lastPayload);
-        else chart.resize();
+    if (type==='chart:update' && payload) {
+      lastPayload = payload;
+      if (!echartsReady || typeof window.echarts === 'undefined') {
+        onEchartsReady(() => render(lastPayload));
       } else {
-        chart.resize();
-        if (lastOption) {
-          const { x, y, visible } = computePrefixCenter(lastOption);
-          placeAxisOverlayAt(x, y, visible && !lastOption.__empty);
-          placeFitUI();
-          repaintPointer();
-        }
+        render(payload);
       }
     }
-  });
+    if (type==='chart:resize') {
+      const kick = () => {
+        if (!chart) return;
+        const nowNarrow = layoutIsNarrow();
+        if (lastIsNarrow === null) lastIsNarrow = nowNarrow;
 
-  document.addEventListener('DOMContentLoaded', init);
+        if (nowNarrow !== lastIsNarrow) {
+          lastIsNarrow = nowNarrow;
+          if (lastPayload) render(lastPayload);
+          else chart.resize();
+        } else {
+          chart.resize();
+          if (lastOption) {
+            const { x, y, visible } = computePrefixCenter(lastOption);
+            placeAxisOverlayAt(x, y, visible && !lastOption.__empty);
+            placeFitUI();
+            repaintPointer();
+          }
+        }
+      };
+      if (!echartsReady || typeof window.echarts === 'undefined') onEchartsReady(kick); else kick();
+    }
+  }, { passive:true });
 
+  // DOM 就绪后，若已经有 payload 并且 echarts 就绪，触发一次渲染
+  document.addEventListener('DOMContentLoaded', () => {
+    if (lastPayload) {
+      if (!echartsReady) onEchartsReady(() => render(lastPayload));
+      else render(lastPayload);
+    }
+  }, { once:true });
 })();
 </script>
 </body>

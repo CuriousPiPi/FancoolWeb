@@ -2480,8 +2480,6 @@ window.addEventListener('message', (e) => {
   }
 });
 
-<<<<<<< HEAD
-=======
 /* 记录用户是否点击过侧栏按钮 */
 const LS_KEY_SIDEBAR_TOGGLE_CLICKED = 'sidebar_toggle_clicked';
 function markSidebarToggleClicked(){
@@ -2515,7 +2513,6 @@ function maybeAutoOpenSidebarOnAdd(){
   });
 })();
 
->>>>>>> origin/main
 /* 搜索工况位置联动（按负载筛选） */
 (function initScenarioCascading(){
   const form = document.getElementById('searchForm');
