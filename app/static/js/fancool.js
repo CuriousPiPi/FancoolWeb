@@ -417,6 +417,7 @@ let lastChartData = null;
 let frontXAxisType = 'rpm';
 const chartMessageQueue = [];
 let chartFrameReady = false;
+let __chartHelloAcked = false;
 
 function flushChartQueue(){
   if (!chartFrameReady || !chartFrame || !chartFrame.contentWindow) return;
@@ -2466,6 +2467,26 @@ window.addEventListener('resize', () => {
 window.addEventListener('message', (e) => {
   if (e.origin !== window.location.origin) return;
   const { type, payload } = e.data || {};
+  if (type === 'chart:hello') {
+    if (!__chartHelloAcked) {
+      __chartHelloAcked = true;
+      chartFrameReady = true;           // 视为已就绪，允许队列发送
+      flushChartQueue();
+      if (lastChartData) {
+        postChartData(lastChartData);
+      } else {
+        // 若还没拿到数据，从本地选择状态拉取一次
+        refreshChartFromLocal(false);
+      }
+      // 立刻给一次尺寸同步，避免容器初始为 0 导致不渲染
+      resizeChart();
+      // 回个确认，供 iframe 端（若实现了）停止重试
+      try { chartFrame.contentWindow.postMessage({ type: 'chart:ready' }, window.location.origin); } catch(_) {}
+      // 再加一帧兜底
+      requestAnimationFrame(() => resizeChart());
+    }
+    return;
+  }
   if (type === 'chart:ready') {
     chartFrameReady = true;
     flushChartQueue();

@@ -5,13 +5,12 @@
   <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
   <title>Chart Renderer</title>
 
-  <!-- 资源提示：降低 DNS/TLS 连接开销 -->
-  <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
-  <link rel="dns-prefetch" href="//cdn.jsdelivr.net">
+  <!-- head：新增 BootCDN 的建链提示，并将主源改为 BootCDN -->
+  <link rel="preconnect" href="https://cdn.bootcdn.net" crossorigin>
+  <link rel="dns-prefetch" href="//cdn.bootcdn.net">
 
-  <!-- 关键修复：给 ECharts 标记 id，并使用 defer；配合下方“就绪门闸”彻底消除竞态 -->
-  <script id="echarts-cdn" defer src="https://cdn.jsdelivr.net/npm/echarts@5.4.2/dist/echarts.min.js"></script>
-
+  <!-- 将原来的 jsDelivr 主源替换为 BootCDN -->
+  <script id="echarts-cdn" defer src="/static/vendor/echarts/5.4.2/echarts.min.js"></script>
   <style>
     html,body{height:100%;margin:0}
     #chart{width:100%;height:100%; position: relative; overflow: hidden;}
@@ -137,6 +136,36 @@
 <script>
 (function () {
   // ============ 关键修复：ECharts 就绪门闸 + 兜底 ============
+  // NEW: 与父页的握手与重试，避免消息竞态丢失
+    let helloTimer = null;
+    let helloAttempts = 0;
+    const helloMax = 6;
+
+    function pingParentForData(reason){
+      try {
+        window.parent.postMessage({
+          type: 'chart:hello',
+          payload: { reason, ts: Date.now(), source: 'iframe' }
+        }, window.location.origin);
+      } catch(_) {}
+    }
+
+    function ensurePayloadHandshake(){
+      if (lastPayload) return;
+      clearInterval(helloTimer);
+      helloAttempts = 0;
+      // 立即请求一次
+      pingParentForData('init');
+      // 后续重试（每 600ms 一次，最多 6 次）
+      helloTimer = setInterval(() => {
+        if (lastPayload || helloAttempts >= helloMax) {
+          clearInterval(helloTimer);
+          return;
+        }
+        helloAttempts++;
+        pingParentForData('retry-' + helloAttempts);
+      }, 600);
+    }
 
   const ECHARTS_GLOBAL_KEY = 'echarts';
   let echartsReady = typeof window[ECHARTS_GLOBAL_KEY] !== 'undefined';
@@ -156,25 +185,35 @@
   // 监听主 CDN 脚本
   (function wireEchartsLoad(){
     if (echartsReady) return;
-    const s = document.getElementById('echarts-cdn') || document.querySelector('script[src*="echarts"]');
-    if (s){
-      s.addEventListener('load', () => markEchartsReady(), { once:true });
-      s.addEventListener('error', () => {
-        // 备用 CDN 回退（只触发一次）
-        if (echartsReady || echartsLoadTimedOut) return;
-        const alt = document.createElement('script');
-        alt.defer = true;
-        alt.src = 'https://unpkg.com/echarts@5.4.2/dist/echarts.min.js';
-        alt.addEventListener('load', () => markEchartsReady(), { once:true });
-        alt.addEventListener('error', () => { echartsLoadTimedOut = true; });
-        document.head.appendChild(alt);
-      }, { once:true });
+
+    const s = document.getElementById('echarts-cdn');
+    if (!s) return;
+
+    const fallbacks = [
+      'https://cdn.jsdelivr.net/npm/echarts@5.4.2/dist/echarts.min.js',
+      'https://unpkg.com/echarts@5.4.2/dist/echarts.min.js'
+    ];
+    let fbIndex = 0;
+
+    function injectNextFallback(){
+      if (echartsReady || fbIndex >= fallbacks.length) return;
+      const alt = document.createElement('script');
+      alt.defer = true;
+      alt.crossOrigin = 'anonymous';
+      alt.src = fallbacks[fbIndex++];
+      alt.addEventListener('load', () => { markEchartsReady(); ensurePayloadHandshake(); }, { once:true });
+      alt.addEventListener('error', injectNextFallback, { once:true });
+      document.head.appendChild(alt);
     }
-    // 兜底轮询（防止极端情况下 load 事件丢失）
+
+    s.addEventListener('load', () => { markEchartsReady(); ensurePayloadHandshake(); }, { once:true });
+    s.addEventListener('error', () => { injectNextFallback(); }, { once:true });
+
+    // 轮询仅用于标记就绪
     const start = performance.now();
     const tm = setInterval(() => {
       if (typeof window[ECHARTS_GLOBAL_KEY] !== 'undefined') {
-        clearInterval(tm); markEchartsReady();
+        clearInterval(tm); markEchartsReady(); ensurePayloadHandshake();
       } else if (performance.now() - start > 15000) {
         clearInterval(tm); echartsLoadTimedOut = true;
       }
@@ -237,6 +276,8 @@
       devicePixelRatio: window.devicePixelRatio || 1
     });
 
+    installChartResizeObserver();
+    
     window.addEventListener('resize', () => {
       if (!chart) return;
       const nowNarrow = layoutIsNarrow();
@@ -1528,8 +1569,35 @@ function render(payload){
     if (lastPayload) {
       if (!echartsReady) onEchartsReady(() => render(lastPayload));
       else render(lastPayload);
+    } else {
+      // NEW: 主动向父页要数据，避免父页早发消息导致丢失
+      ensurePayloadHandshake();
+      if (echartsReady) {
+        // 若 ECharts 已就绪但还没 payload，也再请求一次
+        ensurePayloadHandshake();
+      } else {
+        onEchartsReady(() => ensurePayloadHandshake());
+      }
     }
   }, { once:true });
+
+  let __chartRO = null;
+  function installChartResizeObserver(){
+    if (__chartRO) return;
+    const el = document.getElementById('chart');
+    if (!el) return;
+    __chartRO = new ResizeObserver(entries => {
+      for (const entry of entries) {
+        const cr = entry.contentRect || {};
+        if (chart && cr.width > 0 && cr.height > 0) {
+          try { chart.resize(); } catch(_) {}
+          // 同步依赖尺寸的浮层与指针
+          try { placeFitUI(); repaintPointer(); } catch(_) {}
+        }
+      }
+    });
+    __chartRO.observe(el);
+  }
 })();
 </script>
 </body>

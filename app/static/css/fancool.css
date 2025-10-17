@@ -850,12 +850,8 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
 .sidebar-overlay-backdrop {
   position:fixed;
   inset:0;
-<<<<<<< HEAD
-  background:transparent;
-=======
   background:rgba(0,0,0,.38);
   backdrop-filter:saturate(120%) blur(8px);
->>>>>>> origin/main
   z-index:250;
   opacity:1;
 }
@@ -1163,7 +1159,3 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
 @keyframes toast-out {
   to { opacity:0; transform:translateY(-6px) scale(.96); }
 }
-<<<<<<< HEAD
-=======
-
->>>>>>> origin/main
