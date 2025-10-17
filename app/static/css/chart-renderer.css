@@ -1,0 +1,186 @@
+:root{
+  --bg-bubble:#ffffff;
+  --border-color:#e5e7eb;
+  --text-primary:#1f2937;
+  --text-:#6b7280;
+  --accent:#2563eb;
+  --accent-weak:#93c5fd;
+  --ok:#16a34a;
+  --ok-pressed:#15803d;
+  --shadow:0 6px 20px rgba(0,0,0,0.12);
+  --shadow-strong:0 8px 24px rgba(0,0,0,0.18);
+  --fit-handle-w: 16px;
+  --fit-handle-h: 24px;
+  --fit-hitbox:   36px;  /* 透明命中区一边尺寸（桌面） */
+}
+[data-theme="dark"]{
+  --bg-bubble:#1f293700;
+  --border-color:#374151;
+  --text-primary:#f3f4f6;
+  --text-:#9ca3af;
+  --accent:#60a5fa;
+  --accent-weak:#bfdbfe;
+  --ok:#16a34a;
+  --ok-pressed:#15803d;
+  --shadow:0 6px 20px rgba(0,0,0,0.35);
+  --shadow-strong:0 8px 24px rgba(0,0,0,0.45);
+}
+
+ /*x轴切换开关*/
+.chart-xaxis-overlay{
+  position:absolute;
+  z-index:200;
+  visibility:hidden;
+  transform: translate(-65%, -37%);
+} 
+.switch-container { position:relative; width:76px; height:32px; }
+.switch-track { width:100%; height:100%; background:var(--border-color); border-radius:12px; position:relative; overflow:hidden; }
+.switch-track::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(to bottom, rgba(255,255,255,.22), rgba(255,255,255,0));
+  box-shadow:
+    inset 0 2px 6px rgba(0,0,0,.10),
+    inset 0 -1px 2px rgba(0,0,0,.05);
+}
+[data-theme="dark"] .switch-track::before {
+  background: linear-gradient(to bottom, rgba(255,255,255,.08), rgba(255,255,255,0));
+  box-shadow:
+    inset 0 2px 8px rgba(0,0,0,.45),
+    inset 0 -1px 2px rgba(0,0,0,.35);
+}
+.switch-slider {
+  position:absolute;
+  width:24px;
+  height:100%;
+  background:var(--text-);
+  border-radius:12px;
+  left:0; top:0;
+  transition:transform .25s ease;
+  box-shadow:
+    0 2px 5px rgba(0,0,0,.35),
+    inset 0 1px 0 rgba(255,255,255,.25),
+    inset 0 -1px 0 rgba(0,0,0,.25);
+  cursor:grab;
+}
+.switch-label {
+  cursor: pointer;
+  position:absolute;
+  top:48%;
+  transform:translateY(-50%);
+  font-weight:600;
+  font-size:20px;
+  color:var(--text-primary);
+  white-space:nowrap;
+  pointer-events: none;
+  user-select: none;
+}
+.switch-label-left { right:calc(100% + 4px); }
+.switch-label-right { left:calc(100% + 4px); }
+.chart-xaxis-overlay,
+.switch-container,
+.switch-track,
+.switch-slider {
+  touch-action: none;
+}
+
+.fit-buttons{
+  position: absolute;
+  z-index: 220;
+  visibility: hidden;
+  display: flex;
+  gap: 6px;
+  pointer-events: auto;
+}
+.fit-buttons .btn{
+  appearance: none;
+  border: 1px solid var(--border-color);
+  background: var(--bg-bubble);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 700;
+  padding: 6px 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  user-select: none;
+  line-height: 1;
+  box-shadow: var(--shadow);
+  transition: transform .02s ease-in-out, background-color .15s ease, color .15s ease;
+}
+.fit-buttons .btn:active{ transform: translateY(1px); }
+.fit-buttons .btn.active{
+  background: var(--ok);
+  color: #fff;
+  border-color: var(--ok);
+}
+.fit-buttons .btn.active:active{ background: var(--ok-pressed); }
+
+.fit-bubble{
+  position: fixed !important;
+  min-width: 360px;          /* 保底 */
+  max-width: min(480px, 92vw);
+  z-index: 220 !important;   /* 层级：低于 overlay 侧栏(300)，高于指针(200)、X轴(210) */
+  visibility: hidden;
+  max-height: 60vh;
+  overflow: auto;
+  background: var(--bg-bubble);
+  backdrop-filter: blur(4px) saturate(120%);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  box-shadow: var(--shadow-strong);
+  padding: 10px 12px;
+  cursor: grab;
+  touch-action: none;
+}
+
+.fit-bubble.dragging{ cursor: grabbing; }
+.fit-bubble .head{ display:flex; align-items:center; gap:10px; margin-bottom: 6px; white-space: nowrap; }
+.fit-bubble .title{ font-weight: 800; color: var(--text-primary); font-size: 13px; line-height: 1.2; white-space: nowrap; }
+.fit-bubble .x-input{ margin-left:auto; display:flex; align-items:center; gap:6px; font-size:12px; color: var(--text-); white-space: nowrap; }
+.fit-bubble input[type="number"]{
+  width: 10ch; font-size: 12px; padding: 4px 6px; border: 1px solid var(--border-color);
+  border-radius: 8px; background: transparent; color: var(--text-primary); outline: none;
+}
+.fit-bubble .row{ display:flex; align-items:center; gap:8px; margin: 4px 0; color: var(--text-primary); font-size: 13px; }
+.fit-bubble .row .dot{ width:10px; height:10px; border-radius:50%; flex:0 0 auto; }
+.fit-bubble .hint{ color: var(--text-); font-size: 11px; margin-top: 6px; }
+
+.fit-pointer{
+  position: absolute;
+  z-index: 200;
+  visibility: hidden;
+  pointer-events: none;
+}
+.fit-pointer .line{
+  position:absolute; top:0; bottom:0; width: 2px; transform: translateX(-1px); background: var(--accent); opacity: 0.95;
+}
+.fit-pointer .handle{
+  position:absolute; bottom:-22px; left:-8px; width:16px; height:24px; border-radius:4px; background: var(--accent);
+  box-shadow: var(--shadow); cursor: grab; touch-action: none; pointer-events: auto;
+}
+.fit-pointer .handle::after{
+  content:""; position:absolute; left:50%; transform: translateX(-50%); top:-7px;
+  width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-bottom: 9px solid var(--accent);
+}
+
+/* 给把手增加透明“扩大命中区”——提高易点中性，不改变外观 */
+.fit-pointer .handle::before{
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: var(--fit-hitbox);
+  height: var(--fit-hitbox);
+  transform: translate(-50%, -50%);
+  background: transparent;
+  pointer-events: auto;   /* 命中伪元素也算点中把手 */
+}
+
+.fit-narrow-hint{
+  position:absolute; z-index:2147483643; font-size:11px; color: var(--text-); pointer-events:none; user-select:none; white-space:nowrap;
+}
+
+

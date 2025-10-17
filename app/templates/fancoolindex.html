@@ -1,8 +1,7 @@
 <!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <link rel="icon" type="image/png" href="/static/logo.png">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/tailwind.css') }}">
+  <link rel="icon" type="image/png" href="{{ url_for('static', filename='logo.png') }}">
   <script>
     (function () {
       const savedTheme = localStorage.getItem('theme');
@@ -21,7 +20,9 @@
   <link rel="preconnect" href="https://cdn.bootcdn.net" crossorigin>
   <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/font-awesome/6.5.2/css/fontawesome.min.css" crossorigin="anonymous" referrerpolicy="no-referrer">
   <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/font-awesome/6.5.2/css/solid.min.css" crossorigin="anonymous" referrerpolicy="no-referrer">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/fancool.css', v=3) }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/tailwind.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/chart-renderer.css', v=1) }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/fancool.css', v=6) }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/right-card.css', v=3) }}">
 </head>
 <body class="bg-gray-50 min-h-screen">
@@ -464,9 +465,7 @@
       <!-- 图表 -->
       <div class="fc-chart-container bg-white rounded-xl shadow-md p-4 relative" id="chart-settings">
         <div id="chartRoot">
-          <iframe id="chartFrame" src="/static/echarts-render.html?v12"
-                  allow="fullscreen" allowfullscreen
-                  style="width:100%;height:100%;border:0;"></iframe>
+          <div id="chartHost" style="width:100%;height:100%;position:relative;overflow:hidden;"></div>
         </div>
       </div>
     </div>
@@ -488,9 +487,11 @@
   
   <script src="{{ url_for('static', filename='js/local-state.js') }}"></script>
   <script src="{{ url_for('static', filename='js/color-manager.js', v=1) }}"></script>
+  <script src="{{ url_for('static', filename='vendor/echarts/5.4.2/echarts.min.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/chart-renderer.js', v=3) }}"></script>
   <script src="{{ url_for('static', filename='js/sidebar.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/features/recently-removed.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/fancool.js', v=4) }}"></script>
+  <script src="{{ url_for('static', filename='js/recently-removed.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/fancool.js', v=9) }}"></script>
   <script src="{{ url_for('static', filename='js/analytics.js') }}"></script>
   
 </body>
