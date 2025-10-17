@@ -562,7 +562,18 @@ let currentGroupKey=null, activeGroupKey=null, loadedGroupRows=[], initialIsVali
 function setMode(newMode){
   mode=newMode;
   modeBadge.textContent = '模式：' + (mode==='new'?'新建': mode==='edit'?'编辑': '重新上传');
-  modeBadge.className = 'badge ' + (mode==='edit'?'badge-green':'badge-grey');
+  modeBadge.className = 'badge ' + (mode==='edit'?'badge-green': mode==='reupload'?'badge-red':'badge-grey');
+
+  const descEl = document.querySelector('#updateDesc');
+  if(descEl){
+    const cur = (descEl.value||'').trim();
+    if(mode === 'new'){
+      if(!cur) descEl.value = '上传数据';
+    }else{
+      if(cur === '上传数据') descEl.value = '';
+    }
+  }
+
   if(mode!=='edit'){ [...perfTable.querySelectorAll('input')].forEach(el=>el.disabled=false); }
   markDirty(); saveDraft();
 }
@@ -607,8 +618,22 @@ function saveDraft(){
   try{
     if(suspendDraft) return;
     const draft = {
-      bid: upBrandId.value || '', bLabel: upBrandInput.value || '', mid: upModelId.value || '', mLabel: upModelInput.value || '', cid: upConditionSelect.value || '',
-      mode, currentGroupKey, isValid: isValidSelect.value || '0', rows: collectRowsForDraft(), origRows: loadedGroupRows || [], initialIsValidOnLoad, ts: Date.now()
+      bid: upBrandId.value || '',
+      bLabel: upBrandInput.value || '',
+      mid: upModelId.value || '',
+      mLabel: upModelInput.value || '',
+      cid: upConditionSelect.value || '',
+      mode,
+      currentGroupKey,
+      isValid: isValidSelect.value || '0',
+      // 新增字段
+      desc: (document.querySelector('#updateDesc')?.value || ''),
+      existOpt: (document.querySelector('input[name="existOpt"]:checked')?.value || ''),
+      selGroupKey: (document.querySelector('#groupSelect')?.value || ''),
+      rows: collectRowsForDraft(),
+      origRows: loadedGroupRows || [],
+      initialIsValidOnLoad,
+      ts: Date.now()
     };
     if(!hasMeaningfulDraft(draft)){ localStorage.removeItem(LS_KEY); return; }
     localStorage.setItem(LS_KEY, JSON.stringify(draft));
@@ -952,14 +977,24 @@ function renderPreview(rows){
   drawScatter(chartNoiseAir, pairsNoiseAir, 'noise_db', 'airflow');
   previewArea.style.display='';
 }
+// 提交按钮：提交前强制校验“更新描述”，并随请求提交 description 字段
 perfSubmitBtn.addEventListener('click', async ()=>{
   perfSubmitMsg.textContent=''; perfSubmitMsg.className='';
   const mid=parseInt(upModelId.value||'0',10), cid=parseInt(upConditionSelect.value||'0',10);
   if(mid<=0 || cid<=0){ perfSubmitMsg.className='err'; perfSubmitMsg.textContent='请先完整选择品牌/型号/工况'; return; }
+
+  const desc = (document.querySelector('#updateDesc')?.value || '').trim();
+
   const res = gatherRowsForPreview();
   if(!res.ok){ perfSubmitMsg.className='err'; perfSubmitMsg.textContent=res.msg; previewArea.style.display='none'; return; }
   if(mode==='edit' && !previewReady){
-    const hasRowChange = res.rows.some(r=>{ const origin = loadedGroupRows.find(x=>String(x.data_id)===String(r.data_id)); if(!origin) return false; const airChanged = (origin.airflow_cfm==null || origin.airflow_cfm==='') && r.airflow_cfm!=null; const noiseChanged = (origin.noise_db==null || origin.noise_db==='') && r.noise_db!=null; return airChanged || noiseChanged; });
+    const hasRowChange = res.rows.some(r=>{
+      const origin = loadedGroupRows.find(x=>String(x.data_id)===String(r.data_id));
+      if(!origin) return false;
+      const airChanged = (origin.airflow_cfm==null || origin.airflow_cfm==='') && r.airflow_cfm!=null;
+      const noiseChanged = (origin.noise_db==null || origin.noise_db==='') && r.noise_db!=null;
+      return airChanged || noiseChanged;
+    });
     const isValidChanged = (parseInt(isValidSelect.value,10) !== parseInt(initialIsValidOnLoad,10));
     if(!hasRowChange && !isValidChanged){ perfSubmitMsg.className='err'; perfSubmitMsg.textContent='无变更可预览：未补全任何空值且 is_valid 未变化'; return; }
   }
@@ -972,12 +1007,24 @@ perfSubmitBtn.addEventListener('click', async ()=>{
   }
   const res2 = gatherRowsForPreview();
   if(!res2.ok){ perfSubmitMsg.className='err'; perfSubmitMsg.textContent='内容已变更，请先重新预览'; previewReady=false; perfSubmitBtn.textContent='预览'; return; }
+
+  // 新增：提交前校验“更新描述”必填
+  if(!desc){ perfSubmitMsg.className='err'; perfSubmitMsg.textContent='请填写更新描述'; return; }
+
   perfSubmitBtn.disabled=true;
   try{
     if(mode==='reupload' || mode==='new'){
-      const r=await fetch('/admin/api/data/perf/add',{ method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({ model_id: mid, condition_id: cid, is_valid: parseInt(isValidSelect.value,10),
-          rows: res2.rows.map(x=>({ rpm:x.rpm, airflow_cfm:x.airflow_cfm, noise_db:x.noise_db })) })});
+      const r=await fetch('/admin/api/data/perf/add',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          model_id: mid,
+          condition_id: cid,
+          is_valid: parseInt(isValidSelect.value,10),
+          description: desc, // 新增
+          rows: res2.rows.map(x=>({ rpm:x.rpm, airflow_cfm:x.airflow_cfm, noise_db:x.noise_db }))
+        })
+      });
       const j=await r.json();
       if(j.success){
         perfSubmitMsg.className='ok';
@@ -987,10 +1034,28 @@ perfSubmitBtn.addEventListener('click', async ()=>{
         perfSubmitMsg.className='err'; perfSubmitMsg.textContent=j.error_message||'提交失败';
       }
     } else if(mode==='edit'){
-      const changes=[]; res2.rows.forEach(r=>{ const origin = loadedGroupRows.find(x=>String(x.data_id)===String(r.data_id)); if(!origin) return; const ch={ data_id: r.data_id }; if((origin.airflow_cfm==null || origin.airflow_cfm==='') && r.airflow_cfm!=null){ ch.airflow_cfm = r.airflow_cfm; } if((origin.noise_db==null || origin.noise_db==='') && r.noise_db!=null){ ch.noise_db = r.noise_db; } if(ch.airflow_cfm!==undefined || ch.noise_db!==undefined){ changes.push(ch); } });
+      const changes=[];
+      res2.rows.forEach(r=>{
+        const origin = loadedGroupRows.find(x=>String(x.data_id)===String(r.data_id));
+        if(!origin) return;
+        const ch={ data_id: r.data_id };
+        if((origin.airflow_cfm==null || origin.airflow_cfm==='') && r.airflow_cfm!=null){ ch.airflow_cfm = r.airflow_cfm; }
+        if((origin.noise_db==null || origin.noise_db==='') && r.noise_db!=null){ ch.noise_db = r.noise_db; }
+        if(ch.airflow_cfm!==undefined || ch.noise_db!==undefined){ changes.push(ch); }
+      });
       if(changes.length===0 && (parseInt(isValidSelect.value,10) === parseInt(initialIsValidOnLoad,10))){ perfSubmitMsg.className='err'; perfSubmitMsg.textContent='没有可提交的变更'; perfSubmitBtn.disabled=false; return; }
-      const r=await fetch('/admin/api/data/perf/group-edit',{ method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({ model_id: mid, condition_id: cid, group_key: currentGroupKey, is_valid: parseInt(isValidSelect.value,10), changes })});
+      const r=await fetch('/admin/api/data/perf/group-edit',{
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          model_id: mid,
+          condition_id: cid,
+          group_key: currentGroupKey,
+          is_valid: parseInt(isValidSelect.value,10),
+          description: desc, // 新增
+          changes
+        })
+      });
       const j=await r.json();
       if(j.success){
         const rowsChanged = (j.data?.updated_rows || 0) + (j.data?.state_changed_rows || 0);
@@ -1010,24 +1075,100 @@ perfSubmitBtn.addEventListener('click', async ()=>{
 if($('#restoreBtn')) $('#restoreBtn').addEventListener('click', async ()=>{ const ok = await restoreDraft(); if(ok){ $('#restoreBar').style.display='none'; } else { alert('未找到可恢复的草稿或草稿信息不完整，无法恢复'); } });
 if($('#discardBtn')) $('#discardBtn').addEventListener('click', ()=>{ clearDraft(); });
 
+// restoreDraft：恢复“更新描述/切换按钮/历史组选择”
 async function restoreDraft(){
   const raw = localStorage.getItem(LS_KEY); if(!raw) return false;
   let d=null; try{ d=JSON.parse(raw); }catch(e){ return false; }
   if(!d || !hasMeaningfulDraft(d)) return false;
   suspendDraft = true;
+
   let bid = d.bid;
-  if(!bid && d.bLabel){ const r=await fetch(`/admin/api/data/brand/search?q=${encodeURIComponent(d.bLabel)}`); const j=await r.json(); if(j.success){ const exact=(j.data.items||[]).find(x=>x.label===d.bLabel); if(exact) bid=exact.brand_id; } }
-  if(bid){ upBrandId.value=String(bid); upBrandInput.value=d.bLabel||''; await loadModelsForBrand(bid); } else { upBrandInput.value=d.bLabel||''; await loadConditions(); }
+  if(!bid && d.bLabel){
+    const r=await fetch(`/admin/api/data/brand/search?q=${encodeURIComponent(d.bLabel)}`);
+    const j=await r.json();
+    if(j.success){
+      const exact=(j.data.items||[]).find(x=>x.label===d.bLabel);
+      if(exact) bid=exact.brand_id;
+    }
+  }
+  if(bid){ upBrandId.value=String(bid); upBrandInput.value=d.bLabel||''; await loadModelsForBrand(bid); }
+  else { upBrandInput.value=d.bLabel||''; await loadConditions(); }
   if(d.mid){ upModelId.value=String(d.mid); upModelInput.value=d.mLabel||''; }
   if(d.cid){ upConditionSelect.value = d.cid; }
+
   await checkExisting();
-  if(d.mode==='edit'){ setMode('edit'); isValidSelect.value = d.isValid || '0'; isValidSelect.disabled = true; if(d.currentGroupKey){ $('#groupSelect').value = d.currentGroupKey; await loadGroupByKey(d.currentGroupKey); } }
-  else { setMode(d.mode==='reupload'?'reupload':'new'); isValidSelect.value = d.isValid || '0'; perfTable.innerHTML=''; if(d.rows && d.rows.length){ d.rows.forEach(r=> addPerfRow({ rpm: r.rpm, airflow_cfm: r.airflow_cfm, noise_db: r.noise_db, total_db: r.total_db, ambient_db: r.ambient_db })); } else { addPerfRow(); } }
-  suspendDraft = false; saveDraft(); return true;
+
+  // 恢复历史数据操作切换（重新上传/编辑）
+  if(d.existOpt){
+    const radio = document.querySelector(`input[name="existOpt"][value="${d.existOpt}"]`);
+    if(radio){
+      radio.checked = true;
+      const maybePromise = radio.onchange && radio.onchange();
+      if(maybePromise && typeof maybePromise.then==='function'){ try{ await maybePromise; }catch(e){} }
+    }
+  }
+
+  // 若为编辑模式，恢复已选择的历史组（不自动载入，仅恢复下拉选择）
+  if(d.existOpt === 'edit' && d.selGroupKey){
+    // 等待下拉选项加载完成
+    const waitForOption = async (val, timeout=3000)=>{
+      const start=Date.now();
+      while(Date.now()-start < timeout){
+        if([...document.querySelectorAll('#groupSelect option')].some(o=>o.value===val)) return true;
+        await new Promise(r=>setTimeout(r,100));
+      }
+      return false;
+    };
+    if(await waitForOption(d.selGroupKey)){
+      const sel = document.querySelector('#groupSelect');
+      if(sel){ sel.value = d.selGroupKey; }
+    }
+  }
+
+  if(d.mode==='edit'){
+    setMode('edit');
+    isValidSelect.value = d.isValid || '0';
+    isValidSelect.disabled = true;
+    if(d.currentGroupKey){
+      $('#groupSelect').value = d.currentGroupKey;
+      await loadGroupByKey(d.currentGroupKey);
+    }
+  } else {
+    setMode(d.mode==='reupload'?'reupload':'new');
+    isValidSelect.value = d.isValid || '0';
+    perfTable.innerHTML='';
+    if(d.rows && d.rows.length){
+      d.rows.forEach(r=> addPerfRow({ rpm: r.rpm, airflow_cfm: r.airflow_cfm, noise_db: r.noise_db, total_db: r.total_db, ambient_db: r.ambient_db }));
+    } else { addPerfRow(); }
+  }
+
+  // 恢复更新描述（若无则按模式默认）
+  const descEl = document.querySelector('#updateDesc');
+  if(descEl){
+    if(typeof d.desc === 'string'){
+      descEl.value = d.desc;
+    }else{
+      descEl.value = (d.mode==='new' ? '上传数据' : '');
+    }
+  }
+
+  suspendDraft = false;
+  saveDraft();
+  return true;
 }
 function clearDraft(){ suspendDraft = true; try{ localStorage.removeItem(LS_KEY); }catch(e){} $('#restoreBar').style.display='none'; setTimeout(()=>{ suspendDraft = false; }, 0); }
 function bindDraftAutoSave(){
-  [upBrandInput, upModelInput, upConditionSelect, isValidSelect].forEach(el=>{ if(!el) return; el.addEventListener('change', saveDraft); if(el===upModelInput){ el.addEventListener('input', saveDraft); } });
+  [upBrandInput, upModelInput, upConditionSelect, isValidSelect].forEach(el=>{
+    if(!el) return;
+    el.addEventListener('change', saveDraft);
+    if(el===upModelInput){ el.addEventListener('input', saveDraft); }
+  });
+  // 新增：更新描述
+  const descEl = document.querySelector('#updateDesc');
+  if(descEl){
+    descEl.addEventListener('input', saveDraft);
+    descEl.addEventListener('change', saveDraft);
+  }
   document.querySelectorAll('input[name="existOpt"]').forEach(r=> r.addEventListener('change', saveDraft));
   if($('#groupSelect')) $('#groupSelect').addEventListener('change', saveDraft);
   new MutationObserver(()=>saveDraft()).observe(perfTable, { childList:true, subtree:true, attributes:false });
@@ -1046,4 +1187,7 @@ function bindDraftAutoSave(){
   }catch(e){}
   // 型号编辑“两级下拉”初始化（若元素不存在将安全跳过）
   try{ initModelEditTwoDropdowns(); }catch(e){}
+
+  // 修复点：初始化结束后允许自动保存草稿
+  suspendDraft = false;
 })();

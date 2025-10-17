@@ -694,6 +694,9 @@ def api_perf_group_edit():
     except Exception:
         return resp_err('INVALID_INPUT', '参数格式错误')
 
+    # 接收前端更新描述（用于“激活/关闭/替换时”的新批次记录）
+    desc_front = (payload.get('description') or '').strip()
+
     batch_id = (payload.get('group_key') or '').strip()
     if not batch_id:
         batch_id = (payload.get('batch_id') or '').strip()
@@ -710,9 +713,10 @@ def api_perf_group_edit():
     target_is_valid = 0 if (active_key and active_key != batch_id) else desired_is_valid
 
     updated_rows = 0
-    state_changed_rows = 0  # 新增：统计仅 is_valid 状态切换所影响的行数
+    state_changed_rows = 0
 
     with _engine().begin() as conn:
+        # 数据补空（与 is_valid 无关）
         for ch in changes:
             try:
                 did = int(ch.get('data_id'))
@@ -763,7 +767,27 @@ def api_perf_group_edit():
                 updated_rows += res2.rowcount or 0
 
         if target_is_valid == 1:
-            # 先将其他已对外组关闭，仅统计真实状态变化的行
+            # 将要激活当前批次：找出将被关闭的其它对外批次
+            prev_rows = conn.execute(text("""
+                SELECT DISTINCT batch_id
+                FROM fan_performance_data
+                WHERE model_id=:m AND condition_id=:c AND is_valid=1 AND batch_id<>:bid
+            """), {'m': model_id, 'c': condition_id, 'bid': batch_id}).fetchall()
+            prev_batches = [ (getattr(r, '_mapping', None) and r._mapping.get('batch_id')) or r[0] for r in prev_rows ]
+
+            # 为每个被替换的历史批次写一条 notice：replaced
+            for old_bid in prev_batches:
+                conn.execute(text("""
+                    INSERT INTO data_update_log (model_id, condition_id, affected_batch, is_valid, action, description)
+                    VALUES (:m, :c, :affected, 0, 'replaced', :desc)
+                """), {
+                    'm': model_id,
+                    'c': condition_id,
+                    'affected': old_bid,
+                    'desc': batch_id  # 被哪个批次替换
+                })
+
+            # 关闭其它对外批次
             res_off = conn.execute(text("""
                 UPDATE fan_performance_data
                 SET is_valid=0, update_date=NOW()
@@ -771,21 +795,45 @@ def api_perf_group_edit():
             """), {'m': model_id, 'c': condition_id, 'bid': batch_id})
             state_changed_rows += res_off.rowcount or 0
 
-            # 再将当前组开启，仅把原本为0的行置为1以准确计数
+            # 将当前批次开启（仅 0->1）
             res_on = conn.execute(text("""
                 UPDATE fan_performance_data
                 SET is_valid=1, update_date=NOW()
                 WHERE model_id=:m AND condition_id=:c AND batch_id=:bid AND is_valid=0
             """), {'m': model_id, 'c': condition_id, 'bid': batch_id})
             state_changed_rows += res_on.rowcount or 0
+
+            # 若确有状态变更，记录当前批次激活 notice：activate
+            if (res_on.rowcount or 0) > 0 or prev_batches:
+                conn.execute(text("""
+                    INSERT INTO data_update_log (model_id, condition_id, affected_batch, is_valid, action, description)
+                    VALUES (:m, :c, :affected, 1, 'activate', :desc)
+                """), {
+                    'm': model_id,
+                    'c': condition_id,
+                    'affected': batch_id,
+                    'desc': desc_front
+                })
         else:
-            # 关闭当前组，仅把原本为1的行置为0以准确计数
+            # 关闭当前批次（仅 1->0）
             res_off_cur = conn.execute(text("""
                 UPDATE fan_performance_data
                 SET is_valid=0, update_date=NOW()
                 WHERE model_id=:m AND condition_id=:c AND batch_id=:bid AND is_valid=1
             """), {'m': model_id, 'c': condition_id, 'bid': batch_id})
             state_changed_rows += res_off_cur.rowcount or 0
+
+            # 仅当有实际状态变化时记录 close
+            if (res_off_cur.rowcount or 0) > 0:
+                conn.execute(text("""
+                    INSERT INTO data_update_log (model_id, condition_id, affected_batch, is_valid, action, description)
+                    VALUES (:m, :c, :affected, 0, 'close', :desc)
+                """), {
+                    'm': model_id,
+                    'c': condition_id,
+                    'affected': batch_id,
+                    'desc': desc_front
+                })
 
     return resp_ok(
         {
@@ -808,6 +856,9 @@ def api_perf_add():
     except Exception:
         return resp_err('INVALID_INPUT', 'ID或is_valid格式错误')
 
+    # 前端更新描述（用于新批次的 notice）
+    desc_front = (payload.get('description') or '').strip()
+
     rows_in = payload.get('rows') or []
     if model_id <= 0 or condition_id <= 0:
         return resp_err('INVALID_INPUT', '缺少 model_id 或 condition_id')
@@ -817,28 +868,52 @@ def api_perf_add():
     cleaned = []
     seen_rpm = set()
     try:
-      for i, r in enumerate(rows_in, start=1):
-        rpm = int(str(r.get('rpm')).strip())
-        if rpm <= 0: raise ValueError(f'第{i}行：rpm 必须为>0的整数')
-        if rpm in seen_rpm: raise ValueError(f'第{i}行：rpm 重复（同一提交内不允许重复）')
-        seen_rpm.add(rpm)
-        airflow = float(str(r.get('airflow_cfm')).strip())
-        if airflow <= 0: raise ValueError(f'第{i}行：airflow_cfm 必须>0')
-        noise_raw = r.get('noise_db'); noise_db = None
-        if noise_raw not in (None, ''): noise_db = _round1(float(str(noise_raw).strip()))
-        cleaned.append({'rpm': rpm, 'airflow_cfm': airflow, 'noise_db': noise_db})
+        for i, r in enumerate(rows_in, start=1):
+            rpm = int(str(r.get('rpm')).strip())
+            if rpm <= 0: raise ValueError(f'第{i}行：rpm 必须为>0的整数')
+            if rpm in seen_rpm: raise ValueError(f'第{i}行：rpm 重复（同一提交内不允许重复）')
+            seen_rpm.add(rpm)
+            airflow = float(str(r.get('airflow_cfm')).strip())
+            if airflow <= 0: raise ValueError(f'第{i}行：airflow_cfm 必须>0')
+            noise_raw = r.get('noise_db'); noise_db = None
+            if noise_raw not in (None, ''): noise_db = _round1(float(str(noise_raw).strip()))
+            cleaned.append({'rpm': rpm, 'airflow_cfm': airflow, 'noise_db': noise_db})
     except Exception as e:
-      return resp_err('INVALID_ROW', str(e))
+        return resp_err('INVALID_ROW', str(e))
 
     new_batch = str(uuid.uuid4())
     try:
         with _engine().begin() as conn:
+            prev_batches = []
             if is_valid == 1:
+                # 找出现有对外批次
+                prev_rows = conn.execute(text("""
+                    SELECT DISTINCT batch_id
+                    FROM fan_performance_data
+                    WHERE model_id=:m AND condition_id=:c AND is_valid=1
+                """), {'m': model_id, 'c': condition_id}).fetchall()
+                prev_batches = [ (getattr(r, '_mapping', None) and r._mapping.get('batch_id')) or r[0] for r in prev_rows ]
+
+                # 先记录“被替换”的 notice：replaced
+                for old_bid in prev_batches:
+                    conn.execute(text("""
+                        INSERT INTO data_update_log (model_id, condition_id, affected_batch, is_valid, action, description)
+                        VALUES (:m, :c, :affected, 0, 'replaced', :desc)
+                    """), {
+                        'm': model_id,
+                        'c': condition_id,
+                        'affected': old_bid,
+                        'desc': new_batch  # 被哪个新批次替换
+                    })
+
+                # 关闭旧批次
                 conn.execute(text("""
                     UPDATE fan_performance_data
                     SET is_valid=0, update_date=NOW()
                     WHERE model_id=:m AND condition_id=:c AND is_valid=1
                 """), {'m': model_id, 'c': condition_id})
+
+            # 插入新批次（可能为草稿或对外）
             for r in cleaned:
                 conn.execute(text("""
                     INSERT INTO fan_performance_data
@@ -848,7 +923,24 @@ def api_perf_add():
                     'mid': model_id, 'cid': condition_id, 'bid': new_batch,
                     'rpm': r['rpm'], 'air': r['airflow_cfm'], 'ndb': r['noise_db'], 'valid': is_valid
                 })
+
+            # 写“新批次”的 notice：
+            # - 若替换了旧批次：action='replace'
+            # - 若无旧批次直接对外：action='upload'
+            if is_valid == 1:
+                action_value = 'replace' if prev_batches else 'upload'
+                conn.execute(text("""
+                    INSERT INTO data_update_log (model_id, condition_id, affected_batch, is_valid, action, description)
+                    VALUES (:m, :c, :affected, 1, :action, :desc)
+                """), {
+                    'm': model_id,
+                    'c': condition_id,
+                    'affected': new_batch,
+                    'action': action_value,
+                    'desc': desc_front
+                })
     except Exception as e:
         return resp_err('DB_WRITE_FAIL', f'写入失败: {e}', 500)
+
 
     return resp_ok({'inserted': len(cleaned), 'batch_id': new_batch}, message=f'成功插入 {len(cleaned)} 行')

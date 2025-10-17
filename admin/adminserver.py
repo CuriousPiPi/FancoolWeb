@@ -12,13 +12,47 @@ from admin_data import data_mgmt_bp
 # =========================
 # Config
 # =========================
+from logging.config import dictConfig
+
+dictConfig({
+    'version': 1,
+    'disable_existing_loggers': False,  # 不屏蔽第三方库，但我们会单独降级它们
+    'formatters': {
+        'default': {
+            'format': '[%(asctime)s] %(levelname)s in %(name)s: %(message)s',
+        },
+    },
+    'handlers': {
+        'wsgi': {
+            'class': 'logging.StreamHandler',
+            'stream': 'ext://sys.stdout',
+            'formatter': 'default',
+        },
+    },
+    # 根 logger：WARNING（抑制 INFO/DEBUG）
+    'root': {
+        'level': 'WARNING',
+        'handlers': ['wsgi']
+    },
+    'loggers': {
+        # Flask/werkzeug 的请求日志
+        'werkzeug': {'level': 'WARNING', 'propagate': True},
+        # SQLAlchemy 引擎与连接池（避免打印 SQL/连接池 INFO）
+        'sqlalchemy.engine': {'level': 'WARNING', 'propagate': False},
+        'sqlalchemy.pool': {'level': 'WARNING', 'propagate': False},
+        # 如果你有其他 noisy 的库，也可在此降级
+    }
+})
+
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_for=1)
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 app.secret_key = os.getenv('APP_SECRET', 'replace-me-in-prod')  # 与前台保持一致的 secret
+app.register_blueprint(data_mgmt_bp)
+app.logger.setLevel('WARNING')
+
 #app.config['TEMPLATES_AUTO_RELOAD'] = True
 #app.jinja_env.auto_reload = True
-app.register_blueprint(data_mgmt_bp)
 
 # 将后台会话与前台隔离（独立 Cookie 名称与 Path）
 app.config['SESSION_COOKIE_NAME'] = os.getenv('ADMIN_SESSION_COOKIE_NAME', 'fc_admin_sess')
@@ -41,7 +75,7 @@ ADMIN_DB_DSN = os.getenv(
     'ADMIN_DB_DSN',
     'mysql+pymysql://fancool_admin:12345678@127.0.0.1/FANDB?charset=utf8mb4'
 )
-engine = create_engine(ADMIN_DB_DSN, pool_pre_ping=True, pool_recycle=1800, future=True)
+engine = create_engine(ADMIN_DB_DSN, pool_pre_ping=True, pool_recycle=1800, future=True, echo=False)
 app.config['ADMIN_ENGINE'] = engine
 
 # 登录/锁定/限流参数

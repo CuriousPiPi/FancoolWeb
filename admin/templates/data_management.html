@@ -117,6 +117,10 @@
     .badge{ display: inline-flex; align-items: center; justify-content: center; min-width: 78px; height: 24px; padding: 0 10px; border-radius: 999px; font-size: 12px; background: color-mix(in oklab, var(--muted), transparent 85%); color: var(--text); border: 1px solid var(--border); }
     .badge-grey{ background: color-mix(in oklab, var(--muted), transparent 0%); }
     .badge-green{ background: color-mix(in oklab, var(--ok), transparent 0%); color: #065f46; }
+    .badge-red{
+      background: color-mix(in oklab, var(--err), transparent 0%);
+      color: #2f0f0f; /* 深红文字，提升对比 */
+    }
 
     .restore{ position: sticky; top: 8px; z-index: 15; display: flex; gap: 8px; align-items: center; justify-content: space-between;
       background: color-mix(in oklab, var(--warn), var(--card) 75%); border: 1px solid color-mix(in oklab, var(--warn), var(--border) 70%); color: color-mix(in oklab, var(--warn), #000 40%);
@@ -195,10 +199,16 @@
       }
       #existsBox .options-line .seg{
         flex: 0 0 auto;
+        margin-top: 6px;
       }
       #existsBox .options-line .hint{
         flex: 1 1 100%;
         margin: 2px 0 0;
+      }
+      #existsBox .options-line .seg input:checked + label{
+        background: var(--warn);
+        color: #0b1220;
+        box-shadow: 0 0 0 1px color-mix(in oklab, var(--warn), transparent 40%) inset;
       }
       /* 避免该行内部 label 自带的上/下外边距拉高行高 */
       #existsBox .options-line label{ margin: 0; }
@@ -333,14 +343,20 @@
           </div>
         </div>
 
-        <div class="row align-bottom" style="margin-top:16px;">
-          <div style="flex:0 0 260px; min-width: 220px;">
+        <div class="row align-bottom actions" style="margin-top:16px;">
+          <div>
             <label for="isValidSelect">是否有效 (is_valid)</label>
             <select id="isValidSelect">
-              <option value="0" selected>0（暂不公开）</option>
-              <option value="1">1（即刻公开）</option>
+              <option value="0" selected>0（不公开）</option>
+              <option value="1">1（公开）</option>
             </select>
           </div>
+
+          <div style="flex:1 1 280px; max-width: 320px;">
+            <label for="updateDesc">更新描述（必填）</label>
+            <input id="updateDesc" type="text" placeholder="请填写本次更新说明" required />
+          </div>
+        
           <div class="align-end" style="min-width: 220px;">
             <button id="perfSubmitBtn" type="button">预览</button>
             <span id="perfSubmitMsg" style="margin-left:12px;"></span>
@@ -406,8 +422,8 @@
             <div>
               <label for="brandIsValid">是否有效 (is_valid)</label>
               <select id="brandIsValid">
-                <option value="0" selected>0（暂不公开）</option>
-                <option value="1">1（即刻公开）</option>
+                <option value="0" selected>0（不公开）</option>
+                <option value="1">1（公开）</option>
               </select>
             </div>
             <button type="submit" id="brandSubmitBtn">提交</button>
@@ -439,7 +455,7 @@
             <div>
               <label for="brandEditIsValid">是否有效 (is_valid)</label>
               <select id="brandEditIsValid">
-                <option value="0">0（未公开）</option>
+                <option value="0">0（不公开）</option>
                 <option value="1">1（公开）</option>
               </select>
             </div>
@@ -512,8 +528,8 @@
             <div>
               <label for="modelIsValid">是否有效 (is_valid)</label>
               <select id="modelIsValid">
-                <option value="0" selected>0（暂不公开）</option>
-                <option value="1">1（即刻公开）</option>
+                <option value="0" selected>0（不公开）</option>
+                <option value="1">1（公开）</option>
               </select>
             </div>
             <button type="submit" id="modelSubmitBtn">提交</button>
@@ -579,8 +595,8 @@
               <div>
                 <label for="modelEditIsValid">是否有效 (is_valid)</label>
                 <select id="modelEditIsValid">
-                  <option value="0" selected>0（暂不公开）</option>
-                  <option value="1">1（即刻公开）</option>
+                  <option value="0" selected>0（不公开）</option>
+                  <option value="1">1（公开）</option>
                 </select>
               </div>
               <button type="submit" id="modelEditSubmitBtn">提交修改</button>
@@ -618,8 +634,8 @@
             <div>
               <label for="condIsValid">是否有效 (is_valid)</label>
               <select id="condIsValid">
-                <option value="0" selected>0（暂不公开）</option>
-                <option value="1">1（即刻公开）</option>
+                <option value="0" selected>0（不公开）</option>
+                <option value="1">1（公开）</option>
               </select>
             </div>
             <button type="submit" id="condSubmitBtn">提交</button>
@@ -653,14 +669,14 @@
             <div>
               <label for="condEditIsValidOut">出风 is_valid</label>
               <select id="condEditIsValidOut">
-                <option value="0">0（未公开）</option>
+                <option value="0">0（不公开）</option>
                 <option value="1">1（公开）</option>
               </select>
             </div>
             <div>
               <label for="condEditIsValidIn">进风 is_valid</label>
               <select id="condEditIsValidIn">
-                <option value="0">0（未公开）</option>
+                <option value="0">0（不公开）</option>
                 <option value="1">1（公开）</option>
               </select>
             </div>
