@@ -79,6 +79,7 @@ html, body { height:100%; overflow-x:hidden; }
 
   --seg-btn-w:80px;
   --gesture-close-zone-width:24px;
+  --left-search-min-w: 320px;
 
   --tooltip-bg:#ffffff;
   --tooltip-text:#1f2937;
@@ -679,6 +680,8 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
 #sidebar-splitter .fc-splitter-handle:active { transform:translate(-50%,-50%) scale(.98); }
 @media (hover:none) and (pointer:coarse) {
   #sidebar-splitter .fc-splitter-handle { width:92px; height:30px; }
+  html { overflow-y: hidden; }
+  body { overflow-y: auto; }
 }
 
 /* 下半区布局 */
@@ -850,12 +853,8 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
 .sidebar-overlay-backdrop {
   position:fixed;
   inset:0;
-<<<<<<< HEAD
-  background:transparent;
-=======
   background:rgba(0,0,0,.38);
   backdrop-filter:saturate(120%) blur(8px);
->>>>>>> origin/main
   z-index:250;
   opacity:1;
 }
@@ -884,6 +883,13 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
 .fc-tab-pane { width:50%; flex-shrink:0; padding:0 2px; }
 
 /* 左侧横滑 */
+/* NEW: 限制“主布局中包含左侧搜索容器的那一列”本身不被继续压缩 */
+#main-panels > *:has(#left-panel-container) {
+  min-width: var(--left-search-min-w);
+  /* 防止 flex 把它压到小于 min-width；0 1 auto 允许在超过 min 时参与布局 */
+  flex: 0 1 auto;
+}
+
 #left-panel-container {
   overflow-x:auto;
   overflow-y:visible;
@@ -941,8 +947,7 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
   height:clamp(480px,62vh,720px)!important;
   background:var(--bg-secondary)!important;
 }
-#chartRoot, #chartFrame { height:100%!important; }
-#chartFrame { display:block; }
+#chartRoot, #chartHost { height:100%!important; }
 
 /* Info 按钮 */
 .fc-info-btn {
@@ -1163,7 +1168,4 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
 @keyframes toast-out {
   to { opacity:0; transform:translateY(-6px) scale(.96); }
 }
-<<<<<<< HEAD
-=======
 
->>>>>>> origin/main

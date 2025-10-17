@@ -412,36 +412,8 @@ function withFrontColors(chartData) {
 }
 
 
-const chartFrame = $('#chartFrame');
 let lastChartData = null;
 let frontXAxisType = 'rpm';
-const chartMessageQueue = [];
-let chartFrameReady = false;
-
-function flushChartQueue(){
-  if (!chartFrameReady || !chartFrame || !chartFrame.contentWindow) return;
-  while(chartMessageQueue.length){
-    const msg = chartMessageQueue.shift();
-    try {
-      chartFrame.contentWindow.postMessage(msg, window.location.origin);
-    } catch(e){
-      console.warn('postMessage flush :', e);
-      break;
-    }
-  }
-  setTimeout(()=>resizeChart(), 50);
-}
-if (chartFrame) {
-  chartFrame.addEventListener('load', () => {
-    if (!chartFrameReady) {
-      chartFrameReady = true;
-      flushChartQueue();
-      if (lastChartData && !chartMessageQueue.length) {
-        postChartData(lastChartData);
-      }
-    }
-  });
-}
 
 (function initPersistedXAxisType(){
   try {
@@ -514,9 +486,10 @@ function filterChartDataForAxis(chartData) {
   });
   return cleaned;
 }
+
 function postChartData(chartData){
   lastChartData = chartData;
-  if (!chartFrame || !chartFrame.contentWindow) return;
+
   const prepared = withFrontColors(chartData);
   const filtered = filterChartDataForAxis(prepared);
   const payload = {
@@ -528,16 +501,16 @@ function postChartData(chartData){
     payload.shareMeta = pendingShareMeta;
     pendingShareMeta = null;
   }
-  const msg = { type:'chart:update', payload };
-  if (!chartFrameReady){
-    chartMessageQueue.push(msg);
-  } else {
-    chartFrame.contentWindow.postMessage(msg, window.location.origin);
+
+  if (window.ChartRenderer && typeof ChartRenderer.render === 'function') {
+    ChartRenderer.render(payload);
   }
 }
+
 function resizeChart(){
-  if (!chartFrame || !chartFrame.contentWindow) return;
-  chartFrame.contentWindow.postMessage({ type:'chart:resize' }, window.location.origin);
+  if (window.ChartRenderer && typeof ChartRenderer.resize === 'function') {
+    ChartRenderer.resize();
+  }
 }
 
 /* =========================================================
@@ -837,33 +810,60 @@ try { window.__APP?.sidebar?.refreshToggleUI?.(); } catch(_) {}
 const themeToggle = $('#themeToggle');
 const themeIcon = $('#themeIcon');
 let currentTheme = document.documentElement.getAttribute('data-theme') || 'light';
+
 function setTheme(t){
   const prev = document.documentElement.getAttribute('data-theme');
   if (prev === t) {
-    if (themeIcon) themeIcon.className = t==='dark' ? 'fa-solid fa-sun' : 'fa-solid fa-moon';
+    if (themeIcon) themeIcon.className = t === 'dark' ? 'fa-solid fa-sun' : 'fa-solid fa-moon';
     return;
   }
+  // 仅设置到 html，避免与 body 形成双源冲突
   document.documentElement.setAttribute('data-theme', t);
-  if (themeIcon) themeIcon.className = t==='dark' ? 'fa-solid fa-sun' : 'fa-solid fa-moon';
+  if (themeIcon) themeIcon.className = t === 'dark' ? 'fa-solid fa-sun' : 'fa-solid fa-moon';
   try { localStorage.setItem('theme', t); } catch(_){}
-  applyDarkGradientIfNeeded();
-  fetch('/api/theme',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({theme:t})}).catch(()=>{});
 
+  // 写入/清理暗色随机渐变变量
+  applyDarkGradientIfNeeded();
+
+  // 通知后端（异步）
+  fetch('/api/theme', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ theme: t })
+  }).catch(()=>{});
+
+  // 等两帧，确保 CSS 变量稳定后再重渲染
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      if (lastChartData) {
+        postChartData(lastChartData);
+      } else {
+        resizeChart();
+      }
+      syncTopTabsViewportHeight();
+    });
+  });
 }
+
+// 初始化：只调用一次
 setTheme(currentTheme);
-themeToggle?.addEventListener('click', ()=>{
-  currentTheme = currentTheme==='light' ? 'dark':'light';
-  setTheme(currentTheme);
-  // 直接调用已经存在的 applySidebarColors 函数，它会处理颜色更新
-  window.applySidebarColors(); 
-  
-  if (lastChartData) {
-    postChartData(lastChartData);
-  } else {
-    resizeChart();
-  }
-  requestAnimationFrame(syncTopTabsViewportHeight);
-});
+
+// 防重复绑定保护
+if (!window.__APP_THEME_BOUND__) {
+  window.__APP_THEME_BOUND__ = true;
+  themeToggle?.addEventListener('click', () => {
+    currentTheme = currentTheme === 'light' ? 'dark' : 'light';
+    setTheme(currentTheme);
+    // 侧栏颜色和图表兜底刷新
+    window.applySidebarColors();
+    if (lastChartData) {
+      postChartData(lastChartData);
+    } else {
+      resizeChart();
+    }
+    requestAnimationFrame(syncTopTabsViewportHeight);
+  });
+}
 
 /* =========================================================
    已选 & 快速按钮状态
@@ -2096,7 +2096,7 @@ document.addEventListener('click',(e)=>{
   if (!('ResizeObserver' in window)) return;
   const container = document.getElementById('main-panels');
   if (!container) return;
-  const THRESHOLD = 860;
+  const THRESHOLD = 980;
   function apply(width){
     if (width < THRESHOLD) {
       container.classList.add('fc-force-col');
@@ -2132,6 +2132,36 @@ function scheduleAdjust(){
 /* =========================================================
    初始数据获取
    ========================================================= */
+(function mountChartRendererEarly(){
+  function doMount(){
+    const el = document.getElementById('chartHost');
+    if (el && window.ChartRenderer && typeof ChartRenderer.mount === 'function') {
+      ChartRenderer.mount(el);
+
+      // NEW: 监听 X 轴切换，写回 LocalState，并按新轴刷新曲线
+      if (typeof ChartRenderer.setOnXAxisChange === 'function') {
+        ChartRenderer.setOnXAxisChange((next) => {
+          // 规范化
+          const nx = (next === 'noise') ? 'noise_db' : next;
+          try { localStorage.setItem('x_axis_type', nx); } catch(_) {}
+          frontXAxisType = nx;
+          // 同步给应用状态（影响 /api/curves 的 x_axis_type）
+          if (typeof LocalState?.setXAxisType === 'function') {
+            try { LocalState.setXAxisType(nx); } catch(_) {}
+          }
+          // 重新取数并渲染（避免沿用旧轴裁剪过的数据）
+          refreshChartFromLocal(false);
+        });
+      }
+    }
+  }
+  if (document.readyState !== 'loading') {
+    doMount();
+  } else {
+    document.addEventListener('DOMContentLoaded', doMount, { once:true });
+  }
+})();
+
 (function initLocalSelectionBoot(){
   rebuildSelectedFans(LocalState.getSelected());
   primeSelectedLikeStatus();
@@ -2462,26 +2492,6 @@ window.addEventListener('resize', () => {
   __titleMaskRaf = requestAnimationFrame(applyRecentLikesTitleMask);
 });
 
-/* Chart iframe 消息 */
-window.addEventListener('message', (e) => {
-  if (e.origin !== window.location.origin) return;
-  const { type, payload } = e.data || {};
-  if (type === 'chart:ready') {
-    chartFrameReady = true;
-    flushChartQueue();
-    if (lastChartData && !chartMessageQueue.length){
-      postChartData(lastChartData);
-    }
-    return;
-  }
-  if (type === 'chart:xaxis-type-changed') {
-    const next = (payload?.x_axis_type === 'noise') ? 'noise_db' : (payload?.x_axis_type || 'rpm');
-    LocalState.setXAxisType(next);
-  }
-});
-
-<<<<<<< HEAD
-=======
 /* 记录用户是否点击过侧栏按钮 */
 const LS_KEY_SIDEBAR_TOGGLE_CLICKED = 'sidebar_toggle_clicked';
 function markSidebarToggleClicked(){
@@ -2515,7 +2525,6 @@ function maybeAutoOpenSidebarOnAdd(){
   });
 })();
 
->>>>>>> origin/main
 /* 搜索工况位置联动（按负载筛选） */
 (function initScenarioCascading(){
   const form = document.getElementById('searchForm');
