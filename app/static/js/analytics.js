@@ -52,7 +52,7 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
       keepalive: true
-    }).catch(() => {}).finally(() => {
+    }).catch((err) => { console.error("Analytics visit_start failed:", err); }).finally(() => {
       try { sessionStorage.setItem('visit_started', '1'); } catch (_) {}
     });
   }
