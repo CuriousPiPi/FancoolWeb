@@ -2480,6 +2480,42 @@ window.addEventListener('message', (e) => {
   }
 });
 
+<<<<<<< HEAD
+=======
+/* 记录用户是否点击过侧栏按钮 */
+const LS_KEY_SIDEBAR_TOGGLE_CLICKED = 'sidebar_toggle_clicked';
+function markSidebarToggleClicked(){
+  try { localStorage.setItem(LS_KEY_SIDEBAR_TOGGLE_CLICKED, '1'); } catch(_) {}
+}
+function userHasClickedSidebarToggle(){
+  try { return localStorage.getItem(LS_KEY_SIDEBAR_TOGGLE_CLICKED) === '1'; } catch(_) { return false; }
+}
+function maybeAutoOpenSidebarOnAdd(){
+  if (userHasClickedSidebarToggle()) return;
+  expandSidebarIfCollapsed();
+}
+
+/* visit_start */
+(function initVisitStartMinimal(){
+  try { if (sessionStorage.getItem('visit_started') === '1') return; } catch(_) {}
+  const payload = {
+    screen_w: (screen && screen.width) || null,
+    screen_h: (screen && screen.height) || null,
+    device_pixel_ratio: window.devicePixelRatio || null,
+    language: (navigator.languages && navigator.languages[0]) || navigator.language || null,
+    is_touch: ('ontouchstart' in window) || (navigator.maxTouchPoints > 0)
+  };
+  fetch('/api/visit_start', {
+    method: 'POST',
+    headers: { 'Content-Type':'application/json' },
+    body: JSON.stringify(payload),
+    keepalive: true
+  }).catch(()=>{}).finally(()=>{
+    try { sessionStorage.setItem('visit_started','1'); } catch(_){}
+  });
+})();
+
+>>>>>>> origin/main
 /* 搜索工况位置联动（按负载筛选） */
 (function initScenarioCascading(){
   const form = document.getElementById('searchForm');
