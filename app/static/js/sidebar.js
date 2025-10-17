@@ -225,7 +225,7 @@
           pointerId: e.pointerId,
           trace: [{ x: p.x, t: performance.now() }]
         };
-        try { zone.setPointerCapture(e.pointerId); } catch(_){}
+        try { zone.setPointerCapture(e.pointerId); } catch(err){ console.error("Failed to setPointerCapture:", err); }
       }, { passive:true });
 
       zone.addEventListener('pointermove', (e)=>{
