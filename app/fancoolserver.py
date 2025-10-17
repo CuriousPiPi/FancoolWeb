@@ -558,6 +558,7 @@ def get_recent_updates(limit: int = RECENT_UPDATES_LIMIT) -> List[dict]:
       - resistance_type_zh, resistance_location_zh
       - size, thickness, max_speed
       - update_date
+      - description
     """
     sql = """
       SELECT
@@ -565,9 +566,10 @@ def get_recent_updates(limit: int = RECENT_UPDATES_LIMIT) -> List[dict]:
         brand_name_zh, model_name,
         resistance_type_zh, resistance_location_zh,
         size, thickness, max_speed,
+        description,
         CONCAT(
           DATE_FORMAT(update_date, '%Y-%m-%d %H:%i'),
-          ' CST'
+          ''
         ) AS update_date
       FROM update_notice_d30_view
       ORDER BY update_date DESC

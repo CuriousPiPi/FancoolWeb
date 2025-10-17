@@ -1241,7 +1241,7 @@ function reloadRecentUpdates(debounce = true) {
 
   const tbody = document.getElementById('recentUpdatesTbody');
   if (tbody && !updatesTabLoaded) {
-    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-gray-500 py-6">加载中...</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-gray-500 py-6">加载中...</td></tr>';
   }
 
   return fetch('/api/recent_updates')
@@ -1274,11 +1274,13 @@ function applyRecentUpdatesTable(resp) {
                (resp && resp.data && Array.isArray(resp.data.items) ? resp.data.items : []);
 
   if (!Array.isArray(list)) {
-    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-red-500 py-6">数据格式异常</td></tr>';
+    // CHANGED: colspan 6 -> 7
+    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-red-500 py-6">数据格式异常</td></tr>';
     return;
   }
   if (list.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6" class="text-center text-gray-500 py-6">暂无近期更新数据</td></tr>';
+    // CHANGED: colspan 6 -> 7
+    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-gray-500 py-6">暂无近期更新数据</td></tr>';
     return;
   }
 
@@ -1293,6 +1295,10 @@ function applyRecentUpdatesTable(resp) {
     const updateText = escapeHtml(r.update_date);
     const resLocForBtn = locRaw && String(locRaw).trim() !== '' ? locRaw : '无';
 
+    // NEW: 更新描述（为空显示 '-'）
+    const descRaw = (r.description != null && String(r.description).trim() !== '') ? String(r.description) : '-';
+    const desc = escapeHtml(descRaw);
+
     html += `
       <tr class="hover:bg-gray-50">
         <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(brand)}</span></td>
@@ -1300,6 +1306,7 @@ function applyRecentUpdatesTable(resp) {
         <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${sizeText}</span></td>
         <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${scen}</span></td>
         <td class="nowrap">${updateText}</td>
+        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${desc}</span></td> <!-- NEW 列：更新描述 -->
         <td>
           <button class="fc-btn-icon-add js-ranking-add fc-tooltip-target"
                   title="添加到图表"
