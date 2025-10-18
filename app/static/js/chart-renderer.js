@@ -5,7 +5,6 @@
   // 内部状态
   let root = null;
   let chart = null;
-  let echartsReady = !!window.echarts;
   let onXAxisChange = null;
 
   let lastPayload = null;
@@ -13,6 +12,16 @@
   let lastIsNarrow = null;
   let isFs = false;
 
+  function getCssTransitionMs(){
+    try {
+      const raw = getComputedStyle(document.documentElement).getPropertyValue('--transition-speed').trim();
+      if (!raw) return 300;
+      if (raw.endsWith('ms')) return Math.max(0, parseFloat(raw));
+      if (raw.endsWith('s'))  return Math.max(0, parseFloat(raw) * 1000);
+      const n = parseFloat(raw);
+      return Number.isFinite(n) ? n : 300;
+    } catch(_) { return 300; }
+  }
   // NEW: 追踪 root 的几何变化（位置/尺寸），用于在容器“移动但不改变尺寸”时重放置拟合气泡
   let __lastRootRect = { left:0, top:0, width:0, height:0 };
   let __posWatchRaf = null;
@@ -270,6 +279,15 @@
     root = rootEl;
     if (!root) { warnOnce('[ChartRenderer] mount(rootEl) 需要一个有效的 DOM 容器'); return; }
     ensureEcharts();
+
+    // 新增：首次挂载且还未收到任何数据时，渲染空图提示“请添加数据”
+    if (!lastPayload) {
+      render({
+        chartData: { x_axis_type: 'rpm', series: [] },
+        theme: (document.documentElement.getAttribute('data-theme') || 'light'),
+        chartBg: getExportBg()
+      });
+    }
   }
 
   function setTheme(theme){
@@ -486,15 +504,16 @@
 
     const exportBg = (payload && payload.chartBg) || getExportBg();
     const bgNormal = isFs ? exportBg : 'transparent';
+    const transitionMs = getCssTransitionMs();
 
     if (!sList.length || (!showRawCurves && !showFitCurves)) {
       toggleFitUI(false);
-      return {
+      return { 
         __empty:true,
         backgroundColor: bgNormal,
-        title:{ text:'暂无数据', left:'center', top:'middle',
+        title:{ text:'请添加数据', left:'center', top:'middle',
           textStyle:{ color:t.axisLabel, fontFamily:t.fontFamily } },
-        toolbox:{ feature:{ saveAsImage:{ backgroundColor:exportBg, pixelRatio: window.devicePixelRatio || 1 } } },
+        toolbox:{ show:false },
         tooltip:{ show:false, triggerOn:'none' }
       };
     }
@@ -635,7 +654,10 @@
       backgroundColor: bgNormal,
       color: sList.map(s=>s.color),
       textStyle:{ fontFamily:t.fontFamily },
-      stateAnimation: { duration: 220, easing: 'cubicOut' },
+      // 修改：使用 CSS 的 --transition-speed 作为动画/状态过渡时长
+      stateAnimation: { duration: transitionMs, easing: 'cubicOut' },
+      animationDurationUpdate: transitionMs,
+      animationEasingUpdate: 'cubicOut',
 
       grid:{ left:40, right: (isN ? 20 : 260), top: gridTop, bottom: (isN ? Math.min(320, 50 + (sList.length || 1) * 22) : 40) },
 
@@ -731,8 +753,8 @@
         <div class="switch-container" id="xAxisSwitchContainer">
           <div class="switch-track" id="xAxisSwitchTrack">
             <div class="switch-slider" id="xAxisSwitchSlider">
-              <span class="switch-label switch-label-right">转速</span>
-              <span class="switch-label switch-label-left">噪音</span>
+              <span class="switch-label switch-label-right"> </span>
+              <span class="switch-label switch-label-left"> </span>
             </div>
           </div>
         </div>`;
@@ -761,7 +783,7 @@
     const currType = currentXModeFromPayload(lastPayload);
     const toNoise  = (currType === 'noise_db');
 
-    slider.style.transition = animate ? 'transform .25s ease' : 'none';
+    slider.style.transition = animate ? 'transform .5s ease' : 'none';
     slider.style.transform  = `translateX(${toNoise ? maxX : 0}px)`;
     track.setAttribute('aria-checked', String(toNoise));
   }
@@ -783,7 +805,7 @@
     function pos(type, animate = true) {
       const toNoise = (type === 'noise_db' || type === 'noise');
       const x = toNoise ? maxX : 0;
-      xAxisSwitchSlider.style.transition = animate ? 'transform .25s ease' : 'none';
+      xAxisSwitchSlider.style.transition = animate ? 'transform .5s ease' : 'none';
       xAxisSwitchSlider.style.transform  = `translateX(${x}px)`;
       xAxisSwitchTrack.setAttribute('aria-checked', String(toNoise));
     }
@@ -1386,8 +1408,13 @@
   }
 
   function computeSampleCount(widthPx){
-    const n = Math.round(widthPx / 1.5);
-    return Math.max(200, Math.min(1200, n));
+    // 可在控制台动态设置：window.__FIT_PX_PER_SAMPLE = 8/10/12...
+    // 数值越大 → 采样越稀疏（性能更好，但折线更“方”）
+    const pxPerSample = Math.max(4, Number(window.__FIT_PX_PER_SAMPLE) || 20); // 默认 100px/样本
+    const w = Math.max(0, Number(widthPx) || 0);
+    const n = Math.round(w / pxPerSample);
+    // 大幅降低上下限，明显减少每条拟合线的数据量
+    return Math.max(20, Math.min(50, n));
   }
 
   function resampleSingle(model, xmin, xmax, count){
