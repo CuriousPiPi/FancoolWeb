@@ -75,7 +75,8 @@ function initSnapTabScrolling(opts){
     persistKey,
     vertical = false,
     onActiveChange,
-    clickScrollBehavior = 'smooth'
+    clickScrollBehavior = 'smooth',
+    defaultTab 
   } = opts || {};
   const container = document.getElementById(containerId);
   const nav = document.querySelector(`.fc-tabs[data-tab-group="${group}"]`);
@@ -119,6 +120,8 @@ function initSnapTabScrolling(opts){
   });
 
   let initIdx = 0;
+
+  // 1) persistKey 优先
   if (persistKey){
     try {
       const saved = localStorage.getItem(persistKey);
@@ -127,10 +130,21 @@ function initSnapTabScrolling(opts){
         if (found >= 0) initIdx = found;
       }
     } catch(_){}
-  } else {
+  }
+
+  // 2) 没命中持久化，用 defaultTab
+  if (initIdx === 0 && defaultTab) {
+    const foundByDefault = tabs.findIndex(t=>t.dataset.tab === defaultTab);
+    if (foundByDefault >= 0) initIdx = foundByDefault;
+  }
+
+  // 3) 没有 defaultTab，且导航自带 .active，则跟随 .active
+  if (initIdx === 0) {
     const activeIdx = tabs.findIndex(t=>t.classList.contains('active'));
     if (activeIdx >= 0) initIdx = activeIdx;
   }
+
+  // 4) 兜底 0
   requestAnimationFrame(()=>activateIdx(initIdx, false, false));
 }
 
@@ -706,8 +720,41 @@ function loadRecentLikesIfNeeded(){
 /* =========================================================
    顶部 / 左 / 右三个 Tab 管理
    ========================================================= */
+(function initRightPanelSnapTabs(){
+  function run(){
+    const card = document.querySelector('.fc-right-card');
+    if (!card) return;
+    const container = card.querySelector('.fc-tab-container');
+    const wrapper   = card.querySelector('.fc-tab-wrapper');
+    if (!container || !wrapper) return;
+
+    // 确保有 id
+    if (!container.id) container.id = 'right-panel-container';
+    if (!wrapper.id)   wrapper.id   = 'right-panel-wrapper';
+
+    // 初始化（不保存状态）。默认激活哪一页由 HTML 中 .active 决定，建议把“近期热门”标注为 active
+    initSnapTabScrolling({
+      containerId: container.id,
+      group: 'right-panel',
+      persistKey: null,
+      onActiveChange: (tab) => {
+        // 保持既有副作用：子页签显隐 + 懒加载
+        if (typeof updateRightSubseg === 'function') updateRightSubseg(tab);
+        if (tab === 'recent-updates' && typeof loadRecentUpdatesIfNeeded === 'function') {
+          loadRecentUpdatesIfNeeded();
+        }
+      },
+      clickScrollBehavior: 'smooth'
+    });
+  }
+  if (document.readyState !== 'loading') run();
+  else document.addEventListener('DOMContentLoaded', run, { once:true });
+})();
+
 function activateTab(group, tabName, animate = false) {
-  if (group === 'sidebar-top' || group === 'left-panel') return;
+  // 右侧主容器启用 snap 后，交由 initSnapTabScrolling 接管
+  if (group === 'sidebar-top' || group === 'left-panel' || (group === 'right-panel' && window.__RIGHT_PANEL_SNAP_ON)) return;
+
   const nav = document.querySelector(`.fc-tabs[data-tab-group="${group}"]`);
   const wrapper = document.getElementById(`${group}-wrapper`);
   if (!nav || !wrapper) return;
@@ -730,7 +777,6 @@ function activateTab(group, tabName, animate = false) {
   }
   if (group === 'right-panel') {
     updateRightSubseg(tabName);
-    // 新增：选中“近期更新”时触发懒加载
     if (tabName === 'recent-updates') {
       loadRecentUpdatesIfNeeded();
     }
@@ -742,10 +788,17 @@ document.addEventListener('click',(e)=>{
   const nav = item.closest('.fc-tabs');
   const group = nav?.dataset?.tabGroup;
   if (!group) return;
+  if (group === 'right-panel') {
+    // 右侧主页签交给 Scroll Snap 初始化里的点击处理
+    return;
+  }
   activateTab(group, item.dataset.tab, true);
 });
+
+// 默认状态初始化：右侧交给 scroll-snap，跳过
 (function initTabDefaults(){
   ['left-panel','right-panel'].forEach(group=>{
+    if (group === 'right-panel') return; // 右侧跳过，交给 snap 初始化
     const saved = localStorage.getItem('activeTab_'+group);
     const fallback = document.querySelector(`.fc-tabs[data-tab-group="${group}"] .fc-tabs__item`)?.dataset.tab || '';
     activateTab(group, saved || fallback, false);
@@ -2301,6 +2354,20 @@ initSnapTabScrolling({
   containerId: 'left-panel-container',
   group: 'left-panel',
   persistKey: 'activeTab_left-panel'
+});
+
+// 新增：右侧主页签 Scroll Snap（不保存状态，默认“近期热门”）
+initSnapTabScrolling({
+  containerId: 'right-panel-container',
+  group: 'right-panel',
+  persistKey: null,             // 不保存状态
+  defaultTab: 'top-queries',    // 默认激活“近期热门”
+  onActiveChange: (tab) => {
+    updateRightSubseg && updateRightSubseg(tab);
+    if (tab === 'recent-updates') {
+      loadRecentUpdatesIfNeeded && loadRecentUpdatesIfNeeded();
+    }
+  }
 });
 
 /* A11y Tabs */

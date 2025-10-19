@@ -509,9 +509,7 @@ function setTheme(theme) {
     const sList = Array.isArray(chartData?.series) ? chartData.series : [];
     const xMode = currentXModeFromPayload(payload);
 
-    // CHANGED: 以容器实际宽度判定窄屏（与 legend 布局保持一致）
     const isNarrow = layoutIsNarrow();
-
     const exportBg = (payload && payload.chartBg) || getExportBg();
     const bgNormal = isFs ? exportBg : 'transparent';
 
@@ -520,8 +518,9 @@ function setTheme(theme) {
       return {
         __empty:true,
         backgroundColor: bgNormal,
-        title:{ text:'请添加数据', left:'center', top:'middle',
-          textStyle:{ color:t.axisLabel, fontFamily:t.fontFamily } },
+        title:{ text:'请 先 添 加 数 据', left:'center', top:'middle',
+          textStyle:{ color:t.axisLabel, fontFamily:t.fontFamily, fontSize: 20, fontWeight: 600 }
+        },
         toolbox:{ show:false },
         tooltip:{ show:false, triggerOn:'none' }
       };
@@ -759,8 +758,8 @@ function setTheme(theme) {
         <div class="switch-container" id="xAxisSwitchContainer">
           <div class="switch-track" id="xAxisSwitchTrack">
             <div class="switch-slider" id="xAxisSwitchSlider">
-              <span class="switch-label switch-label-right"></span>
-              <span class="switch-label switch-label-left"></span>
+              <!--<span class="switch-label switch-label-right">转速</span>-->
+              <!--<span class="switch-label switch-label-left">噪音</span>-->
             </div>
           </div>
         </div>`;
@@ -777,7 +776,9 @@ function setTheme(theme) {
 
   function updateAxisSwitchPosition(opts = {}) {
     const { force = false, animate = false } = opts;
-    if (!force && performance.now() < axisSnapSuppressUntil) return;
+    // 修改点：去掉“force 例外”，在保护窗口内一律跳过，避免 render() 的刷新把动画干掉
+    if (performance.now() < axisSnapSuppressUntil) return;
+
     const track  = getById('xAxisSwitchTrack');
     const slider = getById('xAxisSwitchSlider');
     if (!track || !slider) return;
@@ -789,7 +790,7 @@ function setTheme(theme) {
     const currType = currentXModeFromPayload(lastPayload);
     const toNoise  = (currType === 'noise_db');
 
-    slider.style.transition = animate ? 'transform .25s ease' : 'none';
+    slider.style.transition = animate ? 'transform .25s ease' : slider.style.transition || ''; // 不强行抹掉已存在的过渡
     slider.style.transform  = `translateX(${toNoise ? maxX : 0}px)`;
     track.setAttribute('aria-checked', String(toNoise));
   }
