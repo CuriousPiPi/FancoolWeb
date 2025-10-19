@@ -7,6 +7,18 @@ const LIKESET_VERIFY_MAX_AGE_MS = 5 * 60 * 1000;      // 5 分钟指纹过期
 const PERIODIC_VERIFY_INTERVAL_MS = 3 * 60 * 1000;    // 3 分钟后台触发一次检查
 const LIKE_FULL_FETCH_THRESHOLD = 20;
 
+let __themeRenderTimer = null;
+function getThemeTransitionMsRaw() {
+  try {
+    const raw = getComputedStyle(document.documentElement).getPropertyValue('--transition-speed').trim();
+    if (!raw) return 300;
+    if (raw.endsWith('ms')) return Math.max(0, parseFloat(raw));
+    if (raw.endsWith('s'))  return Math.max(0, parseFloat(raw) * 1000);
+    const n = parseFloat(raw);
+    return Number.isFinite(n) ? Math.max(0, n) : 300;
+  } catch (_) { return 300; }
+}
+
 /* 在最前阶段就写入上限标签，避免闪烁 */
 (function initMaxItemsLabel(){
   function apply(){
@@ -811,39 +823,41 @@ const themeToggle = $('#themeToggle');
 const themeIcon = $('#themeIcon');
 let currentTheme = document.documentElement.getAttribute('data-theme') || 'light';
 
+// === 主题切换 ===
 function setTheme(t){
   const prev = document.documentElement.getAttribute('data-theme');
   if (prev === t) {
     if (themeIcon) themeIcon.className = t === 'dark' ? 'fa-solid fa-sun' : 'fa-solid fa-moon';
     return;
   }
-  // 仅设置到 html，避免与 body 形成双源冲突
+  // 1) 先切换 data-theme，驱动全站 CSS 过渡
   document.documentElement.setAttribute('data-theme', t);
   if (themeIcon) themeIcon.className = t === 'dark' ? 'fa-solid fa-sun' : 'fa-solid fa-moon';
   try { localStorage.setItem('theme', t); } catch(_){}
 
-  // 写入/清理暗色随机渐变变量
-  applyDarkGradientIfNeeded();
+  // 2) 显式按“目标主题”更新暗色随机背景（light 分支不再生成/刷新任何渐变）
+  applyDarkGradientIfNeeded(t);
 
-  // 通知后端（异步）
+  // 3) 通知后端（异步）
   fetch('/api/theme', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ theme: t })
   }).catch(()=>{});
 
-  // 等两帧，确保 CSS 变量稳定后再重渲染
-  requestAnimationFrame(() => {
-    requestAnimationFrame(() => {
-      if (lastChartData) {
-        postChartData(lastChartData);
-      } else {
-        resizeChart();
-      }
-      syncTopTabsViewportHeight();
-    });
-  });
+  // 4) 等 --transition-speed 结束后再重绘图表（防抖）
+  clearTimeout(__themeRenderTimer);
+  const delay = getThemeTransitionMsRaw();
+  __themeRenderTimer = setTimeout(() => {
+    if (lastChartData) {
+      postChartData(lastChartData);
+    } else {
+      resizeChart();
+    }
+    syncTopTabsViewportHeight();
+  }, Math.max(0, delay) - 200);
 }
+
 
 // 初始化：只调用一次
 setTheme(currentTheme);
@@ -856,11 +870,7 @@ if (!window.__APP_THEME_BOUND__) {
     setTheme(currentTheme);
     // 侧栏颜色和图表兜底刷新
     window.applySidebarColors();
-    if (lastChartData) {
-      postChartData(lastChartData);
-    } else {
-      resizeChart();
-    }
+
     requestAnimationFrame(syncTopTabsViewportHeight);
   });
 }
@@ -2134,22 +2144,22 @@ function scheduleAdjust(){
    ========================================================= */
 (function mountChartRendererEarly(){
   function doMount(){
-    const el = document.getElementById('chartHost');
-    if (el && window.ChartRenderer && typeof ChartRenderer.mount === 'function') {
+    const el = document.getElementById('chartHost') || document.getElementById('chartRoot');
+    if (!el) {
+      console.warn('[ChartRenderer] 未找到图表容器：#chartHost 或 #chartRoot');
+      return;
+    }
+    if (window.ChartRenderer && typeof ChartRenderer.mount === 'function') {
       ChartRenderer.mount(el);
 
-      // NEW: 监听 X 轴切换，写回 LocalState，并按新轴刷新曲线
       if (typeof ChartRenderer.setOnXAxisChange === 'function') {
         ChartRenderer.setOnXAxisChange((next) => {
-          // 规范化
           const nx = (next === 'noise') ? 'noise_db' : next;
           try { localStorage.setItem('x_axis_type', nx); } catch(_) {}
           frontXAxisType = nx;
-          // 同步给应用状态（影响 /api/curves 的 x_axis_type）
           if (typeof LocalState?.setXAxisType === 'function') {
             try { LocalState.setXAxisType(nx); } catch(_) {}
           }
-          // 重新取数并渲染（避免沿用旧轴裁剪过的数据）
           refreshChartFromLocal(false);
         });
       }
@@ -2808,14 +2818,16 @@ function generateDarkGradient() {
   root.style.setProperty('--bg-primary', 'var(--dark-rand-base)');
 }
 
-function applyDarkGradientIfNeeded() {
-  const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+function applyDarkGradientIfNeeded(targetTheme) {
+  // 显式按“目标主题”判断；若未提供，则回退读取 DOM（兼容其它调用处）
+  const theme = targetTheme || document.documentElement.getAttribute('data-theme') || 'light';
+  const isDark = theme === 'dark';
+
   if (isDark) {
     generateDarkGradient();
   } else {
     const root = document.documentElement;
     root.style.setProperty('--dark-rand-gradient', 'none');
-    // 恢复亮色基准（如果有自定义其它亮色可以在这里改回）
     root.style.setProperty('--bg-primary', '#f9fafb');
   }
 }

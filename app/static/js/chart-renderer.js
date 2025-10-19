@@ -12,14 +12,15 @@
   let lastIsNarrow = null;
   let isFs = false;
 
-  function getCssTransitionMs(){
+  let __themeRenderTimer = null;
+  function getThemeTransitionMsRaw(){
     try {
       const raw = getComputedStyle(document.documentElement).getPropertyValue('--transition-speed').trim();
       if (!raw) return 300;
       if (raw.endsWith('ms')) return Math.max(0, parseFloat(raw));
       if (raw.endsWith('s'))  return Math.max(0, parseFloat(raw) * 1000);
       const n = parseFloat(raw);
-      return Number.isFinite(n) ? n : 300;
+      return Number.isFinite(n) ? Math.max(0, n) : 300;
     } catch(_) { return 300; }
   }
   // NEW: 追踪 root 的几何变化（位置/尺寸），用于在容器“移动但不改变尺寸”时重放置拟合气泡
@@ -278,22 +279,44 @@
   function mount(rootEl){
     root = rootEl;
     if (!root) { warnOnce('[ChartRenderer] mount(rootEl) 需要一个有效的 DOM 容器'); return; }
+
+    // 先尝试初始化 ECharts 实例
     ensureEcharts();
 
-    // 新增：首次挂载且还未收到任何数据时，渲染空图提示“请添加数据”
-    if (!lastPayload) {
-      render({
-        chartData: { x_axis_type: 'rpm', series: [] },
-        theme: (document.documentElement.getAttribute('data-theme') || 'light'),
-        chartBg: getExportBg()
-      });
-    }
+    // 首屏：等容器有实际尺寸后再做首次空图渲染，避免 0×0 时 setOption 无效
+    const ensureFirstPaint = () => {
+      try {
+        const r = root.getBoundingClientRect ? root.getBoundingClientRect() : { width:0, height:0 };
+        if ((r.width|0) > 2 && (r.height|0) > 2) {
+          if (!lastPayload) {
+            render({
+              chartData: { x_axis_type: 'rpm', series: [] },
+              theme: (document.documentElement.getAttribute('data-theme') || 'light'),
+              chartBg: getExportBg()
+            });
+          }
+          return;
+        }
+      } catch(_) {}
+      // 下帧再试（直到容器有尺寸为止）
+      requestAnimationFrame(ensureFirstPaint);
+    };
+    requestAnimationFrame(ensureFirstPaint);
   }
 
   function setTheme(theme){
     const t = String(theme || 'light').toLowerCase();
     document.documentElement.setAttribute('data-theme', t);
-    if (lastPayload) render(lastPayload);
+    if (lastPayload) {
+      lastPayload = { ...lastPayload, theme: t };
+    }
+
+    if (__themeRenderTimer) { clearTimeout(__themeRenderTimer); __themeRenderTimer = null; }
+    const delay = getThemeTransitionMsRaw();
+    __themeRenderTimer = setTimeout(() => {
+      __themeRenderTimer = null;
+      if (lastPayload) render(lastPayload);
+    }, Math.max(0, delay) - 200); // -200ms 作为对齐缓冲
   }
 
   function render(payload){
@@ -504,7 +527,7 @@
 
     const exportBg = (payload && payload.chartBg) || getExportBg();
     const bgNormal = isFs ? exportBg : 'transparent';
-    const transitionMs = getCssTransitionMs();
+    const transitionMs = getThemeTransitionMsRaw();
 
     if (!sList.length || (!showRawCurves && !showFitCurves)) {
       toggleFitUI(false);
@@ -689,20 +712,25 @@
         backgroundColor: t.tooltipBg,
         borderColor: t.tooltipBorder, borderWidth: 1, borderRadius: 12,
         textStyle: { color: t.tooltipText },
+
         position: function (pos, _params, dom) {
-          const x = Array.isArray(pos) ? pos[0] : 0;
-          const y = Array.isArray(pos) ? pos[1] : 0;
+          const gap = 12;
+          const pad = 8;
+
+          const xRel = Array.isArray(pos) ? (pos[0] || 0) : 0;
+          const yRel = Array.isArray(pos) ? (pos[1] || 0) : 0;
+
+          const rr = (root && root.getBoundingClientRect) ? root.getBoundingClientRect() : { left: 0, top: 0 };
+          let left = rr.left + xRel + gap;
+          let top  = rr.top  + yRel + gap;
+
           const vw = window.innerWidth  || document.documentElement.clientWidth || 0;
           const vh = window.innerHeight || document.documentElement.clientHeight || 0;
           const dw = dom?.offsetWidth  || 0;
           const dh = dom?.offsetHeight || 0;
-          const pad = 8, gap = 12;
 
-          let left = x + gap;
-          let top  = y + gap;
-
-          if (left + dw > vw - pad) left = Math.max(pad, x - gap - dw);
-          if (top  + dh > vh - pad) top  = Math.max(pad, y - gap - dh);
+          if (left + dw > vw - pad) left = Math.max(pad, left - gap - dw);
+          if (top  + dh > vh - pad) top  = Math.max(pad, top  - gap - dh);
           if (left < pad) left = pad;
           if (top  < pad) top  = pad;
 
