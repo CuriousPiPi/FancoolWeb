@@ -37,14 +37,13 @@ html, body { height:100%; overflow-x:hidden; }
   --text-secondary:#4b5563;
   --border-color:#e5e7eb;
   --shadow-color:rgba(0,0,0,0.12);
-  --transition-speed:0.28s;
-
   /* 动态暗色渐变占位：默认无（light 模式不会显示） */
   --dark-rand-gradient:none;
   /* 暗色主题时 JS 会写入 --dark-rand-base 作为真正的底色（导出等回退） */
   --dark-rand-base:#111827;
 
-  --transition-speed:0.28s;
+  --transition-speed:.25s;
+  --transition-speed-bg:.5s;
 
   --toast-bg:#ffffff;
   --toast-border:#e5e7eb;
@@ -105,21 +104,41 @@ html, body { height:100%; overflow-x:hidden; }
   --tooltip-shadow:0 8px 28px rgba(0,0,0,.45);
 }
 
+a, p, button {
+  color: var(--text-primary);
+  transition: color var(--transition-speed-bg) ease, background-color var(--transition-speed-bg) ease, border-color var(--transition-speed-bg) ease;
+}
+
 /* ===== 修改：拆分背景，允许注入渐变 ===== */
 body {
   /* 基础底色：亮色使用 --bg-primary；暗色时 JS 会把 --dark-rand-base 改成深色并保留在 background-color */
   background-color:var(--bg-primary)!important;
   /* 渐变层：默认 none，暗色模式 JS 写入 --dark-rand-gradient */
-  background-image:var(--dark-rand-gradient)!important;
-  background-attachment:fixed;
-  background-size:cover;
-  background-repeat:no-repeat;
-
   color:var(--text-primary);
   font-family:system-ui,-apple-system,"Segoe UI","Helvetica Neue","Microsoft YaHei",Arial,sans-serif;
-  transition:background-color .5s, color .3s;
-  /* 给渐变出现一个轻微淡入体验 */
+  transition:background-color var(--transition-speed-bg) ease, color var(--transition-speed-bg) ease;
   animation:fc-bg-fade-in .6s ease;
+}
+
+/* 渐变层，用透明度过渡淡入/淡出 */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  background-image: var(--dark-rand-gradient);
+  background-size: cover;
+  background-repeat: no-repeat;
+  background-attachment: fixed;         /* 确保随视口固定，不跟随滚动抖动 */
+  opacity: var(--grad-opacity, 0);
+  transition: opacity var(--transition-speed-bg) ease; /* 与背景色时长一致 */
+  will-change: opacity;
+  z-index: -1; /* 放在 body 背景之上、普通内容（默认 z-index:auto）之下的安全层级 */
+}
+
+/* 深色主题时让渐变层显现 */
+[data-theme="dark"] {
+  --grad-opacity: 1;
 }
 
 @keyframes fc-bg-fade-in {
@@ -542,7 +561,7 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
   display:flex;
   flex-direction:column;
   transform:translateX(0);
-  transition:transform var(--transition-speed) ease, width .12s ease;
+  transition:transform 0.25s ease;
   overflow:hidden;
 }
 #sidebar.collapsed { transform:translateX(-100%); }

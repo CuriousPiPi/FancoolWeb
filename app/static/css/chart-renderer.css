@@ -26,7 +26,7 @@
   --shadow-strong:0 8px 24px rgba(0,0,0,0.45);
 }
 
- /*x轴切换开关*/
+ /*x轴切换开关
 .chart-xaxis-overlay{
   position:absolute;
   z-index:200;
@@ -85,7 +85,7 @@
 .switch-track,
 .switch-slider {
   touch-action: none;
-}
+}*/
 
 .fit-buttons{
   position: absolute;
