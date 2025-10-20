@@ -204,3 +204,32 @@
     text-align: center;
   }
 }
+
+/* 6) 右侧主页签：横向滑动切换（Scroll Snap） */
+#right-panel-container {
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x mandatory;
+  scroll-behavior: smooth;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  overscroll-behavior-y: auto;
+  scrollbar-width: none;
+  touch-action: pan-x pan-y;
+  /* 让内部 sticky 元素以内部滚动容器为参照，不影响内部纵向滚动容器 */
+}
+#right-panel-container::-webkit-scrollbar { display: none; }
+
+#right-panel-wrapper {
+  display: flex;
+  width: auto;         /* 避免固定 200%，支持任意数量页签 */
+  min-width: 100%;
+  height: 100%;
+}
+
+#right-panel-wrapper .fc-tab-pane {
+  flex: 0 0 100%;
+  width: 100%;
+  scroll-snap-align: start;
+  scroll-snap-stop: always;
+}

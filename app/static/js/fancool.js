@@ -18,7 +18,6 @@ const LIKE_FULL_FETCH_THRESHOLD = 20;
   }
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', apply, { once:true });
-    applyDarkGradientIfNeeded();
   } else {
     apply();
   }
@@ -92,7 +91,8 @@ function initSnapTabScrolling(opts){
     persistKey,
     vertical = false,
     onActiveChange,
-    clickScrollBehavior = 'smooth'
+    clickScrollBehavior = 'smooth',
+    defaultTab 
   } = opts || {};
   const container = document.getElementById(containerId);
   const nav = document.querySelector(`.fc-tabs[data-tab-group="${group}"]`);
@@ -136,6 +136,8 @@ function initSnapTabScrolling(opts){
   });
 
   let initIdx = 0;
+
+  // 1) persistKey 优先
   if (persistKey){
     try {
       const saved = localStorage.getItem(persistKey);
@@ -144,10 +146,21 @@ function initSnapTabScrolling(opts){
         if (found >= 0) initIdx = found;
       }
     } catch(_){}
-  } else {
+  }
+
+  // 2) 没命中持久化，用 defaultTab
+  if (initIdx === 0 && defaultTab) {
+    const foundByDefault = tabs.findIndex(t=>t.dataset.tab === defaultTab);
+    if (foundByDefault >= 0) initIdx = foundByDefault;
+  }
+
+  // 3) 没有 defaultTab，且导航自带 .active，则跟随 .active
+  if (initIdx === 0) {
     const activeIdx = tabs.findIndex(t=>t.classList.contains('active'));
     if (activeIdx >= 0) initIdx = activeIdx;
   }
+
+  // 4) 兜底 0
   requestAnimationFrame(()=>activateIdx(initIdx, false, false));
 }
 
@@ -723,8 +736,41 @@ function loadRecentLikesIfNeeded(){
 /* =========================================================
    顶部 / 左 / 右三个 Tab 管理
    ========================================================= */
+(function initRightPanelSnapTabs(){
+  function run(){
+    const card = document.querySelector('.fc-right-card');
+    if (!card) return;
+    const container = card.querySelector('.fc-tab-container');
+    const wrapper   = card.querySelector('.fc-tab-wrapper');
+    if (!container || !wrapper) return;
+
+    // 确保有 id
+    if (!container.id) container.id = 'right-panel-container';
+    if (!wrapper.id)   wrapper.id   = 'right-panel-wrapper';
+
+    // 初始化（不保存状态）。默认激活哪一页由 HTML 中 .active 决定，建议把“近期热门”标注为 active
+    initSnapTabScrolling({
+      containerId: container.id,
+      group: 'right-panel',
+      persistKey: null,
+      onActiveChange: (tab) => {
+        // 保持既有副作用：子页签显隐 + 懒加载
+        if (typeof updateRightSubseg === 'function') updateRightSubseg(tab);
+        if (tab === 'recent-updates' && typeof loadRecentUpdatesIfNeeded === 'function') {
+          loadRecentUpdatesIfNeeded();
+        }
+      },
+      clickScrollBehavior: 'smooth'
+    });
+  }
+  if (document.readyState !== 'loading') run();
+  else document.addEventListener('DOMContentLoaded', run, { once:true });
+})();
+
 function activateTab(group, tabName, animate = false) {
-  if (group === 'sidebar-top' || group === 'left-panel') return;
+  // 右侧主容器启用 snap 后，交由 initSnapTabScrolling 接管
+  if (group === 'sidebar-top' || group === 'left-panel' || (group === 'right-panel' && window.__RIGHT_PANEL_SNAP_ON)) return;
+
   const nav = document.querySelector(`.fc-tabs[data-tab-group="${group}"]`);
   const wrapper = document.getElementById(`${group}-wrapper`);
   if (!nav || !wrapper) return;
@@ -747,7 +793,6 @@ function activateTab(group, tabName, animate = false) {
   }
   if (group === 'right-panel') {
     updateRightSubseg(tabName);
-    // 新增：选中“近期更新”时触发懒加载
     if (tabName === 'recent-updates') {
       loadRecentUpdatesIfNeeded();
     }
@@ -759,10 +804,17 @@ document.addEventListener('click',(e)=>{
   const nav = item.closest('.fc-tabs');
   const group = nav?.dataset?.tabGroup;
   if (!group) return;
+  if (group === 'right-panel') {
+    // 右侧主页签交给 Scroll Snap 初始化里的点击处理
+    return;
+  }
   activateTab(group, item.dataset.tab, true);
 });
+
+// 默认状态初始化：右侧交给 scroll-snap，跳过
 (function initTabDefaults(){
   ['left-panel','right-panel'].forEach(group=>{
+    if (group === 'right-panel') return; // 右侧跳过，交给 snap 初始化
     const saved = localStorage.getItem('activeTab_'+group);
     const fallback = document.querySelector(`.fc-tabs[data-tab-group="${group}"] .fc-tabs__item`)?.dataset.tab || '';
     activateTab(group, saved || fallback, false);
@@ -809,30 +861,76 @@ try { window.__APP?.sidebar?.refreshToggleUI?.(); } catch(_) {}
    ========================================================= */
 const themeToggle = $('#themeToggle');
 const themeIcon = $('#themeIcon');
-let currentTheme = document.documentElement.getAttribute('data-theme') || 'light';
 
-function setTheme(t){
-  const prev = document.documentElement.getAttribute('data-theme');
-  if (prev === t) {
-    if (themeIcon) themeIcon.className = t === 'dark' ? 'fa-solid fa-sun' : 'fa-solid fa-moon';
-    return;
+// 替换 currentTheme 的初始化为：
+let currentTheme = (function(){
+  return (window.ThemePref && typeof window.ThemePref.resolve === 'function')
+    ? window.ThemePref.resolve()
+    : (document.documentElement.getAttribute('data-theme') || 'light');
+})();
+
+let THEME_OP_ID = 0;
+
+function setTheme(t) {
+  const root = document.documentElement;
+  const prev = root.getAttribute('data-theme') || 'light';
+  const myId = ++THEME_OP_ID;
+
+  // 每次进入深色都生成全新的渐变
+  if (t === 'dark') {
+    // 关键修复：清理可能遗留的浅色内联变量，避免覆盖 dark 变量
+    root.style.removeProperty('--bg-primary');
+
+    generateDarkGradient();
+
+    // 锁住渐变层为可见，避免切换过程中掉到 0
+    root.style.setProperty('--grad-opacity', '1');
+
+    // 下一帧切 data-theme
+    requestAnimationFrame(() => {
+      root.setAttribute('data-theme', 'dark');
+      // 交由 [data-theme=dark] 的 --grad-opacity:1 接管，微任务后清理内联
+      setTimeout(() => {
+        if (myId !== THEME_OP_ID) return; // 防止旧清理落到新主题
+        root.style.removeProperty('--grad-opacity');
+      }, 0);
+    });
+  } else {
+    // 进入浅色：避免露底
+    root.style.setProperty('--bg-primary', '#f9fafb'); // 先给浅色底
+    root.style.setProperty('--grad-opacity', '1');     // 渐变仍可见以便平滑淡出
+
+    // 持有当前渐变，确保淡出过程中不丢失
+    const currGrad = (getComputedStyle(root).getPropertyValue('--dark-rand-gradient') || '').trim();
+    if (currGrad && currGrad !== 'none') {
+      root.style.setProperty('--dark-rand-gradient', currGrad);
+    }
+
+    // 下一帧切主题，再下一帧淡出渐变
+    requestAnimationFrame(() => {
+      root.setAttribute('data-theme', 'light');
+      requestAnimationFrame(() => {
+        root.style.setProperty('--grad-opacity', '0');
+        // 动画结束后清理临时变量，并清空渐变，确保下次进入 dark 一定会生成新渐变
+        setTimeout(() => {
+          if (myId !== THEME_OP_ID) return; // 防止竞态
+          root.style.removeProperty('--grad-opacity');
+          root.style.removeProperty('--bg-primary');
+          root.style.removeProperty('--dark-rand-gradient'); // 关键：清掉以便下次重新生成
+        }, 520); // 略大于 .5s 过渡
+      });
+    });
   }
-  // 仅设置到 html，避免与 body 形成双源冲突
-  document.documentElement.setAttribute('data-theme', t);
+
+  // 同步图标
   if (themeIcon) themeIcon.className = t === 'dark' ? 'fa-solid fa-sun' : 'fa-solid fa-moon';
-  try { localStorage.setItem('theme', t); } catch(_){}
 
-  // 写入/清理暗色随机渐变变量
-  applyDarkGradientIfNeeded();
+  // 统一保存 + 上报（本地 + 后端）
+  if (window.ThemePref && typeof window.ThemePref.save === 'function') {
+    window.ThemePref.save(t, { notifyServer: true });
+  }
 
-  // 通知后端（异步）
-  fetch('/api/theme', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ theme: t })
-  }).catch(()=>{});
-
-  // 等两帧，确保 CSS 变量稳定后再重渲染
+  // 等两帧再刷新图表/布局（保留原逻辑）
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
       if (lastChartData) {
@@ -2274,6 +2372,20 @@ initSnapTabScrolling({
   persistKey: 'activeTab_left-panel'
 });
 
+// 新增：右侧主页签 Scroll Snap（不保存状态，默认“近期热门”）
+initSnapTabScrolling({
+  containerId: 'right-panel-container',
+  group: 'right-panel',
+  persistKey: null,             // 不保存状态
+  defaultTab: 'top-queries',    // 默认激活“近期热门”
+  onActiveChange: (tab) => {
+    updateRightSubseg && updateRightSubseg(tab);
+    if (tab === 'recent-updates') {
+      loadRecentUpdatesIfNeeded && loadRecentUpdatesIfNeeded();
+    }
+  }
+});
+
 /* A11y Tabs */
 (function initA11yTabs(){
   const TAB_GROUP_SELECTOR = '.fc-tabs[data-tab-group]';
@@ -2774,6 +2886,7 @@ async function logNewPairs(addedDetails, source = 'unknown') {
   await window.Analytics.logQueryPairs(source, pairs);
 }
 
+
 function generateDarkGradient() {
   // 随机主色 & 副色 (HSL)
   const h1 = Math.floor(Math.random() * 360);
@@ -2790,32 +2903,12 @@ function generateDarkGradient() {
 
   const stop1 = `hsl(${h1} ${s1.toFixed(1)}% ${l1.toFixed(1)}%)`;
   const stop2 = `hsl(${h2} ${s2.toFixed(1)}% ${l2.toFixed(1)}%)`;
-
-  // 选择更暗的那一个作为基准底色
-  const baseIsFirst = l1 <= l2;
-  const base = baseIsFirst ? stop1 : stop2;
-
   const gradient = `linear-gradient(${angle}deg, ${stop1} 0%, ${stop2} 100%)`;
 
   const root = document.documentElement;
+  // 只设置渐变，不再改 --bg-primary，底色交给 CSS 里的 [data-theme="dark"] --bg-primary
   root.style.setProperty('--dark-rand-gradient', gradient);
-  root.style.setProperty('--dark-rand-base', base);
-
-  // 覆盖 body 的主背景色变量（这样 body background-color 仍与变量体系统一）
-  // 这里不直接改 --bg-primary，以免影响其它组件逻辑；而是直接设置 body 的 background-color
-  // 但因 CSS 中 body 使用 var(--bg-primary) 作为 background-color，
-  // 我们通过同步 --bg-primary 的值来让 getComputedStyle(body).backgroundColor 返回基准色。
-  root.style.setProperty('--bg-primary', 'var(--dark-rand-base)');
-}
-
-function applyDarkGradientIfNeeded() {
-  const isDark = document.documentElement.getAttribute('data-theme') === 'dark';
-  if (isDark) {
-    generateDarkGradient();
-  } else {
-    const root = document.documentElement;
-    root.style.setProperty('--dark-rand-gradient', 'none');
-    // 恢复亮色基准（如果有自定义其它亮色可以在这里改回）
-    root.style.setProperty('--bg-primary', '#f9fafb');
-  }
+  // 留下一个可供导出/其它用途的基色（可选，不参与底色）
+  const baseIsFirst = l1 <= l2;
+  root.style.setProperty('--dark-rand-base', baseIsFirst ? stop1 : stop2);
 }
