@@ -7,6 +7,22 @@ const LIKESET_VERIFY_MAX_AGE_MS = 5 * 60 * 1000;      // 5 分钟指纹过期
 const PERIODIC_VERIFY_INTERVAL_MS = 3 * 60 * 1000;    // 3 分钟后台触发一次检查
 const LIKE_FULL_FETCH_THRESHOLD = 20;
 
+/* 在最前阶段就写入上限标签，避免闪烁 */
+(function initMaxItemsLabel(){
+  function apply(){
+    const el = document.getElementById('maxItemsLabel');
+    if (el && !el.dataset._inited){
+      el.textContent = FRONT_MAX_ITEMS;
+      el.dataset._inited = '1';
+    }
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', apply, { once:true });
+  } else {
+    apply();
+  }
+})();
+
 (async function fetchAppConfig(){
   try {
     const r = await fetch('/api/config');
