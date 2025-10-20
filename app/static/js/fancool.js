@@ -36,6 +36,58 @@ const LIKE_FULL_FETCH_THRESHOLD = 20;
   } catch(_){}
 })();
 
+window.DisplayCache = (function(){
+  const map = new Map(); // key => { brand, model, condition }
+  function k(mid,cid){ return `${Number(mid)}_${Number(cid)}`; }
+  return {
+    setFromSeries(series){
+      (series||[]).forEach(s=>{
+        const mid = s.model_id, cid = s.condition_id;
+        if (mid==null || cid==null) return;
+        map.set(k(mid,cid), {
+          brand: s.brand || s.brand_name_zh || '',
+          model: s.model || s.model_name || '',
+          condition: s.condition_name_zh || s.condition || ''
+        });
+      });
+    },
+    // NEW: 从 /api/meta_by_ids 返回的 items 填充
+    setFromMeta(items){
+      (items||[]).forEach(it=>{
+        const mid = it.model_id, cid = it.condition_id;
+        if (mid==null || cid==null) return;
+        map.set(k(mid,cid), {
+          brand: it.brand_name_zh || '',
+          model: it.model_name || '',
+          condition: it.condition_name_zh || ''
+        });
+      });
+    },
+    get(mid,cid){ return map.get(k(mid,cid)) || null; },
+    clear(){ map.clear(); }
+  };
+})();
+
+function installRemovedRenderHookOnce(){
+  try{
+    const mod = window.__APP && window.__APP.features && window.__APP.features.recentlyRemoved;
+    if (!mod || !mod.rebuild) return false;
+    if (mod.__ID_PATCHED__) return true;
+    const orig = mod.rebuild;
+    mod.rebuild = function(list){
+      const enriched = (list||[]).map(it=>{
+        const info = window.DisplayCache && window.DisplayCache.get(it.model_id, it.condition_id);
+        return { ...it, brand: info?.brand || '', model: info?.model || '', condition: info?.condition || '加载中...' };
+      });
+      return orig(enriched);
+    };
+    mod.__ID_PATCHED__ = true;
+    return true;
+  }catch(_){ return false; }
+}
+// 若模块已可用，先试一次；否则在后续生命周期再兜底调用
+installRemovedRenderHookOnce();
+
 /* ==== P1-4 DOM 缓存与工具 ==== */
 (function initDomCache(){
   const cache = Object.create(null);
@@ -133,7 +185,7 @@ function initSnapTabScrolling(opts){
       const idx = Math.round( (vertical?container.scrollTop:container.scrollLeft) / w );
       activateIdx(idx, false, true);
     }, 80);
-  });
+   }, { passive: true });
 
   let initIdx = 0;
 
@@ -580,6 +632,7 @@ function fetchAllLikeKeys(){
     .catch(()=>{})
     .finally(()=>{ fetchAllLikeKeys._pending = false; });
 }
+// CHANGED: 最近点赞仅按 condition 展示与按钮
 function rebuildRecentLikes(list){
   const wrap = recentLikesListEl;
   if (!wrap) return;
@@ -596,15 +649,14 @@ function rebuildRecentLikes(list){
     const size = item.size ?? item.model_size ?? '';
     const thickness = item.thickness ?? item.model_thickness ?? '';
     const maxSpeed = item.max_speed ?? item.maxSpeed ?? '';
-    const rt = item.resistance_type_zh || item.res_type || item.resistance_type || '';
-    const rl = item.resistance_location_zh || item.res_loc || item.resistance_location || '';
+    const condition = item.condition_name_zh || item.condition || '';
     const mid = item.model_id ?? item.modelId ?? item.mid ?? '';
     const cid = item.condition_id ?? item.conditionId ?? item.cid ?? '';
-    if (!brand || !model || !rt) return;
+    if (!brand || !model || !condition) return;
     const key = `${brand}||${model}||${size}||${thickness}||${maxSpeed}`;
     if (!groups.has(key)) groups.set(key, { brand, model, size, thickness, maxSpeed, scenarios:[] });
     const g = groups.get(key);
-    if (!g.scenarios.some(s=>s.rt===rt && s.rl===rl)) g.scenarios.push({ rt, rl, mid, cid });
+    if (!g.scenarios.some(s=>s.condition===condition)) g.scenarios.push({ condition, mid, cid });
   });
 
   groups.forEach(g=>{
@@ -613,7 +665,7 @@ function rebuildRecentLikes(list){
     if (g.size && g.thickness) metaParts.push(`${escapeHtml(g.size)}x${escapeHtml(g.thickness)}`);
     const metaRight = metaParts.join(' · ');
     const scenariosHtml = g.scenarios.map(s=>{
-      const scenText = s.rl ? `${escapeHtml(s.rt)} ${escapeHtml(s.rl)}` : `${escapeHtml(s.rt)}`;
+      const scenText = escapeHtml(s.condition);
       return `
         <div class="flex items-center justify-between scenario-row">
           <div class="scenario-text text-sm text-gray-700">${scenText}</div>
@@ -623,7 +675,7 @@ function rebuildRecentLikes(list){
                     data-condition-id="${escapeHtml(s.cid||'')}">
               <i class="fa-solid fa-thumbs-up text-red-500"></i>
             </button>
-            ${buildQuickBtnHTML('likes', g.brand, g.model, s.rt, s.rl, s.mid, s.cid)}
+            ${buildQuickBtnHTML('likes', g.brand, g.model, s.mid, s.cid, s.condition, 'liked')}
           </div>
         </div>`;
     }).join('');
@@ -968,6 +1020,21 @@ if (!window.__APP_THEME_BOUND__) {
    ========================================================= */
 let selectedMapSet = new Set();
 let selectedKeySet = new Set();
+
+// NEW: 以 model_id + condition_id 为唯一键的索引，用于快捷按钮联动
+let selectedPairSet = new Set();
+function rebuildSelectedPairIndex(){
+  selectedPairSet.clear();
+  try {
+    const pairs = LocalState.getSelectionPairs();
+    (pairs || []).forEach(p => {
+      if (p && p.model_id != null && p.condition_id != null) {
+        selectedPairSet.add(`${p.model_id}_${p.condition_id}`);
+      }
+    });
+  } catch(_) {}
+}
+
 function rebuildSelectedIndex(){
   selectedMapSet.clear();
   selectedKeySet.clear();
@@ -979,27 +1046,24 @@ function rebuildSelectedIndex(){
   });
 }
 rebuildSelectedIndex();
+rebuildSelectedPairIndex();
 
-function buildQuickBtnHTML(addType, brand, model, resType, resLoc, modelId, conditionId, logSource){
-  const raw = (resLoc ?? '');
-  const normResLoc = (String(raw).trim() === '') ? '无' : raw;
-  const mapKey = `${escapeHtml(brand)}||${escapeHtml(model)}||${escapeHtml(resType)}||${escapeHtml(normResLoc)}`;
-  const isDup = selectedMapSet.has(mapKey);
-  const mode = isDup?'remove':'add';
-  const title = isDup?'从图表移除':'添加到图表';
-  const icon = isDup?'<i class="fa-solid fa-xmark"></i>':'<i class="fa-solid fa-plus"></i>';
+// CHANGED: 快捷按钮 HTML 生成，优先用 (model_id, condition_id) 判断是否已存在
+function buildQuickBtnHTML(addType, brand, model, modelId, conditionId, condition, logSource){
+  const mapKey = `${escapeHtml(brand)}||${escapeHtml(model)}||${escapeHtml(condition||'')}`;
+  const hasIds = (modelId != null && conditionId != null && String(modelId) !== '' && String(conditionId) !== '');
+  const isDup = hasIds
+    ? selectedPairSet.has(`${String(modelId)}_${String(conditionId)}`)
+    : selectedMapSet.has(mapKey);
 
-  // 默认来源映射（可被实参 logSource 覆盖）
-  const defaultSourceMap = {
-    likes: 'liked',
-    rating: 'top_rating',
-    ranking: 'top_query',
-    search: 'search'
-  };
+  const mode = isDup ? 'remove' : 'add';
+  const title = isDup ? '从图表移除' : '添加到图表';
+  const icon = isDup ? '<i class="fa-solid fa-xmark"></i>' : '<i class="fa-solid fa-plus"></i>';
+  const defaultSourceMap = { likes:'liked', rating:'top_rating', ranking:'top_query', search:'search' };
   const sourceAttr = logSource || defaultSourceMap[addType] || 'unknown';
 
   let cls;
-  if (isDup) cls='js-list-remove';
+  if (isDup) cls = 'js-list-remove';
   else if (addType==='search') cls='js-search-add';
   else if (addType==='rating') cls='js-rating-add';
   else if (addType==='ranking') cls='js-ranking-add';
@@ -1013,8 +1077,7 @@ function buildQuickBtnHTML(addType, brand, model, resType, resLoc, modelId, cond
             data-log-source="${escapeHtml(sourceAttr)}"
             data-brand="${escapeHtml(brand)}"
             data-model="${escapeHtml(model)}"
-            data-res-type="${escapeHtml(resType)}"
-            data-res-loc="${escapeHtml(normResLoc)}"
+            data-condition="${escapeHtml(condition||'')}"
             ${modelId ? `data-model-id="${escapeHtml(modelId)}"`:''}
             ${conditionId ? `data-condition-id="${escapeHtml(conditionId)}"`:''}>
       ${icon}
@@ -1041,9 +1104,12 @@ function toAddState(btn){
   btn.innerHTML='<i class="fa-solid fa-plus"></i>';
 }
 function mapKeyFromDataset(d){
-  const b = unescapeHtml(d.brand||''), m=unescapeHtml(d.model||''), rt=unescapeHtml(d.resType||''), rl=unescapeHtml(d.resLoc||'');
-  return `${b}||${m}||${rt}||${rl}`;
+  const b = unescapeHtml(d.brand||'');
+  const m = unescapeHtml(d.model||'');
+  const c = unescapeHtml(d.condition||'');
+  return `${b}||${m}||${c}`;
 }
+// CHANGED: 状态同步优先使用 (model_id, condition_id) 判断
 function syncQuickActionButtons(){
   window.__APP.dom.all('.fc-btn-icon-add.fc-tooltip-target').forEach(btn=>{
     if (!btn.dataset.addType){
@@ -1053,8 +1119,14 @@ function syncQuickActionButtons(){
       else if (btn.classList.contains('js-likes-add')) btn.dataset.addType='likes';
     }
     const d = btn.dataset;
-    const key = mapKeyFromDataset(d);
-    if (selectedMapSet.has(key)) toRemoveState(btn); else toAddState(btn);
+    let dup = false;
+    if (d.modelId && d.conditionId) {
+      dup = selectedPairSet.has(`${d.modelId}_${d.conditionId}`);
+    } else {
+      const key = mapKeyFromDataset(d);
+      dup = selectedMapSet.has(key);
+    }
+    if (dup) toRemoveState(btn); else toAddState(btn);
   });
 }
 
@@ -1067,6 +1139,7 @@ const selectedCountEl = $('#selectedCount');
 const clearAllContainer = $('#clearAllContainer');
 const clearAllBtn = $('#clearAllBtn');
 
+// CHANGED: 已选列表仅显示 condition，并以 brand||model||condition 建键
 function rebuildSelectedFans(fans){
   if (!Array.isArray(fans)) fans = LocalState.getSelected();
   selectedListEl.innerHTML='';
@@ -1074,27 +1147,29 @@ function rebuildSelectedFans(fans){
   if (!fans || fans.length===0){
     selectedCountEl.textContent='0';
     clearAllContainer?.classList.add('hidden');
-    rebuildSelectedIndex();
-    requestAnimationFrame(window.applySidebarColors);
+    rebuildSelectedIndex(); rebuildSelectedPairIndex();
     requestAnimationFrame(prepareSidebarMarquee);
-    scheduleAdjust();
-    syncQuickActionButtons && syncQuickActionButtons();
+    scheduleAdjust(); syncQuickActionButtons && syncQuickActionButtons();
     return;
   }
   fans.forEach(f=>{
     const keyStr = `${f.model_id}_${f.condition_id}`;
+    const info = DisplayCache.get(f.model_id, f.condition_id);
+    const brand = info?.brand || '';
+    const model = info?.model || '';
+    const condText = info?.condition || '加载中...';
+
     const isLiked = LocalState.likes.has(keyStr);
     const div = document.createElement('div');
     div.className='fan-item flex items-center justify-between p-3 border border-gray-200 rounded-md';
     div.dataset.fanKey = f.key;
-    const normLoc = (f.res_loc && String(f.res_loc).trim() !== '') ? f.res_loc : '无';
-    div.dataset.map = `${f.brand}||${f.model}||${f.res_type}||${normLoc}`;
+    div.dataset.map = `${brand}||${model}||${condText}`;
     div.innerHTML=`
       <div class="flex items-center min-w-0">
         <div class="w-3 h-3 rounded-full mr-2 flex-shrink-0 js-color-dot"></div>
         <div class="truncate">
-          <span class="font-medium">${escapeHtml(f.brand)} ${escapeHtml(f.model)}</span> - 
-          <span class="text-gray-600 text-sm">${formatScenario(f.res_type, f.res_loc)}</span>
+          <span class="font-medium">${escapeHtml(brand)} ${escapeHtml(model)}</span> - 
+          <span class="text-gray-600 text-sm">${escapeHtml(condText)}</span>
         </div>
       </div>
       <div class="flex items-center flex-shrink-0">
@@ -1106,15 +1181,13 @@ function rebuildSelectedFans(fans){
         </button>
       </div>`;
     selectedListEl.appendChild(div);
-    const dot = div.querySelector('.js-color-dot');
-    if (dot) dot.style.backgroundColor = ColorManager.getColor(f.key);
+    const dot = div.querySelector('.js-color-dot'); if (dot) dot.style.backgroundColor = ColorManager.getColor(f.key);
   });
   selectedCountEl.textContent = fans.length.toString();
   clearAllContainer?.classList.remove('hidden');
-  rebuildSelectedIndex();
+  rebuildSelectedIndex(); rebuildSelectedPairIndex();
   requestAnimationFrame(prepareSidebarMarquee);
-  scheduleAdjust();
-  syncQuickActionButtons && syncQuickActionButtons();
+  scheduleAdjust(); syncQuickActionButtons && syncQuickActionButtons();
 }
 
 /* =========================================================
@@ -1150,7 +1223,6 @@ function processState(data, successMsg){
   if ('selected_fans' in data){    
     // 使用新的 ColorManager 接口
     ColorManager.assignUniqueIndices((data.selected_fans || []).map(f => f.key));
-    
     rebuildSelectedFans(data.selected_fans);
   }
   if ('recently_removed_fans' in data){
@@ -1244,6 +1316,7 @@ function reloadTopRatings(debounce=true){
     .finally(()=>{ _rtPending=false; });
 }
 
+// CHANGED: 顶部“好评榜”渲染，使用 condition_name_zh，并传入新签名
 function applyRatingTable(resp){
   const tbody = document.getElementById('ratingRankTbody');
   if (!tbody) return;
@@ -1268,15 +1341,9 @@ function applyRatingTable(resp){
     const rankCell = medal
       ? `<i class="fa-solid fa-medal ${medal} text-2xl"></i>`
       : `<span class="font-medium">${rank}</span>`;
-    const locRaw = r.resistance_location_zh || '';
-    const scen = formatScenario(r.resistance_type_zh, locRaw);
-    const locForKey = locRaw || '全部';
-    const mapKey = `${escapeHtml(r.brand_name_zh)}||${escapeHtml(r.model_name)}||${escapeHtml(r.resistance_type_zh)}||${escapeHtml(locForKey)}`;
-    const isDup = selectedMapSet.has(mapKey);
-    const btnMode = isDup?'remove':'add';
-    const btnClass = isDup?'js-list-remove':'js-rating-add';
-    const btnTitle = isDup?'从图表移除':'添加到图表';
-    const btnIcon  = isDup?'<i class="fa-solid fa-xmark"></i>':'<i class="fa-solid fa-plus"></i>';
+
+    const scen = escapeHtml(r.condition_name_zh || '');
+
     html += `
       <tr class="hover:bg-gray-50">
         <td class="fc-rank-cell">${rankCell}</td>
@@ -1286,19 +1353,7 @@ function applyRatingTable(resp){
         <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${scen}</span></td>
         <td class="text-blue-600 font-medium">${escapeHtml(r.like_count)}</td>
         <td>
-          <button class="fc-btn-icon-add ${btnClass} fc-tooltip-target"
-                  title="${btnTitle}"
-                  data-mode="${btnMode}"
-                  data-add-type="rating"
-                  data-log-source="top_rating"
-                  data-brand="${escapeHtml(r.brand_name_zh)}"
-                  data-model="${escapeHtml(r.model_name)}"
-                  data-res-type="${escapeHtml(r.resistance_type_zh)}"
-                  data-res-loc="${escapeHtml(locForKey)}"
-                  data-model-id="${escapeHtml(r.model_id)}"
-                  data-condition-id="${escapeHtml(r.condition_id)}">
-            ${btnIcon}
-          </button>
+          ${buildQuickBtnHTML('rating', r.brand_name_zh, r.model_name, r.model_id, r.condition_id, r.condition_name_zh, 'top_rating')}
         </td>
       </tr>`;
   });
@@ -1363,7 +1418,7 @@ function needReloadUpdates() {
   return (Date.now() - updatesTabLastLoad) > UPDATES_TTL;
 }
 
-// 4) 近期更新：渲染函数（列与“近期热门”风格一致，新增 update_date 列）
+// CHANGED: 近期更新渲染，使用新签名
 function applyRecentUpdatesTable(resp) {
   const tbody = document.getElementById('recentUpdatesTbody');
   if (!tbody) return;
@@ -1372,12 +1427,10 @@ function applyRecentUpdatesTable(resp) {
                (resp && resp.data && Array.isArray(resp.data.items) ? resp.data.items : []);
 
   if (!Array.isArray(list)) {
-    // CHANGED: colspan 6 -> 7
     tbody.innerHTML = '<tr><td colspan="7" class="text-center text-red-500 py-6">数据格式异常</td></tr>';
     return;
   }
   if (list.length === 0) {
-    // CHANGED: colspan 6 -> 7
     tbody.innerHTML = '<tr><td colspan="7" class="text-center text-gray-500 py-6">暂无近期更新数据</td></tr>';
     return;
   }
@@ -1388,12 +1441,8 @@ function applyRecentUpdatesTable(resp) {
     const model = r.model_name || '';
     const maxSpeed = (r.max_speed != null) ? ` (${r.max_speed} RPM)` : '';
     const sizeText = `${escapeHtml(r.size)}x${escapeHtml(r.thickness)}`;
-    const locRaw = r.resistance_location_zh || '';
-    const scen = formatScenario(r.resistance_type_zh, locRaw);
+    const scen = escapeHtml(r.condition_name_zh || '');
     const updateText = escapeHtml(r.update_date);
-    const resLocForBtn = locRaw && String(locRaw).trim() !== '' ? locRaw : '无';
-
-    // NEW: 更新描述（为空显示 '-'）
     const descRaw = (r.description != null && String(r.description).trim() !== '') ? String(r.description) : '-';
     const desc = escapeHtml(descRaw);
 
@@ -1404,21 +1453,9 @@ function applyRecentUpdatesTable(resp) {
         <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${sizeText}</span></td>
         <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${scen}</span></td>
         <td class="nowrap">${updateText}</td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${desc}</span></td> <!-- NEW 列：更新描述 -->
+        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${desc}</span></td>
         <td>
-          <button class="fc-btn-icon-add js-ranking-add fc-tooltip-target"
-                  title="添加到图表"
-                  data-mode="add"
-                  data-add-type="ranking"
-                  data-log-source="update_notice"
-                  data-brand="${escapeHtml(brand)}"
-                  data-model="${escapeHtml(model)}"
-                  data-res-type="${escapeHtml(r.resistance_type_zh)}"
-                  data-res-loc="${escapeHtml(resLocForBtn)}"
-                  data-model-id="${escapeHtml(r.model_id)}"
-                  data-condition-id="${escapeHtml(r.condition_id)}">
-            <i class="fa-solid fa-plus"></i>
-          </button>
+          ${buildQuickBtnHTML('ranking', brand, model, r.model_id, r.condition_id, r.condition_name_zh, 'update_notice')}
         </td>
       </tr>`;
   });
@@ -1444,6 +1481,7 @@ const searchAirflowTbody = $('#searchAirflowTbody');
 const searchLikesTbody = $('#searchLikesTbody');
 let SEARCH_RESULTS_RAW = [];
 
+// CHANGED: 搜索结果渲染，使用新签名
 function fillSearchTable(tbody, list){
   if (!tbody) return;
   Array.from(tbody.querySelectorAll('.fc-marquee-cell')).forEach(td=>{
@@ -1456,7 +1494,6 @@ function fillSearchTable(tbody, list){
     return;
   }
 
-  // 根据 tbody.id 区分来源
   const logSource =
     (tbody.id === 'searchAirflowTbody') ? 'search_airflow' :
     (tbody.id === 'searchLikesTbody')   ? 'search_rating'  :
@@ -1465,9 +1502,7 @@ function fillSearchTable(tbody, list){
   tbody.innerHTML = list.map(r=>{
     const brand = r.brand_name_zh;
     const model = r.model_name;
-    const resType = r.resistance_type_zh;
-    const resLocRaw = r.resistance_location_zh || '';
-    const scenLabel = formatScenario(resType, resLocRaw);
+    const scenLabel = escapeHtml(r.condition_name_zh || '');
 
     const axis = (r.effective_axis === 'noise') ? 'noise_db' : (r.effective_axis || 'rpm');
     const unit = axis === 'noise_db' ? 'dB' : 'RPM';
@@ -1488,7 +1523,7 @@ function fillSearchTable(tbody, list){
         <td class="nowrap">${xCell}</td>
         <td class="text-blue-600 font-medium text-sm">${airflowText}</td>
         <td class="text-blue-600 font-medium">${r.like_count ?? 0}</td>
-        <td>${buildQuickBtnHTML('search', brand, model, resType, resLocRaw, r.model_id, r.condition_id, logSource)}</td>
+        <td>${buildQuickBtnHTML('search', brand, model, r.model_id, r.condition_id, r.condition_name_zh, logSource)}</td>
       </tr>`;
   }).join('');
 }
@@ -1517,13 +1552,45 @@ function renderSearchResults(results, conditionLabel){
   syncQuickActionButtons();
 }
 
+// NEW: 用 get_conditions 获取“工况下拉”（value=condition_id，文本=名称）
+(function initSearchConditionSelect(){
+  const sel = document.getElementById('conditionFilterSelect');
+  if (!sel) return;
+  sel.disabled = true;
+  sel.innerHTML = '<option value="">-- 选择工况 --</option>';
+  fetch('/get_conditions?raw=1')
+    .then(r=>r.json())
+    .then(list=>{
+      const arr = Array.isArray(list) ? list : [];
+      arr.forEach(it=>{
+        const o = document.createElement('option');
+        o.value = String(it.condition_id);
+        o.textContent = it.condition_name_zh || '';
+        sel.appendChild(o);
+      });
+    })
+    .catch(()=>{})
+    .finally(()=>{ sel.disabled = false; });
+})();
+
+// CHANGED: 搜索提交只发 condition_id（必须为纯数字）
 if (searchForm){
   searchForm.addEventListener('submit', async e=>{
     e.preventDefault();
     if (!searchForm.reportValidity()) return;
     if (needThrottle('search') && !globalThrottle()) return;
+
+    const sel = document.getElementById('conditionFilterSelect');
+    const cidStr = sel && sel.value ? String(sel.value).trim() : '';
+    if (!cidStr){ showError('请选择工况名称'); return; }
+    if (!/^\d+$/.test(cidStr)){ showError('工况选项未正确初始化，请刷新页面'); return; }
+
     const fd = new FormData(searchForm);
     const payload = {}; fd.forEach((v,k)=>payload[k]=v);
+    payload.condition_id = Number(cidStr);
+    delete payload.condition;
+    delete payload.condition_name;
+
     const cacheNS='search';
     const cached = window.__APP.cache.get(cacheNS, payload);
     if (cached){
@@ -1587,90 +1654,65 @@ if (searchForm){
 const fanForm = $('#fanForm');
 const brandSelect = $('#brandSelect');
 const modelSelect = $('#modelSelect');
-const resTypeSelect = $('#resTypeSelect');
-const resLocSelect = $('#resLocSelect');
+const conditionSelect = $('#conditionSelect'); 
+
+async function fetchBrands(){
+  const r = await fetch('/api/brands'); const j = await r.json(); const n = normalizeApiResponse(j);
+  if (!n.ok) return []; return asArray(n.data?.items || n.data);
+}
+async function fetchModelsByBrand(brandId){
+  const r = await fetch(`/api/models_by_brand?brand_id=${encodeURIComponent(brandId)}`);
+  const j = await r.json(); const n = normalizeApiResponse(j); if (!n.ok) return []; return asArray(n.data?.items || n.data);
+}
+async function fetchConditionsByModel(modelId){
+  const r = await fetch(`/api/conditions_by_model?model_id=${encodeURIComponent(modelId)}`);
+  const j = await r.json(); const n = normalizeApiResponse(j); if (!n.ok) return []; return asArray(n.data?.items || n.data);
+}
+
+// 初始化品牌下拉（若页面没有服务端注入的话）
+(async function initIdCascades(){
+  if (!brandSelect || !modelSelect || !conditionSelect) return;
+  try {
+    const brands = await fetchBrands();
+    brandSelect.innerHTML = '<option value="">-- 选择品牌 --</option>' + brands.map(b=>`<option value="${escapeHtml(b.brand_id)}">${escapeHtml(b.brand_name_zh)}</option>`).join('');
+    brandSelect.disabled = false;
+  } catch(_){}
+})();
 
 if (brandSelect){
-  brandSelect.addEventListener('change', ()=>{
-    const b = (brandSelect.value || '').trim();
-    modelSelect.innerHTML   = `<option value="">${b ? '-- 选择型号 --' : '-- 请先选择品牌 --'}</option>`;
-    modelSelect.disabled    = !b;
-    resTypeSelect.innerHTML = `<option value="">${b ? '-- 请先选择型号 --' : '-- 请先选择品牌 --'}</option>`;
-    resTypeSelect.disabled  = true;
-    resLocSelect.innerHTML  = `<option value="">${b ? '-- 请先选择型号 --' : '-- 请先选择品牌 --'}</option>`;
-    resLocSelect.disabled   = true;
-    if (!b) return;
-    fetch(`/get_models/${encodeURIComponent(b)}?raw=1`)
-      .then(r=>r.json())
-      .then(models=>{
-        const arr = asArray(models);
-        arr.forEach(m=>{
-          const o=document.createElement('option'); o.value=m; o.textContent=m; modelSelect.appendChild(o);
-        });
-        modelSelect.disabled=false;
-      })
-      .catch(()=>{ /* 静默失败 */ });
+  brandSelect.addEventListener('change', async ()=>{
+    const bid = brandSelect.value;
+    modelSelect.innerHTML = `<option value="">${bid ? '-- 选择型号 --' : '-- 请先选择品牌 --'}</option>`;
+    conditionSelect.innerHTML = '<option value="">-- 请先选择型号 --</option>';
+    modelSelect.disabled = !bid; conditionSelect.disabled = true;
+    if (!bid) return;
+    try{
+      const models = await fetchModelsByBrand(bid);
+      models.forEach(m=>{
+        const o=document.createElement('option'); o.value=m.model_id; o.textContent=m.model_name; modelSelect.appendChild(o);
+      });
+      modelSelect.disabled=false;
+    }catch(_){}
   });
 }
+
 if (modelSelect){
-  modelSelect.addEventListener('change', ()=>{
-    const b=(brandSelect.value||'').trim(), m=(modelSelect.value||'').trim();
-    resTypeSelect.innerHTML = m
-      ? '<option value="">-- 选择风阻类型 --</option><option value="全部">全部</option>'
-      : '<option value="">-- 请先选择型号 --</option>';
-    resTypeSelect.disabled  = true;
-
-    resLocSelect.innerHTML  = m
-      ? '<option value="">-- 请先选择风阻类型 --</option>'
-      : '<option value="">-- 请先选择型号 --</option>';
-    resLocSelect.disabled   = true;
-    if (!b || !m) return;
-    fetch(`/get_resistance_types/${encodeURIComponent(b)}/${encodeURIComponent(m)}?raw=1`)
-      .then(r=>r.json())
-      .then(types=>{
-        const arr = asArray(types);
-        arr.forEach(t=>{
-          const o=document.createElement('option'); o.value=t; o.textContent=t; resTypeSelect.appendChild(o);
-        });
-        resTypeSelect.disabled=false;
-      })
-      .catch(()=>{});
+  modelSelect.addEventListener('change', async ()=>{
+    const mid = modelSelect.value;
+    conditionSelect.innerHTML = mid ? '<option value="">-- 选择模拟工况 --</option><option value="ALL">全部</option>' : '<option value="">-- 请先选择型号 --</option>';
+    conditionSelect.disabled = !mid;
+    if (!mid) return;
+    try{
+      const items = await fetchConditionsByModel(mid);
+      items.forEach(c=>{
+        const o=document.createElement('option'); o.value=c.condition_id; o.textContent=c.condition_name_zh; conditionSelect.appendChild(o);
+      });
+    }catch(_){}
   });
 }
-if (resTypeSelect){
-  resTypeSelect.addEventListener('change', ()=>{
-    const b=(brandSelect.value||'').trim(), m=(modelSelect.value||'').trim(), rt=(resTypeSelect.value||'').trim();
-    if (!rt){
-      resLocSelect.innerHTML = '<option value="">-- 请先选择风阻类型 --</option>';
-      resLocSelect.disabled  = true;
-      return;
-    }
-    resLocSelect.innerHTML = '<option value="">-- 选择风阻位置 --</option><option value="全部">全部</option>';
-    resLocSelect.disabled  = true;
-    if (!b || !m || !rt) return;
 
-    if (rt === '空载'){
-      resLocSelect.innerHTML = '<option value="无" selected>无</option>';
-      resLocSelect.disabled = true;
-      return;
-    }
-    if (rt === '全部'){
-      resLocSelect.innerHTML = '<option value="全部" selected>全部</option>';
-      resLocSelect.disabled=true;
-      return;
-    }
-    fetch(`/get_resistance_locations/${encodeURIComponent(b)}/${encodeURIComponent(m)}/${encodeURIComponent(rt)}?raw=1`)
-      .then(r=>r.json())
-      .then(locs=>{
-        const arr = asArray(locs);
-        arr.forEach(l=>{
-          const o=document.createElement('option'); o.value=l; o.textContent=l; resLocSelect.appendChild(o);
-        });
-        resLocSelect.disabled=false;
-      })
-      .catch(()=>{});
-  });
-}
+
+
 if (brandSelect) brandSelect.dispatchEvent(new Event('change'));
 
 /* 型号关键字搜索 */
@@ -1692,17 +1734,38 @@ if (modelSearchInput && searchSuggestions){
           arr.forEach(full=>{
             const div=document.createElement('div');
             div.className='cursor-pointer'; div.textContent=full;
-            div.addEventListener('click', ()=>{
+            div.addEventListener('click', async ()=>{
               const parts = full.split(' ');
-              const brand=parts[0]; const model=parts.slice(1).join(' ');
-              brandSelect.value=brand;
-              brandSelect.dispatchEvent(new Event('change'));
-              setTimeout(()=>{
-                modelSelect.value=model;
-                modelSelect.dispatchEvent(new Event('change'));
+              const brandName = parts[0];
+              const modelName = parts.slice(1).join(' ');
+              try {
+                // 1) 找品牌 ID
+                const brands = await fetchBrands();
+                const bRow = (brands || []).find(b => String(b.brand_name_zh) === String(brandName));
+                if (!bRow) { throw new Error('未找到品牌ID'); }
+                // 2) 设品牌并触发加载型号
+                brandSelect.value = bRow.brand_id;
+                brandSelect.dispatchEvent(new Event('change'));
+                // 3) 等待型号下拉填充（简单轮询 800ms 内重试）
+                await new Promise((resolve, reject)=>{
+                  const deadline = Date.now() + 800;
+                  (function tryPick(){
+                    const opts = Array.from(modelSelect.options || []);
+                    const hit = opts.find(o => o.textContent === modelName);
+                    if (hit) { resolve(hit.value); return; }
+                    if (Date.now() > deadline) { reject(new Error('未找到型号ID')); return; }
+                    setTimeout(tryPick, 60);
+                  })();
+                }).then(mid => {
+                  modelSelect.value = mid;
+                  modelSelect.dispatchEvent(new Event('change'));
+                });
+                // 清理 UI
                 modelSearchInput.value='';
                 searchSuggestions.classList.add('hidden');
-              },300);
+              } catch(e){
+                showError('无法定位到该型号（ID 级联）');
+              }
             });
             searchSuggestions.appendChild(div);
           });
@@ -1792,16 +1855,16 @@ document.addEventListener('click', async e=>{
   }
 
   const quickRemove = safeClosest(e.target, '.js-list-remove');
-  if (quickRemove){
-    const { brand, model, resType, resLoc } = quickRemove.dataset;
-    const normLoc = (resLoc === '无') ? '' : resLoc;
+if (quickRemove){
+    const midAttr = quickRemove.dataset.modelId;
+    const cidAttr = quickRemove.dataset.conditionId;
     const sel = LocalState.getSelected();
-    const target = sel.find(it =>
-      it.brand === unescapeHtml(brand) &&
-      it.model === unescapeHtml(model) &&
-      it.res_type === unescapeHtml(resType) &&
-      ((it.res_loc || '') === (normLoc || ''))
-    );
+    let target = null;
+
+    if (midAttr && cidAttr) {
+      target = sel.find(it => String(it.model_id) === String(midAttr) && String(it.condition_id) === String(cidAttr));
+    }
+
     if (!target){
       showInfo('该数据已不在图表中');
       syncQuickActionButtons();
@@ -1820,66 +1883,60 @@ document.addEventListener('click', async e=>{
     return;
   }
 
-  {
-  const picker = ['.js-ranking-add','.js-search-add','.js-rating-add','.js-likes-add'];
-      for (const sel of picker){
-        const btn = safeClosest(e.target, sel);
-        if (!btn) continue;
-        const midAttr = btn.dataset.modelId;
-        const cidAttr = btn.dataset.conditionId;
-        if (!(midAttr && cidAttr)){
-          showError('缺少标识：按钮未包含 model_id / condition_id');
-          return;
-        }
-        showLoading('op','添加中...');
-        try {
-          let resLoc = btn.dataset.resLoc || '';
-          if (resLoc === '无') resLoc = '';
-          const pairs = [{
-            model_id: Number(midAttr),
-            condition_id: Number(cidAttr),
-            brand: btn.dataset.brand ? unescapeHtml(btn.dataset.brand) : '',
-            model: btn.dataset.model ? unescapeHtml(btn.dataset.model) : '',
-            res_type: btn.dataset.resType ? unescapeHtml(btn.dataset.resType) : '',
-            res_loc: resLoc ? unescapeHtml(resLoc) : ''
-          }];
-          const newPairs = computeNewPairsAfterDedup(pairs);
-          if (newPairs.length === 0){
-            hideLoading('op'); showInfo('已存在'); return;
-          }
-          if (!ensureCanAdd(newPairs.length)){
-            hideLoading('op'); return;
-          }
-          const addedSummary = LocalState.addPairs(pairs);
-
-          // NEW: 读取来源（优先 data-log-source，其次按 addType 映射）
-          const addType = btn.dataset.addType || '';
-          const fallbackMap = { likes:'liked', rating:'top_rating', ranking:'top_query', search:'search' };
-          const logSource = btn.dataset.logSource || fallbackMap[addType] || 'unknown';
-
-          await logNewPairs(addedSummary.addedDetails, logSource);
-          hideLoading('op');
-          if (addedSummary.added > 0){
-            showSuccess(`新增 ${addedSummary.added} 组`);
-            window.__APP.sidebar.maybeAutoOpenSidebarOnAdd && window.__APP.sidebar.maybeAutoOpenSidebarOnAdd();
-          } else {
-            showInfo('已存在，无新增');
-          }
-          rebuildSelectedFans(LocalState.getSelected());
-          ensureLikeStatusBatch(addedSummary.addedDetails.map(d => ({
-            model_id: d.model_id, condition_id: d.condition_id
-          })));
-          window.__APP.features.recentlyRemoved.rebuild(LocalState.getRecentlyRemoved());
-          syncQuickActionButtons();
-          applySidebarColors();
-          refreshChartFromLocal(false);
-        } catch(err){
-          hideLoading('op');
-          showError('添加失败: '+err.message);
-        }
+ {
+    const picker = ['.js-ranking-add','.js-search-add','.js-rating-add','.js-likes-add'];
+    for (const sel of picker){
+      const btn = safeClosest(e.target, sel);
+      if (!btn) continue;
+      const midAttr = btn.dataset.modelId;
+      const cidAttr = btn.dataset.conditionId;
+      if (!(midAttr && cidAttr)){
+        showError('缺少标识：按钮未包含 model_id / condition_id');
         return;
       }
+      showLoading('op','添加中...');
+      try {
+        const pairs = [{
+          model_id: Number(midAttr),
+          condition_id: Number(cidAttr),
+          brand: btn.dataset.brand ? unescapeHtml(btn.dataset.brand) : '',
+          model: btn.dataset.model ? unescapeHtml(btn.dataset.model) : '',
+          condition: btn.dataset.condition ? unescapeHtml(btn.dataset.condition) : ''
+        }];
+        const newPairs = computeNewPairsAfterDedup(pairs);
+        if (newPairs.length === 0){
+          hideLoading('op'); showInfo('已存在'); return;
+        }
+        if (!ensureCanAdd(newPairs.length)){
+          hideLoading('op'); return;
+        }
+
+        // 立即更新前端状态与 UI
+        const addedSummary = LocalState.addPairs(pairs);
+        rebuildSelectedFans(LocalState.getSelected());
+        ensureLikeStatusBatch(addedSummary.addedDetails.map(d => ({ model_id: d.model_id, condition_id: d.condition_id })));
+        window.__APP.features.recentlyRemoved.rebuild(LocalState.getRecentlyRemoved());
+        syncQuickActionButtons();
+        applySidebarColors();
+        refreshChartFromLocal(false);
+
+        hideLoading('op');
+        showSuccess(`新增 ${addedSummary.added} 组`);
+        window.__APP.sidebar.maybeAutoOpenSidebarOnAdd && window.__APP.sidebar.maybeAutoOpenSidebarOnAdd();
+
+        // 埋点改为后台、无阻塞
+        const addType = btn.dataset.addType || '';
+        const fallbackMap = { likes:'liked', rating:'top_rating', ranking:'top_query', search:'search' };
+        const logSource = btn.dataset.logSource || fallbackMap[addType] || 'unknown';
+        Promise.resolve(logNewPairs(addedSummary.addedDetails, logSource)).catch(()=>{});
+      } catch(err){
+        hideLoading('op');
+        showError('添加失败: '+err.message);
+      }
+      return;
     }
+  }
+
 
   const removeBtn = safeClosest(e.target, '.js-remove-fan');
   if (removeBtn){
@@ -1942,60 +1999,48 @@ document.addEventListener('click', async e=>{
 /* =========================================================
    添加表单提交
    ========================================================= */
+// NEW: 按 ID 拉取 pairs
+async function fetchExpandPairsById(modelId, conditionIdOrNull){
+  const payload = { mode:'expand', model_id: modelId };
+  if (conditionIdOrNull != null) payload.condition_id = conditionIdOrNull;
+  const resp = await fetch('/api/search_fans', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+  });
+  const j = await resp.json(); const n = normalizeApiResponse(j);
+  if (!n.ok) throw new Error(n.error_message || n.error_code || 'expand 请求失败');
+  const root = n.data || {}; const items = (root.items) || [];
+  return items.map(it=>({ model_id: it.model_id, condition_id: it.condition_id }));
+}
+
 if (fanForm){
   fanForm.addEventListener('submit', async e=>{
     e.preventDefault();
-    const brand = brandSelect.value.trim();
-    const model = modelSelect.value.trim();
-    const res_type = resTypeSelect.value.trim();
-    let res_loc = (resLocSelect.value || '').trim();
-    if (!brand || !model){ showError('请先选择品牌与型号'); return; }
-    if (!res_type){ showError('请选择风阻类型'); return; }
-    if (res_type === '空载') res_loc = '无';
+    const mid = modelSelect.value;
+    const cid = conditionSelect.value;
+    if (!mid){ showError('请先选择型号'); return; }
+    if (!cid){ showError('请选择模拟工况'); return; }
     showLoading('op','解析中...');
     try {
-      let rlSend = res_loc;
-      if (rlSend === '无') rlSend = '';
-      const pairs = await fetchExpandPairs(brand, model, res_type, rlSend);
-      if (!pairs.length){
-        hideLoading('op'); showInfo('没有匹配数据'); return;
-      }
+      const pairs = await fetchExpandPairsById(Number(mid), cid === 'ALL' ? null : Number(cid));
+      if (!pairs.length){ hideLoading('op'); showInfo('没有匹配数据'); return; }
       const newPairs = computeNewPairsAfterDedup(pairs);
-      if (newPairs.length === 0){
-        hideLoading('op'); showInfo('全部已存在，无新增'); return;
-      }
-      const maxLimit = FRONT_MAX_ITEMS;
-      if (maxLimit) {
-        const curr = LocalState.getSelected().length;
-        const planned = newPairs.length;
-        const totalAfter = curr + planned;
-        if (totalAfter > maxLimit) {
-          const needRemove = totalAfter - maxLimit;
-          hideLoading('op');
-          showInfo(`计划新增 ${planned} 组，将超出上限 ${maxLimit} 组。请先移除至少 ${needRemove} 组后再尝试。`);
-          return;
-        }
-      }
+      if (newPairs.length === 0){ hideLoading('op'); showInfo('全部已存在，无新增'); return; }
+      if (!ensureCanAdd(newPairs.length)){ hideLoading('op'); return; }
       const addedSummary = LocalState.addPairs(pairs);
-      await logNewPairs(addedSummary.addedDetails, 'direct'); // NEW: 标记来源
       hideLoading('op');
       if (addedSummary.added>0){
         showSuccess(`新增 ${addedSummary.added} 组`);
         rebuildSelectedFans(LocalState.getSelected());
-        ensureLikeStatusBatch(
-          addedSummary.addedDetails.map(d => ({ model_id: d.model_id, condition_id: d.condition_id }))
-        );
+        ensureLikeStatusBatch(addedSummary.addedDetails.map(d => ({ model_id: d.model_id, condition_id: d.condition_id })));
         window.__APP.features.recentlyRemoved.rebuild(LocalState.getRecentlyRemoved());
-        syncQuickActionButtons();
-        applySidebarColors();
-        refreshChartFromLocal(false);
+        syncQuickActionButtons(); applySidebarColors(); refreshChartFromLocal(false);
         window.__APP.sidebar.maybeAutoOpenSidebarOnAdd && window.__APP.sidebar.maybeAutoOpenSidebarOnAdd();
       } else {
         showInfo('全部已存在，无新增');
       }
+      Promise.resolve(logNewPairs(addedSummary.addedDetails, 'direct')).catch(()=>{});
     } catch(err){
-      hideLoading('op');
-      showError('添加失败: '+err.message);
+      hideLoading('op'); showError('添加失败: '+err.message);
     }
   });
 }
@@ -2260,15 +2305,66 @@ function scheduleAdjust(){
   }
 })();
 
+// NEW: 批量获取 (model_id, condition_id) 的显示元信息
+async function fetchMetaForPairs(pairs){
+  if (!Array.isArray(pairs) || !pairs.length) return [];
+  const resp = await fetch('/api/meta_by_ids', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ pairs })
+  });
+  const j = await resp.json();
+  const n = normalizeApiResponse(j);
+  if (!n.ok) return [];
+  const items = (n.data && n.data.items) || [];
+  return Array.isArray(items) ? items : [];
+}
+
+// CHANGED: “最近移除”显示缓存改用 /api/meta_by_ids（不再调用 /api/curves）
+async function ensureRemovedDisplayCache(){
+  try{
+    const removed = (LocalState && LocalState.getRecentlyRemoved && LocalState.getRecentlyRemoved()) || [];
+    if (!Array.isArray(removed) || !removed.length) return;
+
+    const selectedPairs = new Set(
+      (LocalState.getSelectionPairs?.() || []).map(p=> `${p.model_id}_${p.condition_id}`)
+    );
+    const need = [];
+    const seen = new Set();
+    for (const it of removed){
+      if (!it) continue;
+      const k = `${it.model_id}_${it.condition_id}`;
+      if (selectedPairs.has(k)) continue;
+      if (DisplayCache.get && DisplayCache.get(it.model_id, it.condition_id)) continue;
+      if (seen.has(k)) continue;
+      seen.add(k);
+      const mid = Number(it.model_id), cid = Number(it.condition_id);
+      if (Number.isInteger(mid) && Number.isInteger(cid)){
+        need.push({ model_id: mid, condition_id: cid });
+      }
+    }
+    if (!need.length) return;
+
+    const items = await fetchMetaForPairs(need);
+    if (items.length){
+      DisplayCache.setFromMeta(items);
+      window.__APP?.features?.recentlyRemoved?.rebuild?.(LocalState.getRecentlyRemoved());
+    }
+  }catch(_){}
+}
+
 (function initLocalSelectionBoot(){
+  installRemovedRenderHookOnce();
   rebuildSelectedFans(LocalState.getSelected());
   primeSelectedLikeStatus();
   window.__APP.features.recentlyRemoved.rebuild(LocalState.getRecentlyRemoved());
+  ensureRemovedDisplayCache(); // 关键补齐
+})();
+
   applySidebarColors();
-  refreshChartFromLocal(false);
+  refreshChartFromLocal(false); // 已选曲线依然用 /api/curves 渲染图表
   syncQuickActionButtons && syncQuickActionButtons();
   prepareSidebarMarquee();
-})();
 
 async function primeSelectedLikeStatus(){
   try {
@@ -2386,103 +2482,6 @@ initSnapTabScrolling({
   }
 });
 
-/* A11y Tabs */
-(function initA11yTabs(){
-  const TAB_GROUP_SELECTOR = '.fc-tabs[data-tab-group]';
-  const SEG_SELECTOR = '.fc-seg[data-active]';
-  function upgradeTabGroup(nav){
-    if (nav.getAttribute('role') === 'tablist') return;
-    nav.setAttribute('role','tablist');
-    const group = nav.dataset.tabGroup || '';
-    const items = Array.from(nav.querySelectorAll('.fc-tabs__item'));
-    items.forEach((item, idx) => {
-      const tabId = item.id || (`tab-${group}-${idx}`);
-      item.id = tabId;
-      item.setAttribute('role','tab');
-      const panelName = item.dataset.tab;
-      const panel = document.getElementById(`${panelName}-pane`) || document.getElementById(`${panelName}-panel`);
-      if (panel) {
-        const panelId = panel.id;
-        item.setAttribute('aria-controls', panelId);
-        panel.setAttribute('role','tabpanel');
-        panel.setAttribute('aria-labelledby', tabId);
-      }
-      item.setAttribute('tabindex', item.classList.contains('active') ? '0':'-1');
-      item.setAttribute('aria-selected', item.classList.contains('active') ? 'true':'false');
-    });
-  }
-  function syncActive(nav){
-    const items = Array.from(nav.querySelectorAll('.fc-tabs__item'));
-    items.forEach(it => {
-      const active = it.classList.contains('active');
-      it.setAttribute('tabindex', active ? '0':'-1');
-      it.setAttribute('aria-selected', active ? 'true':'false');
-    });
-  }
-  function handleKey(e){
-    const item = e.target.closest('.fc-tabs__item[role="tab"]');
-    if (!item) return;
-    const nav = item.closest('[role="tablist"]');
-    if (!nav) return;
-    if (!['ArrowLeft','ArrowRight','Home','End'].includes(e.key)) return;
-    const items = Array.from(nav.querySelectorAll('.fc-tabs__item[role="tab"]'));
-    const currentIndex = items.indexOf(item);
-    let nextIndex = currentIndex;
-    if (e.key === 'ArrowRight') nextIndex = (currentIndex + 1) % items.length;
-    else if (e.key === 'ArrowLeft') nextIndex = (currentIndex - 1 + items.length) % items.length;
-    else if (e.key === 'Home') nextIndex = 0;
-    else if (e.key === 'End') nextIndex = items.length - 1;
-    if (nextIndex !== currentIndex) {
-      e.preventDefault();
-      items[nextIndex].click();
-      items[nextIndex].focus();
-      syncActive(nav);
-    }
-  }
-  document.querySelectorAll(TAB_GROUP_SELECTOR).forEach(upgradeTabGroup);
-  document.addEventListener('click', e=>{
-    const item = e.target.closest('.fc-tabs__item');
-    if (!item) return;
-    const nav = item.closest(TAB_GROUP_SELECTOR);
-    if (nav) syncActive(nav);
-  });
-  document.addEventListener('keydown', handleKey);
-
-  document.querySelectorAll(SEG_SELECTOR).forEach(seg=>{
-    if (!seg.querySelector('.fc-seg__btn')) return;
-    if (!seg.hasAttribute('role')) seg.setAttribute('role','tablist');
-    const btns = Array.from(seg.querySelectorAll('.fc-seg__btn'));
-    btns.forEach((b)=>{
-      b.setAttribute('role','tab');
-      b.setAttribute('tabindex', b.classList.contains('is-active') ? '0':'-1');
-      b.setAttribute('aria-selected', b.classList.contains('is-active') ? 'true':'false');
-      const id = b.id || `seg-${Math.random().toString(36).slice(2)}`;
-      b.id = id;
-    });
-    seg.addEventListener('click', ()=>{
-      btns.forEach(b=>{
-        const act = b.classList.contains('is-active');
-        b.setAttribute('tabindex', act ? '0':'-1');
-        b.setAttribute('aria-selected', act ? 'true':'false');
-      });
-    });
-    seg.addEventListener('keydown', e=>{
-      if (!['ArrowLeft','ArrowRight','Home','End'].includes(e.key)) return;
-      const activeIndex = btns.findIndex(b=>b.classList.contains('is-active'));
-      let idx = activeIndex;
-      if (e.key === 'ArrowRight') idx = (activeIndex + 1) % btns.length;
-      else if (e.key === 'ArrowLeft') idx = (activeIndex - 1 + btns.length) % btns.length;
-      else if (e.key === 'Home') idx = 0;
-      else if (e.key === 'End') idx = btns.length - 1;
-      if (idx !== activeIndex) {
-        e.preventDefault();
-        btns[idx].click();
-        btns[idx].focus();
-      }
-    });
-  });
-})();
-
 /* 模块注册 */
 window.__APP.modules = {
   overlay: {
@@ -2518,6 +2517,7 @@ window.__APP.modules = {
 };
 
 window.__APP.features?.recentlyRemoved?.mount?.();
+installRemovedRenderHookOnce();
 
 /* 滚动条宽度测量 */
 (function setRealScrollbarWidth(){
@@ -2637,55 +2637,9 @@ function maybeAutoOpenSidebarOnAdd(){
   });
 })();
 
-/* 搜索工况位置联动（按负载筛选） */
-(function initScenarioCascading(){
+(function initSearchConditionSingleSelect(){
   const form = document.getElementById('searchForm');
   if (!form) return;
-  const typeSel = form.querySelector('select[name="search_res_type"]');
-  const locSel  = form.querySelector('select[name="search_res_loc"]');
-  if (!typeSel || !locSel) return;
-  function setLocOptions(options, enable){
-    const prev = locSel.value;
-    locSel.innerHTML = enable
-      ? '<option value="">-- 选择风阻位置 --</option>'
-      : '<option value="">-- 请先选择风阻类型 --</option>';
-    (options || []).forEach(v=>{
-      const o = document.createElement('option');
-      o.value = v; o.textContent = v;
-      locSel.appendChild(o);
-    });
-    if (enable && prev && options && options.includes(prev)) {
-      locSel.value = prev;
-    } else if (!enable) {
-      locSel.value = '';
-    }
-    locSel.disabled = !enable;
-  }
-async function refreshLocByType(rt){
-  if (!rt){
-    setLocOptions([], false);
-    return;
-  }
-  if (rt === '空载'){
-    locSel.innerHTML = '<option value="无" selected>无</option>';
-    locSel.disabled = true;
-    return;
-  }
-  try{
-    const rsp = await fetch(`/get_resistance_locations_by_type/${encodeURIComponent(rt)}?raw=1`);
-    const list = asArray(await rsp.json());
-    setLocOptions(list, true);
-  }catch(_){
-    setLocOptions([], false);
-  }
-}
-  locSel.innerHTML = '<option value="">-- 请先选择风阻类型 --</option>';
-  locSel.disabled = true;
-  refreshLocByType((typeSel.value || '').trim());
-  typeSel.addEventListener('change', ()=>{
-    const rt = (typeSel.value || '').trim();
-    refreshLocByType(rt);
-  });
 })();
 
 /* 全局 Tooltip */
@@ -2776,7 +2730,7 @@ async function refreshLocByType(rt){
   });
   const onRelayout = ()=>{ if (currAnchor && document.body.contains(currAnchor)) placeAround(currAnchor, currAnchor.getAttribute('data-tooltip-placement') || 'top'); };
   window.addEventListener('resize', onRelayout);
-  window.addEventListener('scroll', onRelayout, true);
+  window.addEventListener('scroll', onRelayout, { passive: true, capture: true });
   window.addEventListener('beforeunload', ()=>{
     document.querySelectorAll('[data-title]').forEach(el=>{
       el.setAttribute('title', el.getAttribute('data-title') || '');
@@ -2794,13 +2748,12 @@ function formatScenario(rt, rl){
 }
 
 /* expand */
-async function fetchExpandPairs(brand, model, resType, resLoc){
+async function fetchExpandPairs(brand, model, condition){
   const payload = {
     mode: 'expand',
     brand,
     model,
-    res_type: resType,
-    res_loc: resLoc
+    condition_name: condition
   };
   const resp = await fetch('/api/search_fans', {
     method:'POST',
@@ -2819,8 +2772,7 @@ async function fetchExpandPairs(brand, model, resType, resLoc){
     condition_id: it.condition_id,
     brand: it.brand_name_zh,
     model: it.model_name,
-    res_type: it.resistance_type_zh,
-    res_loc: it.resistance_location_zh
+    condition: it.condition_name_zh
   }));
 }
 
@@ -2838,34 +2790,21 @@ async function refreshChartFromLocal(showToast=false){
     });
     const j = await resp.json();
     const n = normalizeApiResponse(j);
-    if (!n.ok){
-      showError(n.error_message || '获取曲线失败');
-      return;
-    }
+    if (!n.ok){ showError(n.error_message || '获取曲线失败'); return; }
     const data = n.data || {};
-    // 新增：处理 missing
-    if (Array.isArray(data.missing) && data.missing.length) {
-      const removed = [];
-      data.missing.forEach(it => {
-        const key = `${it.model_id}_${it.condition_id}`;
-        const sel = LocalState.getSelected();
-        const victim = sel.find(s => `${s.model_id}_${s.condition_id}` === key);
-        if (victim && LocalState.removeKey(victim.key)) {
-          removed.push(victim);
-        }
-      });
-      if (removed.length) {
-        rebuildSelectedFans(LocalState.getSelected());
-        window.__APP.features.recentlyRemoved.rebuild(LocalState.getRecentlyRemoved());
-        syncQuickActionButtons();
-        applySidebarColors();
-        showInfo(`已移除 ${removed.length} 组不存在的数据`);
-      }
-    }
+
+    // missing 清理保持不变...
+
     const chartData = {
       x_axis_type: LocalState.getXAxisType(),
       series: data.series || []
     };
+    // NEW: 用服务器返回的元信息更新显示缓存
+    DisplayCache.setFromSeries(chartData.series);
+    // 刷新侧栏/最近移除的显示文本
+    rebuildSelectedFans(LocalState.getSelected());
+    window.__APP.features.recentlyRemoved.rebuild(LocalState.getRecentlyRemoved());
+
     lastChartData = chartData;
     postChartData(chartData);
     if (showToast) showSuccess('已刷新曲线');

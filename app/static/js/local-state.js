@@ -4,24 +4,54 @@
  */
 (function(global){
   const LS_KEYS = {
-    SELECTED: 'fc_selected_v1',
-    REMOVED:  'fc_removed_v1',
+    SELECTED: 'fc_selected_v2',
+    REMOVED:  'fc_removed_v2',
     COLOR_MAP:'colorIndexMap_v1',
     X_AXIS:   'x_axis_type',
     PREFS:    'fc_prefs_v1',
-    LIKES:    'fc_likes_v1',       // 点赞集合
-    LIKES_FP: 'fc_likes_fp_v1'     // 持久化服务端指纹
+    LIKES:    'fc_likes_v1',
+    LIKES_FP: 'fc_likes_fp_v1'
   };
 
+  // ========== 常量 ==========
   const MAX_RECENTLY_REMOVED = 50;
   const DEFAULT_X_AXIS = 'rpm';
 
+  // NEW: 一次性清理旧结构（含 v1 键或对象里出现 res_type/res_loc）
+  (function purgeLegacyLocalDataOnce(){
+    try {
+      const v1Sel = localStorage.getItem('fc_selected_v1');
+      const v1Rem = localStorage.getItem('fc_removed_v1');
+      let needPurge = !!(v1Sel || v1Rem);
+      if (!needPurge) {
+        const maybeV2 = localStorage.getItem(LS_KEYS.SELECTED);
+        if (maybeV2) {
+          try {
+            const arr = JSON.parse(maybeV2);
+            if (Array.isArray(arr) && arr.some(it => it && (it.res_type || it.res_loc || it.brand || it.model || it.condition))) {
+              needPurge = true;
+            }
+          } catch(_){}
+        }
+      }
+      if (needPurge) {
+        localStorage.removeItem('fc_selected_v1');
+        localStorage.removeItem('fc_removed_v1');
+        localStorage.removeItem(LS_KEYS.SELECTED);
+        localStorage.removeItem(LS_KEYS.REMOVED);
+        localStorage.removeItem(LS_KEYS.COLOR_MAP);
+        // 点赞集合与指纹不清理
+        console.warn('[LocalState] Purged legacy local data (v1 strings).');
+      }
+    } catch(_){}
+  })();
+  
   function readJSON(k,f){ try{ const r=localStorage.getItem(k); return r?JSON.parse(r):f; }catch{return f;} }
   function writeJSON(k,v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch{} }
 
   // ========== 旧有本地状态 ==========
-  let selected = readJSON(LS_KEYS.SELECTED, []);
-  let removed  = readJSON(LS_KEYS.REMOVED,  []);
+  let selected = readJSON(LS_KEYS.SELECTED, []);   // [{ key, model_id, condition_id }]
+  let removed  = readJSON(LS_KEYS.REMOVED,  []);   // [{ key, model_id, condition_id }]
   let colorMap = readJSON(LS_KEYS.COLOR_MAP, {});
   let prefs    = readJSON(LS_KEYS.PREFS,    { legend_hidden_keys:[], pointer:{rpm:null, noise_db:null}});
   let xAxisType= (()=> {
@@ -232,10 +262,6 @@
         key: info.key,
         model_id: info.model_id,
         condition_id: info.condition_id,
-        brand: info.brand,
-        model: info.model,
-        res_type: info.res_type,
-        res_loc: info.res_loc,
         removed_time: now
       });
     }
@@ -266,19 +292,9 @@
       if (!Number.isFinite(mid)||!Number.isFinite(cid)){ skipped++; return; }
       const key=makeKey(mid,cid);
       if (findSelectedIndex(key)>=0){ skipped++; return; }
-      const item={
-        key,
-        model_id: mid,
-        condition_id: cid,
-        brand: p.brand || p.brand_name_zh || '',
-        model: p.model || p.model_name || '',
-        res_type: p.res_type || p.resistance_type_zh || '',
-        res_loc: (p.res_loc===''||p.res_loc==null)?(p.resistance_location_zh||''):p.res_loc
-      };
-      selected.push(item);
+      selected.push({ key, model_id: mid, condition_id: cid });
       ensureColorIndex(key);
-      added++;
-      addedDetails.push({ key, model_id: mid, condition_id: cid });
+      added++; addedDetails.push({ key, model_id: mid, condition_id: cid });
     });
     persistAll();
     if (added>0) dispatchChange('add',{ added });
@@ -286,15 +302,15 @@
   }
 
   function removeKey(key){
-    const idx=findSelectedIndex(key);
-    if (idx<0) return false;
-    const info=selected[idx];
-    selected.splice(idx,1);
-    addOrUpdateRemoved(info);
-    persistAll();
-    dispatchChange('remove',{ key });
-    return true;
-  }
+      const idx=findSelectedIndex(key);
+      if (idx<0) return false;
+      const info=selected[idx];
+      selected.splice(idx,1);
+      addOrUpdateRemoved(info); // 会带上 condition
+      persistAll();
+      dispatchChange('remove',{ key });
+      return true;
+    }
 
   function restoreKey(key){
     const rIdx=removed.findIndex(r=>r.key===key);
@@ -307,15 +323,7 @@
     }
     const rec=removed[rIdx];
     removed.splice(rIdx,1);
-    selected.push({
-      key: rec.key,
-      model_id: rec.model_id,
-      condition_id: rec.condition_id,
-      brand: rec.brand,
-      model: rec.model,
-      res_type: rec.res_type,
-      res_loc: rec.res_loc
-    });
+    selected.push({ key: rec.key, model_id: rec.model_id, condition_id: rec.condition_id });
     ensureColorIndex(key);
     persistAll();
     dispatchChange('restore',{ key });
@@ -362,6 +370,39 @@
     return prefs.pointer[mode];
   }
 
+  /* 新增：按 (model_id, condition_id) 回填/更新工况文本，并持久化 */
+  function patchCondition(mid, cid, conditionText){
+    try{
+      const key = makeKey(mid, cid);
+      let touched = false;
+      // 更新已选
+      for (let i = 0; i < selected.length; i++){
+        if (selected[i] && selected[i].key === key){
+          if (!selected[i].condition || selected[i].condition !== conditionText){
+            selected[i].condition = conditionText || '';
+            touched = true;
+          }
+        }
+      }
+      // 更新最近移除
+      for (let i = 0; i < removed.length; i++){
+        if (removed[i] && removed[i].key === key){
+          if (!removed[i].condition || removed[i].condition !== conditionText){
+            removed[i].condition = conditionText || '';
+            touched = true;
+          }
+        }
+      }
+      if (touched){
+        persistAll();
+        dispatchChange('patch_condition', { key, condition: conditionText || '' });
+      }
+    } catch(_){}
+  }
+
+  // NEW:（保留）条件文本回填 API 仍可用但仅作为显示缓存填充的触发信号
+  function patchCondition(mid, cid, _conditionText){ /* v2 最小存储不再写文本，这里留空以兼容旧调用 */ }
+
   const api = {
     getSelected: ()=>selected.slice(),
     getRecentlyRemoved: ()=> removed.slice(),
@@ -379,7 +420,8 @@
     getPointer:(mode)=>getPointer(mode),
     getSelectionPairs:()=> getSelectionPairs(),
     persistAll,
-    likes: likesAPI
+    likes: likesAPI,
+    patchCondition
   };
 
   global.LocalState = api;

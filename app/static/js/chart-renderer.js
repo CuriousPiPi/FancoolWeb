@@ -137,7 +137,7 @@
         try { placeFitUI(); } catch(_) {}
       });
     };
-    window.addEventListener('scroll', onAnyScroll, true);
+    window.addEventListener('scroll', onAnyScroll, { passive: true, capture: true });
 
     // NEW: 监听侧栏/主容器的过渡与属性变化，侧栏展开/收起/拖拽期间跟随图表容器移动
     (function hookLayoutMovers(){
@@ -549,22 +549,21 @@ function setTheme(theme) {
     sList.forEach(s=>{
       const brand = s.brand || s.brand_name_zh || s.brand_name || '';
       const model = s.model || s.model_name || '';
-      const rt    = s.res_type || s.resistance_type_zh || s.resistance_type || s.rt || '';
-      const rl    = s.res_loc || s.resistance_location_zh || s.resistance_location || s.rl || '';
+      const condition = s.condition_name_zh || s.condition || '';  // NEW: 统一用工况字段
       const key   = s.name || [brand, model].filter(Boolean).join(' ') || String(s.key || '');
-      legendMeta[key] = { brand, model, rt, rl };
+      legendMeta[key] = { brand, model, condition };               // CHANGED
     });
     function desktopLegendFormatter(name){
       const m = legendMeta[name] || {};
       const line1 = [m.brand, m.model].filter(Boolean).join(' ');
-      const line2 = [m.rt, m.rl].filter(Boolean).join(' ');
+      const line2 = m.condition || '';                             // CHANGED: 第二行显示工况
       if (line2) return `{l1|${line1}}\n{l2|${line2}}`;
       return `{l1|${line1||name}}`;
     }
     function mobileLegendFormatter(name){
       const m = legendMeta[name] || {};
-      const left = [m.brand, m.model].filter(Boolean).join(' ');
-      const right = [m.rt, m.rl].filter(Boolean).join(' ');
+      const left  = [m.brand, m.model].filter(Boolean).join(' ');
+      const right = m.condition || '';                              // CHANGED: 右侧显示工况
       if (right) return `{m1|${left}} {m1|-} {m2|${right}}`;
       return `{m1|${left||name}}`;
     }
@@ -677,7 +676,7 @@ function setTheme(theme) {
       animationDurationUpdate: transitionMs,
       animationEasingUpdate: 'cubicOut',
 
-      grid:{ left:40, right: (isN ? 20 : 260), top: gridTop, bottom: (isN ? Math.min(320, 50 + (sList.length || 1) * 22) : 40) },
+      grid:{ left:40, right: (isN ? 20 : 220), top: gridTop, bottom: (isN ? Math.min(320, 50 + (sList.length || 1) * 22) : 40) },
 
       title: { text: titleText, left: 'center', top: titleTop,
         textStyle: { color: t.axisLabel, fontSize: 20, fontWeight: 600, fontFamily: t.fontFamily } },
