@@ -279,7 +279,7 @@
             <div class="flex-1"></div>
             <div class="fc-tabs__subseg" id="rightSubsegContainer"></div>
           </nav>
-          <div class="fc-tab-container">
+          <div class="fc-tab-container" id="right-panel-container">
             <div class="fc-tab-wrapper" id="right-panel-wrapper">
               <!-- 热门查询 -->
               <div class="fc-tab-pane" id="top-queries-pane">
@@ -404,7 +404,7 @@
                         </tr>
                         </thead>
                         <tbody id="searchAirflowTbody">
-                          <tr><td colspan="8" class="text-center text-gray-500 py-8">使用左侧条件进行搜索</td></tr>
+                          <tr><td colspan="8" class="text-center text-gray-500 py-8" style="font-size: 16px;">使用按工况筛选进行搜索</td></tr>
                         </tbody>
                       </table>
                     </div>
@@ -486,6 +486,7 @@
   </main>
   
   <script src="{{ url_for('static', filename='js/local-state.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/theme-pref.js', v=1) }}"></script>
   <script src="{{ url_for('static', filename='js/color-manager.js', v=1) }}"></script>
   <script src="{{ url_for('static', filename='vendor/echarts/5.4.2/echarts.min.js') }}"></script>
   <script src="{{ url_for('static', filename='js/chart-renderer.js', v=3) }}"></script>

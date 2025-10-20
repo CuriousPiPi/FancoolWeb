@@ -37,6 +37,7 @@
     return c.getContext('2d');
   })();
 
+  
   // -------- 工具 --------
   function warnOnce(msg){ if (!warnOnce._s) warnOnce._s=new Set(); if(warnOnce._s.has(msg))return; warnOnce._s.add(msg); console.warn(msg); }
   function getById(id){
@@ -266,17 +267,44 @@
   }
 
   // ===== 对外 API =====
-  function mount(rootEl){
-    root = rootEl;
-    if (!root) { warnOnce('[ChartRenderer] mount(rootEl) 需要一个有效的 DOM 容器'); return; }
-    ensureEcharts();
+function mount(rootEl) {
+  root = rootEl;
+  if (!root) {
+    warnOnce('[ChartRenderer] mount(rootEl) 需要一个有效的 DOM 容器');
+    return;
+  }
+  ensureEcharts();  // 统一解析初始主题
+  const initialTheme =
+    (window.ThemePref && typeof window.ThemePref.resolve === 'function')
+      ? window.ThemePref.resolve()
+      : (document.documentElement.getAttribute('data-theme') || 'light');
+
+  // 写入 DOM（不触发后端上报）
+  if (window.ThemePref && typeof window.ThemePref.setDom === 'function') {
+    window.ThemePref.setDom(initialTheme);
+  } else {
+    document.documentElement.setAttribute('data-theme', initialTheme);
   }
 
-  function setTheme(theme){
-    const t = String(theme || 'light').toLowerCase();
+  // 首次挂载时渲染空数据状态（沿用 initialTheme）
+  if (!chart) return;
+  const emptyPayload = { chartData: { series: [] }, theme: initialTheme };
+  render(emptyPayload);
+}
+
+function setTheme(theme) {
+  const t = (window.ThemePref && typeof window.ThemePref.save === 'function')
+    ? window.ThemePref.save(theme, { notifyServer: false }) // 渲染器不直接上报
+    : String(theme || 'light').toLowerCase();
+
+  if (window.ThemePref && typeof window.ThemePref.setDom === 'function') {
+    window.ThemePref.setDom(t);
+  } else {
     document.documentElement.setAttribute('data-theme', t);
-    if (lastPayload) render(lastPayload);
+    try { localStorage.setItem('theme', t); } catch(_) {}
   }
+  if (lastPayload) render(lastPayload);
+}
 
   function render(payload){
     lastPayload = payload || lastPayload;
@@ -481,9 +509,7 @@
     const sList = Array.isArray(chartData?.series) ? chartData.series : [];
     const xMode = currentXModeFromPayload(payload);
 
-    // CHANGED: 以容器实际宽度判定窄屏（与 legend 布局保持一致）
     const isNarrow = layoutIsNarrow();
-
     const exportBg = (payload && payload.chartBg) || getExportBg();
     const bgNormal = isFs ? exportBg : 'transparent';
 
@@ -492,9 +518,10 @@
       return {
         __empty:true,
         backgroundColor: bgNormal,
-        title:{ text:'暂无数据', left:'center', top:'middle',
-          textStyle:{ color:t.axisLabel, fontFamily:t.fontFamily } },
-        toolbox:{ feature:{ saveAsImage:{ backgroundColor:exportBg, pixelRatio: window.devicePixelRatio || 1 } } },
+        title:{ text:'请 先 添 加 数 据', left:'center', top:'middle',
+          textStyle:{ color:t.axisLabel, fontFamily:t.fontFamily, fontSize: 20, fontWeight: 600 }
+        },
+        toolbox:{ show:false },
         tooltip:{ show:false, triggerOn:'none' }
       };
     }
@@ -731,8 +758,8 @@
         <div class="switch-container" id="xAxisSwitchContainer">
           <div class="switch-track" id="xAxisSwitchTrack">
             <div class="switch-slider" id="xAxisSwitchSlider">
-              <span class="switch-label switch-label-right">转速</span>
-              <span class="switch-label switch-label-left">噪音</span>
+              <!--<span class="switch-label switch-label-right">转速</span>-->
+              <!--<span class="switch-label switch-label-left">噪音</span>-->
             </div>
           </div>
         </div>`;
@@ -749,7 +776,9 @@
 
   function updateAxisSwitchPosition(opts = {}) {
     const { force = false, animate = false } = opts;
-    if (!force && performance.now() < axisSnapSuppressUntil) return;
+    // 修改点：去掉“force 例外”，在保护窗口内一律跳过，避免 render() 的刷新把动画干掉
+    if (performance.now() < axisSnapSuppressUntil) return;
+
     const track  = getById('xAxisSwitchTrack');
     const slider = getById('xAxisSwitchSlider');
     if (!track || !slider) return;
@@ -761,7 +790,7 @@
     const currType = currentXModeFromPayload(lastPayload);
     const toNoise  = (currType === 'noise_db');
 
-    slider.style.transition = animate ? 'transform .25s ease' : 'none';
+    slider.style.transition = animate ? 'transform .25s ease' : slider.style.transition || ''; // 不强行抹掉已存在的过渡
     slider.style.transform  = `translateX(${toNoise ? maxX : 0}px)`;
     track.setAttribute('aria-checked', String(toNoise));
   }
@@ -1386,8 +1415,8 @@
   }
 
   function computeSampleCount(widthPx){
-    const n = Math.round(widthPx / 1.5);
-    return Math.max(200, Math.min(1200, n));
+    const n = Math.round(widthPx / 20); // 每 20px 一个点
+    return Math.max(20, Math.min(50, n));
   }
 
   function resampleSingle(model, xmin, xmax, count){
