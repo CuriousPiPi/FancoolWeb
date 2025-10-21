@@ -1581,7 +1581,7 @@ function renderSearchResults(results, conditionLabel){
         o.value = String(it.condition_id);
         const extra = formatScenario(it.resistance_type_zh, it.resistance_location_zh); // 已做转义
         const base = it.condition_name_zh || '';
-        o.textContent = extra ? `${base} - [${extra}]` : base;
+        o.textContent = extra ? `${base} - ${extra}` : base;
         sel.appendChild(o);
       });
     })
@@ -1703,26 +1703,28 @@ function renderConditionList(items){
   const renderItems = CondState.items.map(it => {
     const name = escapeHtml(it.condition_name_zh || '');
     const extra = formatScenario(it.resistance_type_zh, it.resistance_location_zh); // 已转义
-    const label = extra ? `${name} - ${extra}` : name;
-    return { id: String(it.condition_id), label };
+    const extraHtml = extra ? `<span class="fc-cond-extra"> - ${extra}</span>` : '';
+    return { id: String(it.condition_id), nameHtml: name, extraHtml };
   });
 
   const listHtml = `
-    <div class="sticky top-0 bg-white pb-1 border-b border-gray-100 mb-1">
-      <label class="inline-flex items-center gap-2">
-        <input type="checkbox" id="cond_all" class="fc-checkbox">
-        <span>全部</span>
-      </label>
-    </div>
-    <div class="space-y-1">
-      ${renderItems.map(it => `
-        <label class="flex items-center gap-2">
-          <input type="checkbox" class="cond-item fc-checkbox" data-cond-id="${it.id}">
-          <span class="truncate">${it.label}</span>
+      <div class="sticky top-0 bg-white pb-1 border-b border-gray-100 mb-1">
+        <label class="inline-flex items-center gap-2">
+          <input type="checkbox" id="cond_all" class="fc-checkbox">
+          <span>全部</span>
         </label>
-      `).join('')}
-    </div>`;
-  condListEl.innerHTML = listHtml;
+      </div>
+      <div class="space-y-1">
+        ${renderItems.map(it => `
+          <label class="flex items-center gap-2">
+            <input type="checkbox" class="cond-item fc-checkbox" data-cond-id="${it.id}">
+            <span class="truncate">
+              <span class="fc-cond-name">${it.nameHtml}</span>${it.extraHtml}
+            </span>
+          </label>
+        `).join('')}
+      </div>`;
+    condListEl.innerHTML = listHtml;
 
   // 事件绑定保持不变
   const allBox = document.getElementById('cond_all');
