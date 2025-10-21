@@ -160,11 +160,15 @@
                   </div>
 
                   <div class="fc-form-row">
-                    <label class="block text-sm font-medium">模拟工况</label>
-                    <select id="conditionSelect" class="fc-field w-full border-gray-300" disabled>
-                      <option value="">-- 选择模拟工况 --</option>
-                      <option value="全部">全部</option>
-                    </select>
+                    <label class="block text-sm font-medium">测试工况</label>
+                    <!-- 多选容器：固定高度≈两行下拉，内部可滚动 -->
+                    <div id="conditionMulti"
+                      class="w-full border border-gray-300 rounded-md p-2 bg-white fc-condition-multi" >
+                      <!-- 级联占位提示（默认显示） -->
+                      <div id="condPlaceholder" class="text-sm text-gray-500">-- 请先选择品牌 --</div>
+                      <!-- 复选框列表（加载完成后显示） -->
+                      <div id="condList" class="space-y-1 hidden"></div>
+                    </div>
                     <div id="conditionLoading" class="text-sm text-gray-500 mt-1 hidden">加载中...</div>
                   </div>
 
@@ -178,9 +182,9 @@
               <div class="fc-tab-pane" id="filter-by-scenario-pane">
                 <form id="searchForm" class="fc-form-grid">
                   <div class="fc-form-row">
-                    <label class="block text-sm font-medium">模拟工况</label>
+                    <label class="block text-sm font-medium">测试工况</label>
                     <select name="condition_name" id="conditionFilterSelect" class="fc-field w-full border-gray-300">
-                      <option value="">-- 选择模拟工况 --</option>
+                      <option value="">-- 选择测试工况 --</option>
                       {% for cond in all_conditions %}
                         <option value="{{ cond }}">{{ cond }}</option>
                       {% endfor %}
@@ -202,6 +206,29 @@
                       <input type="number" name="thickness_min" value="25" min="1" max="99" class="fc-field w-1/2 border-gray-300" required>
                       <span class="text-gray-600">-</span>
                       <input type="number" name="thickness_max" value="50" min="1" max="99" class="fc-field w-1/2 border-gray-300" required>
+                    </div>
+                  </div>
+                  
+                  <div class="fc-form-row">
+                    <label class="block text-sm font-medium">参考价</label>
+                    <div class="flex items-center gap-3">
+                      <input type="number"
+                             name="price_min"
+                             value="0"
+                             min="0"
+                             max="999"
+                             step="1"
+                             class="fc-field w-1/2 border-gray-300"
+                             required>
+                      <span class="text-gray-600">-</span>
+                      <input type="number"
+                             name="price_max"
+                             value="999"
+                             min="0"
+                             max="999"
+                             step="1"
+                             class="fc-field w-1/2 border-gray-300"
+                             required>
                     </div>
                   </div>
 
@@ -282,6 +309,7 @@
                           <th>品牌</th>
                           <th>型号</th>
                           <th>尺寸</th>
+                          <th>参考价</th>
                           <th>热门工况</th>
                           <th>查询次数</th>
                           <th class="add-header">添加</th>
@@ -304,6 +332,7 @@
                             <td>{{ query.brand_name_zh }}</td>
                             <td>{{ query.model_name }} ({{ query.max_speed }} RPM)</td>
                             <td>{{ query.size }}x{{ query.thickness }}</td>
+                            <td>{{ query.reference_price if query.reference_price > 0 else '-' }}</td>
                             <td>{{ query.condition_name_zh }}</td>
                             <td class="text-blue-600 font-medium">{{ query.query_count }}</td>
                             <td>
@@ -335,6 +364,7 @@
                           <th>品牌</th>
                           <th>型号</th>
                           <th>尺寸</th>
+                          <th>参考价</th>
                           <th>热门工况</th>
                           <th>好评次数</th>
                           <th class="add-header">添加</th>
@@ -370,6 +400,7 @@
                           <th>品牌</th>
                           <th>型号</th>
                           <th>尺寸</th>
+                          <th>参考价</th>
                           <th>工况</th>
                           <th class="nowrap" id="searchXHeaderAir">转速</th>
                           <th>风量(CFM)</th>
@@ -378,7 +409,7 @@
                         </tr>
                         </thead>
                         <tbody id="searchAirflowTbody">
-                          <tr><td colspan="8" class="text-center text-gray-500 py-8" style="font-size: 16px;">使用按工况筛选进行搜索</td></tr>
+                          <tr><td colspan="9" class="text-center text-gray-500 py-8" style="font-size: 16px;">使用按工况筛选进行搜索</td></tr>
                         </tbody>
                       </table>
                     </div>
@@ -392,6 +423,7 @@
                           <th>品牌</th>
                           <th>型号</th>
                           <th>尺寸</th>
+                          <th>参考价</th>
                           <th>工况</th>
                           <th class="nowrap" id="searchXHeaderLikes">转速</th>
                           <th>风量(CFM)</th>
@@ -400,7 +432,7 @@
                         </tr>
                         </thead>
                         <tbody id="searchLikesTbody">
-                          <tr><td colspan="8" class="text-center text-gray-500 py-8">使用左侧条件进行搜索</td></tr>
+                          <tr><td colspan="9" class="text-center text-gray-500 py-8">使用左侧条件进行搜索</td></tr>
                         </tbody>
                       </table>
                     </div>

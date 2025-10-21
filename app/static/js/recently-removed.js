@@ -36,7 +36,11 @@ function rebuild(list){
     const info = (window.DisplayCache && window.DisplayCache.get(item.model_id, item.condition_id)) || null;
     const brand = info?.brand || '';
     const model = info?.model || '';
-    const cond  = info?.condition || '加载中...';
+    const condName  = info?.condition || '加载中...';
+    const scenExtra = (typeof window.formatScenario === 'function')
+      ? window.formatScenario(info?.rt, info?.rl)
+      : '';
+    const cond  = scenExtra ? `${condName} - ${scenExtra}` : condName;
 
     const div = document.createElement('div');
     div.className = 'fan-item flex items-center justify-between p-3 border border-gray-200 rounded-md';

@@ -59,7 +59,7 @@ app.secret_key = os.getenv('APP_SECRET', 'replace-me-in-prod')
 app.config['SESSION_COOKIE_SECURE'] = os.getenv('SESSION_COOKIE_SECURE', '0') == '1'
 app.logger.setLevel('WARNING')
 
-#app.config['TEMPLATES_AUTO_RELOAD'] = True      #生产环境注释这行
+app.config['TEMPLATES_AUTO_RELOAD'] = True      #生产环境注释这行
 #app.jinja_env.auto_reload = True                #生产环境注释这行
 #app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0     #生产环境注释这行
 
@@ -375,7 +375,8 @@ def get_top_queries(limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
     sql = """SELECT model_id, condition_id,
                     brand_name_zh, model_name,
                     condition_name_zh,
-                    query_count, size, thickness, max_speed
+                    query_count, size, thickness, max_speed,
+                    reference_price
              FROM total_query_rank_d30
              ORDER BY query_count DESC
              LIMIT :l"""
@@ -385,7 +386,8 @@ def get_top_ratings(limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
     sql = """SELECT model_id, condition_id,
                     brand_name_zh, model_name,
                     condition_name_zh,
-                    like_count, size, thickness, max_speed
+                    like_count, size, thickness, max_speed,
+                    reference_price
              FROM total_like_d30
              ORDER BY like_count DESC
              LIMIT :l"""
@@ -464,32 +466,43 @@ def _effective_value_for_series(series_rows: list, model_id: int, condition_id: 
 
 
 def search_fans_by_condition_with_fit(condition_id=None, condition_name=None, sort_by='none', sort_value=None,
-                         size_filter=None, thickness_min=None, thickness_max=None, limit=200) -> list[dict]:
+                         size_filter=None, thickness_min=None, thickness_max=None,
+                         price_min=None, price_max=None,  # NEW
+                         limit=200) -> list[dict]:
     where = []
     params = {}
 
+    # 工况过滤
     if condition_id is not None:
-        where.append("condition_id=:cid"); params['cid'] = int(condition_id)
+        where.append("g.condition_id=:cid"); params['cid'] = int(condition_id)
     elif (condition_name or '').strip() and condition_name != '全部':
-        where.append("condition_name_zh=:cn"); params['cn'] = condition_name.strip()
+        where.append("g.condition_name_zh=:cn"); params['cn'] = condition_name.strip()
 
+    # 尺寸/厚度
     if size_filter and size_filter != '不限':
-        where.append("size=:sz"); params['sz'] = int(size_filter)
+        where.append("g.size=:sz"); params['sz'] = int(size_filter)
     if thickness_min is not None and thickness_max is not None:
-        where.append("thickness BETWEEN :tmin AND :tmax")
+        where.append("g.thickness BETWEEN :tmin AND :tmax")
         params.update(tmin=int(thickness_min), tmax=int(thickness_max))
 
+    # NEW: 参考价格（元），来自 fan_model.reference_price
+    if price_min is not None and price_max is not None:
+        where.append("reference_price BETWEEN :pmin AND :pmax")
+        params.update(pmin=int(price_min), pmax=int(price_max))
+
     sql = f"""
-      SELECT model_id, condition_id,
-             brand_name_zh, model_name, condition_name_zh,
-             size, thickness, rpm, noise_db, airflow_cfm AS airflow,
-             COALESCE(like_count,0) AS like_count
-      FROM general_view
+      SELECT g.model_id, g.condition_id,
+             g.brand_name_zh, g.model_name, g.condition_name_zh,
+             g.size, g.thickness, g.rpm, g.noise_db, g.airflow_cfm AS airflow,
+             COALESCE(g.like_count,0) AS like_count,
+             reference_price
+      FROM general_view g
       {"WHERE " + " AND ".join(where) if where else ""}
-      ORDER BY model_id, condition_id, rpm
+      ORDER BY g.model_id, g.condition_id, g.rpm
     """
     rows = fetch_all(sql, params)
 
+    # 后续分组/拟合逻辑不变
     groups = {}
     for r in rows:
         mid = int(r['model_id']); cid = int(r['condition_id'])
@@ -497,7 +510,7 @@ def search_fans_by_condition_with_fit(condition_id=None, condition_name=None, so
         g = groups.setdefault(key, {
             'rows': [], 'brand': r['brand_name_zh'], 'model': r['model_name'],
             'condition_name': r['condition_name_zh'], 'size': r['size'], 'thickness': r['thickness'],
-            'like_count': 0, 'max_speed': None
+            'like_count': 0, 'max_speed': None, 'reference_price': r['reference_price']
         })
         g['rows'].append({'rpm': r['rpm'], 'noise_db': r['noise_db'], 'airflow': r['airflow']})
         try:
@@ -524,7 +537,8 @@ def search_fans_by_condition_with_fit(condition_id=None, condition_name=None, so
             'size': g['size'], 'thickness': g['thickness'], 'like_count': g['like_count'],
             'effective_airflow': eff['effective_airflow'], 'effective_x': eff['effective_x'],
             'effective_axis': eff['effective_axis'], 'effective_source': eff['effective_source'],
-            'max_airflow': eff['effective_airflow'], 'max_speed': g['max_speed']
+            'max_airflow': eff['effective_airflow'], 'max_speed': g['max_speed'],
+            'reference_price': g['reference_price'] 
         })
 
     items.sort(key=lambda r: (r['effective_airflow'] if r['effective_airflow'] is not None else -1e9), reverse=True)
@@ -784,7 +798,7 @@ def get_curves_for_pairs(pairs: List[Tuple[int, int]]) -> Dict[str, dict]:
         params[f"c{i}"] = int(c)
     sql = f"""
       SELECT model_id, condition_id, brand_name_zh, model_name,
-             condition_name_zh,
+             condition_name_zh, resistance_type_zh, resistance_location_zh,
              rpm, airflow_cfm AS airflow, noise_db
       FROM general_view
       WHERE (model_id, condition_id) IN ({",".join(conds)})
@@ -799,10 +813,12 @@ def get_curves_for_pairs(pairs: List[Tuple[int, int]]) -> Dict[str, dict]:
             'info': {
                 'brand': r['brand_name_zh'],
                 'model': r['model_name'],
-                'condition_name': r['condition_name_zh'],
+                'condition': r['condition_name_zh'],
+                'resistance_type': r['resistance_type_zh'],
+                'resistance_location': r['resistance_location_zh'],
                 'model_id': int(r['model_id']),
                 'condition_id': int(r['condition_id'])
-            }
+            }   
         })
         rpm = r.get('rpm')
         airflow = r.get('airflow')
@@ -929,11 +945,12 @@ def api_curves():
 
             series.append(dict(
                 key=k,
-                name=f"{info['brand']} {info['model']} - {info['condition_name']}",
+                name=f"{info['brand']} {info['model']} - {info['condition']}",
                 brand=info['brand'], model=info['model'],
-                condition_name_zh=info['condition_name'],
+                condition=info['condition'],
                 model_id=info['model_id'], condition_id=info['condition_id'],
-                # 仅返回给前端的原始数组做占位；模型依然用清洗后的 xs/ys
+                resistance_type=info.get('resistance_type'),
+                resistance_location=info.get('resistance_location'),
                 rpm=_to_placeholder_array(b['rpm']),
                 noise_db=_to_placeholder_array(b['noise_db']),
                 airflow=b['airflow'],
@@ -1072,6 +1089,7 @@ def api_meta_by_ids():
           SELECT
             model_id, condition_id,
             brand_name_zh, model_name, condition_name_zh,
+            resistance_type_zh, resistance_location_zh,
             size, thickness, max_speed
           FROM meta_view
           WHERE (model_id, condition_id) IN ({",".join(conds)})
@@ -1141,6 +1159,10 @@ def api_search_fans():
         sort_by = (data.get('sort_by') or 'none').strip()
         sort_value_raw = (data.get('sort_value') or '').strip()
 
+        # NEW: 参考价格区间（默认 0-999），仅 0~999 的整数
+        price_min_raw = (data.get('price_min') or '0').strip()
+        price_max_raw = (data.get('price_max') or '999').strip()
+
         if not condition_id and not condition:
             return resp_err('SEARCH_MISSING_CONDITION', '请选择工况名称')
 
@@ -1151,6 +1173,14 @@ def api_search_fans():
         if tmin < 1 or tmax < 1 or tmin > 99 or tmin > tmax:
             return resp_err('SEARCH_INVALID_THICKNESS_RANGE', '厚度区间不合法 (1~99 且最小不大于最大)')
 
+        # NEW: 验证价格
+        try:
+            pmin = int(price_min_raw); pmax = int(price_max_raw)
+        except ValueError:
+            return resp_err('SEARCH_INVALID_PRICE_FORMAT', '参考价格必须为整数')
+        if pmin < 0 or pmax < 0 or pmin > 999 or pmax > 999 or pmin > pmax:
+            return resp_err('SEARCH_INVALID_PRICE_RANGE', '参考价格区间不合法 (0~999 且最小不大于最大)')
+        
         sort_value = None
         if sort_by != 'none':
             if not sort_value_raw: return resp_err('SEARCH_MISSING_SORT_VALUE', '请输入限制值')
@@ -1161,7 +1191,9 @@ def api_search_fans():
             condition_id= int(condition_id) if condition_id else None,
             condition_name= condition if (not condition_id) else None,
             sort_by=sort_by, sort_value=sort_value,
-            size_filter=size_filter, thickness_min=tmin, thickness_max=tmax, limit=200
+            size_filter=size_filter, thickness_min=tmin, thickness_max=tmax, 
+            price_min=pmin, price_max=pmax, 
+            limit=200
         )
 
         if sort_by == 'rpm':

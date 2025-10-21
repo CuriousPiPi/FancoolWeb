@@ -37,7 +37,7 @@ const LIKE_FULL_FETCH_THRESHOLD = 20;
 })();
 
 window.DisplayCache = (function(){
-  const map = new Map(); // key => { brand, model, condition }
+  const map = new Map(); // key => { brand, model, condition, rt, rl }
   function k(mid,cid){ return `${Number(mid)}_${Number(cid)}`; }
   return {
     setFromSeries(series){
@@ -47,11 +47,12 @@ window.DisplayCache = (function(){
         map.set(k(mid,cid), {
           brand: s.brand || s.brand_name_zh || '',
           model: s.model || s.model_name || '',
-          condition: s.condition_name_zh || s.condition || ''
+          condition: s.condition || s.condition_name_zh || '',
+          rt: s.resistance_type || s.resistance_type_zh || s.res_type || s.rt || '',
+          rl: s.resistance_location || s.resistance_location_zh || s.res_loc || s.rl || ''
         });
       });
     },
-    // NEW: 从 /api/meta_by_ids 返回的 items 填充
     setFromMeta(items){
       (items||[]).forEach(it=>{
         const mid = it.model_id, cid = it.condition_id;
@@ -59,7 +60,9 @@ window.DisplayCache = (function(){
         map.set(k(mid,cid), {
           brand: it.brand_name_zh || '',
           model: it.model_name || '',
-          condition: it.condition_name_zh || ''
+          condition: it.condition_name_zh || '',
+          rt: it.resistance_type_zh || '',
+          rl: it.resistance_location_zh || ''
         });
       });
     },
@@ -632,7 +635,7 @@ function fetchAllLikeKeys(){
     .catch(()=>{})
     .finally(()=>{ fetchAllLikeKeys._pending = false; });
 }
-// CHANGED: 最近点赞仅按 condition 展示与按钮
+// 修改处：最近点赞列表，工况后追加风阻信息
 function rebuildRecentLikes(list){
   const wrap = recentLikesListEl;
   if (!wrap) return;
@@ -650,13 +653,17 @@ function rebuildRecentLikes(list){
     const thickness = item.thickness ?? item.model_thickness ?? '';
     const maxSpeed = item.max_speed ?? item.maxSpeed ?? '';
     const condition = item.condition_name_zh || item.condition || '';
+    const rt = item.resistance_type_zh || item.rt || '';
+    const rl = item.resistance_location_zh || item.rl || '';
     const mid = item.model_id ?? item.modelId ?? item.mid ?? '';
     const cid = item.condition_id ?? item.conditionId ?? item.cid ?? '';
     if (!brand || !model || !condition) return;
     const key = `${brand}||${model}||${size}||${thickness}||${maxSpeed}`;
     if (!groups.has(key)) groups.set(key, { brand, model, size, thickness, maxSpeed, scenarios:[] });
     const g = groups.get(key);
-    if (!g.scenarios.some(s=>s.condition===condition)) g.scenarios.push({ condition, mid, cid });
+    if (!g.scenarios.some(s=>s.condition===condition && s.rt===rt && s.rl===rl)) {
+      g.scenarios.push({ condition, rt, rl, mid, cid });
+    }
   });
 
   groups.forEach(g=>{
@@ -665,7 +672,9 @@ function rebuildRecentLikes(list){
     if (g.size && g.thickness) metaParts.push(`${escapeHtml(g.size)}x${escapeHtml(g.thickness)}`);
     const metaRight = metaParts.join(' · ');
     const scenariosHtml = g.scenarios.map(s=>{
-      const scenText = escapeHtml(s.condition);
+      const extra = (typeof formatScenario === 'function') ? formatScenario(s.rt, s.rl) : '';
+      const label = extra ? `${s.condition} - ${extra}` : s.condition;
+      const scenText = escapeHtml(label);
       return `
         <div class="flex items-center justify-between scenario-row">
           <div class="scenario-text text-sm text-gray-700">${scenText}</div>
@@ -1157,7 +1166,9 @@ function rebuildSelectedFans(fans){
     const info = DisplayCache.get(f.model_id, f.condition_id);
     const brand = info?.brand || '';
     const model = info?.model || '';
-    const condText = info?.condition || '加载中...';
+    const condName  = info?.condition || '加载中...';
+    const scenExtra = (typeof formatScenario === 'function') ? formatScenario(info?.rt, info?.rl) : '';
+    const condText  = scenExtra ? `${condName} - ${scenExtra}` : condName;
 
     const isLiked = LocalState.likes.has(keyStr);
     const div = document.createElement('div');
@@ -1343,6 +1354,7 @@ function applyRatingTable(resp){
       : `<span class="font-medium">${rank}</span>`;
 
     const scen = escapeHtml(r.condition_name_zh || '');
+    const priceText = (r.reference_price > 0) ? escapeHtml(String(r.reference_price)) : '-';
 
     html += `
       <tr class="hover:bg-gray-50">
@@ -1350,6 +1362,7 @@ function applyRatingTable(resp){
         <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(r.brand_name_zh)}</span></td>
         <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(r.model_name)} (${r.max_speed} RPM)</span></td>
         <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(r.size)}x${escapeHtml(r.thickness)}</span></td>
+        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${priceText}</span></td>
         <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${scen}</span></td>
         <td class="text-blue-600 font-medium">${escapeHtml(r.like_count)}</td>
         <td>
@@ -1452,7 +1465,7 @@ function applyRecentUpdatesTable(resp) {
         <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(model)}${maxSpeed}</span></td>
         <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${sizeText}</span></td>
         <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${scen}</span></td>
-        <td class="nowrap">${updateText}</td>
+        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${updateText}</span></td>
         <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${desc}</span></td>
         <td>
           ${buildQuickBtnHTML('ranking', brand, model, r.model_id, r.condition_id, r.condition_name_zh, 'update_notice')}
@@ -1490,7 +1503,7 @@ function fillSearchTable(tbody, list){
     if (inner) td.innerHTML = inner.innerHTML;
   });
   if (!list.length){
-    tbody.innerHTML='<tr><td colspan="8" class="text-center text-gray-500 py-6">没有符合条件的结果</td></tr>';
+    tbody.innerHTML='<tr><td colspan="9" class="text-center text-gray-500 py-6">没有符合条件的结果</td></tr>';
     return;
   }
 
@@ -1503,6 +1516,7 @@ function fillSearchTable(tbody, list){
     const brand = r.brand_name_zh;
     const model = r.model_name;
     const scenLabel = escapeHtml(r.condition_name_zh || '');
+    const priceText = (r.reference_price > 0) ? escapeHtml(String(r.reference_price)) : '-';
 
     const axis = (r.effective_axis === 'noise') ? 'noise_db' : (r.effective_axis || 'rpm');
     const unit = axis === 'noise_db' ? 'dB' : 'RPM';
@@ -1519,6 +1533,7 @@ function fillSearchTable(tbody, list){
         <td class="nowrap">${escapeHtml(brand)}</td>
         <td class="nowrap">${escapeHtml(model)}</td>
         <td class="nowrap">${escapeHtml(r.size)}x${escapeHtml(r.thickness)}</td>
+        <td class="nowrap">${priceText}</td>
         <td class="nowrap">${scenLabel}</td>
         <td class="nowrap">${xCell}</td>
         <td class="text-blue-600 font-medium text-sm">${airflowText}</td>
@@ -1557,7 +1572,7 @@ function renderSearchResults(results, conditionLabel){
   const sel = document.getElementById('conditionFilterSelect');
   if (!sel) return;
   sel.disabled = true;
-  sel.innerHTML = '<option value="">-- 选择工况 --</option>';
+  sel.innerHTML = '<option value="">-- 选择测试工况 --</option>';
   fetch('/get_conditions?raw=1')
     .then(r=>r.json())
     .then(list=>{
@@ -1582,7 +1597,7 @@ if (searchForm){
 
     const sel = document.getElementById('conditionFilterSelect');
     const cidStr = sel && sel.value ? String(sel.value).trim() : '';
-    if (!cidStr){ showError('请选择工况名称'); return; }
+    if (!cidStr){ showError('请选择测试工况'); return; }
     if (!/^\d+$/.test(cidStr)){ showError('工况选项未正确初始化，请刷新页面'); return; }
 
     const fd = new FormData(searchForm);
@@ -1603,8 +1618,8 @@ if (searchForm){
         const data = await doFetch();
         if (!data.success){
           hideLoading('op'); showError(data.error_message||'搜索失败');
-          searchAirflowTbody.innerHTML='<tr><td colspan="7" class="text-center text-gray-500 py-6">搜索失败</td></tr>';
-          searchLikesTbody.innerHTML='<tr><td colspan="7" class="text-center text-gray-500 py-6">搜索失败</td></tr>';
+          searchAirflowTbody.innerHTML='<tr><td colspan="9" class="text-center text-gray-500 py-6">搜索失败</td></tr>';
+          searchLikesTbody.innerHTML='<tr><td colspan="9" class="text-center text-gray-500 py-6">搜索失败</td></tr>';
           return;
         }
         window.__APP.cache.set(cacheNS, payload, data);
@@ -1613,8 +1628,8 @@ if (searchForm){
         document.querySelector('.fc-tabs[data-tab-group="right-panel"] .fc-tabs__item[data-tab="search-results"]')?.click();
       } catch(err){
         hideLoading('op'); showError('搜索异常: '+err.message);
-        searchAirflowTbody.innerHTML='<tr><td colspan="7" class="text-center text-gray-500 py-6">搜索失败</td></tr>';
-        searchLikesTbody.innerHTML='<tr><td colspan="7" class="text-center text-gray-500 py-6">搜索失败</td></tr>';
+        searchAirflowTbody.innerHTML='<tr><td colspan="9" class="text-center text-gray-500 py-6">搜索失败</td></tr>';
+        searchLikesTbody.innerHTML='<tr><td colspan="9" class="text-center text-gray-500 py-6">搜索失败</td></tr>';
       }
     }
     async function doFetch(){
@@ -1651,10 +1666,93 @@ if (searchForm){
 /* =========================================================
    级联添加（按型号）
    ========================================================= */
+// 新增：多选容器及状态
+const conditionMulti = $('#conditionMulti');
+const condPlaceholderEl = $('#condPlaceholder');
+const condListEl = $('#condList');
+const conditionLoadingEl = $('#conditionLoading');
+
+const CondState = {
+  items: [],        // [{ condition_id, condition_name_zh }]
+  selected: new Set(),
+  get allChecked() { return this.items.length > 0 && this.selected.size === this.items.length; },
+  clear() { this.items = []; this.selected.clear(); }
+};
+
+function setCondPlaceholder(text){
+  if (!condPlaceholderEl || !conditionMulti) return;
+  condPlaceholderEl.textContent = text || '';
+  condPlaceholderEl.classList.remove('hidden');
+  condListEl && condListEl.classList.add('hidden');
+}
+
+function showCondList(){
+  if (!condListEl) return;
+  condPlaceholderEl && condPlaceholderEl.classList.add('hidden');
+  condListEl.classList.remove('hidden');
+}
+
+function renderConditionList(items){
+  CondState.items = Array.isArray(items) ? items.slice() : [];
+  CondState.selected.clear();
+
+  if (!condListEl) return;
+  // 构造“全部”+子项
+  const allId = '__ALL__';
+  const listHtml = `
+    <div class="sticky top-0 bg-white pb-1 border-b border-gray-100 mb-1">
+      <label class="inline-flex items-center gap-2">
+        <input type="checkbox" id="cond_all" class="fc-checkbox">
+        <span>全部</span>
+      </label>
+    </div>
+    <div class="space-y-1">
+      ${CondState.items.map(it => `
+        <label class="flex items-center gap-2">
+          <input type="checkbox" class="cond-item fc-checkbox" data-cond-id="${String(it.condition_id)}">
+          <span class="truncate">${escapeHtml(it.condition_name_zh || '')}</span>
+        </label>
+      `).join('')}
+    </div>`;
+  condListEl.innerHTML = listHtml;
+
+  // 事件绑定
+  const allBox = document.getElementById('cond_all');
+  const itemBoxes = Array.from(condListEl.querySelectorAll('.cond-item'));
+
+  function syncAllFromItems(){
+    if (!allBox) return;
+    allBox.checked = CondState.allChecked;
+    allBox.indeterminate = CondState.selected.size > 0 && !CondState.allChecked;
+  }
+  function checkAll(val){
+    CondState.selected.clear();
+    if (val) {
+      CondState.items.forEach(it => CondState.selected.add(String(it.condition_id)));
+    }
+    itemBoxes.forEach(b => { b.checked = !!val; });
+    syncAllFromItems();
+  }
+
+  allBox?.addEventListener('change', () => {
+    checkAll(allBox.checked);
+  });
+  itemBoxes.forEach(box => {
+    box.addEventListener('change', () => {
+      const id = box.dataset.condId || '';
+      if (box.checked) CondState.selected.add(id); else CondState.selected.delete(id);
+      syncAllFromItems();
+    });
+  });
+
+  // 初始状态：默认不勾选
+  checkAll(false);
+  showCondList();
+}
+
 const fanForm = $('#fanForm');
 const brandSelect = $('#brandSelect');
 const modelSelect = $('#modelSelect');
-const conditionSelect = $('#conditionSelect'); 
 
 async function fetchBrands(){
   const r = await fetch('/api/brands'); const j = await r.json(); const n = normalizeApiResponse(j);
@@ -1671,20 +1769,27 @@ async function fetchConditionsByModel(modelId){
 
 // 初始化品牌下拉（若页面没有服务端注入的话）
 (async function initIdCascades(){
-  if (!brandSelect || !modelSelect || !conditionSelect) return;
+  if (!brandSelect || !modelSelect) return;
   try {
     const brands = await fetchBrands();
     brandSelect.innerHTML = '<option value="">-- 选择品牌 --</option>' + brands.map(b=>`<option value="${escapeHtml(b.brand_id)}">${escapeHtml(b.brand_name_zh)}</option>`).join('');
     brandSelect.disabled = false;
   } catch(_){}
+  // 初始提示
+  setCondPlaceholder('-- 请先选择品牌 --');
 })();
 
 if (brandSelect){
   brandSelect.addEventListener('change', async ()=>{
     const bid = brandSelect.value;
     modelSelect.innerHTML = `<option value="">${bid ? '-- 选择型号 --' : '-- 请先选择品牌 --'}</option>`;
-    conditionSelect.innerHTML = '<option value="">-- 请先选择型号 --</option>';
-    modelSelect.disabled = !bid; conditionSelect.disabled = true;
+    modelSelect.disabled = !bid;
+
+    // 工况面板归位
+    CondState.clear();
+    renderConditionList([]);
+    setCondPlaceholder(bid ? '-- 请先选择型号 --' : '-- 请先选择品牌 --');
+
     if (!bid) return;
     try{
       const models = await fetchModelsByBrand(bid);
@@ -1699,19 +1804,26 @@ if (brandSelect){
 if (modelSelect){
   modelSelect.addEventListener('change', async ()=>{
     const mid = modelSelect.value;
-    conditionSelect.innerHTML = mid ? '<option value="">-- 选择模拟工况 --</option><option value="ALL">全部</option>' : '<option value="">-- 请先选择型号 --</option>';
-    conditionSelect.disabled = !mid;
-    if (!mid) return;
+    CondState.clear();
+    renderConditionList([]);
+    if (!mid) { setCondPlaceholder('-- 请先选择型号 --'); return; }
+    // 显示加载中
+    conditionLoadingEl && conditionLoadingEl.classList.remove('hidden');
+    setCondPlaceholder('加载中...');
     try{
-      const items = await fetchConditionsByModel(mid);
-      items.forEach(c=>{
-        const o=document.createElement('option'); o.value=c.condition_id; o.textContent=c.condition_name_zh; conditionSelect.appendChild(o);
-      });
-    }catch(_){}
+      const items = await fetchConditionsByModel(mid); // [{ condition_id, condition_name_zh }]
+      if (Array.isArray(items) && items.length){
+        renderConditionList(items);
+      } else {
+        setCondPlaceholder('该型号暂无工况');
+      }
+    }catch(_){
+      setCondPlaceholder('加载失败，请重试');
+    } finally {
+      conditionLoadingEl && conditionLoadingEl.classList.add('hidden');
+    }
   });
 }
-
-
 
 if (brandSelect) brandSelect.dispatchEvent(new Event('change'));
 
@@ -2016,16 +2128,33 @@ if (fanForm){
   fanForm.addEventListener('submit', async e=>{
     e.preventDefault();
     const mid = modelSelect.value;
-    const cid = conditionSelect.value;
     if (!mid){ showError('请先选择型号'); return; }
-    if (!cid){ showError('请选择模拟工况'); return; }
+
+    // 计算提交集合
+    const useAll = CondState.allChecked;
+    const pickedIds = Array.from(CondState.selected);
+
+    if (!useAll && pickedIds.length === 0){
+      showError('请选择测试工况'); return;
+    }
+
     showLoading('op','解析中...');
     try {
-      const pairs = await fetchExpandPairsById(Number(mid), cid === 'ALL' ? null : Number(cid));
+      let pairs = [];
+      // 拉取该型号全部 pairs，然后按选择过滤（即使选择较多也只打一次后端）
+      const allPairs = await fetchExpandPairsById(Number(mid), null); // [{model_id, condition_id}]
+      if (useAll) {
+        pairs = allPairs;
+      } else {
+        const wanted = new Set(pickedIds.map(String));
+        pairs = allPairs.filter(p => wanted.has(String(p.condition_id)));
+      }
+
       if (!pairs.length){ hideLoading('op'); showInfo('没有匹配数据'); return; }
       const newPairs = computeNewPairsAfterDedup(pairs);
       if (newPairs.length === 0){ hideLoading('op'); showInfo('全部已存在，无新增'); return; }
       if (!ensureCanAdd(newPairs.length)){ hideLoading('op'); return; }
+
       const addedSummary = LocalState.addPairs(pairs);
       hideLoading('op');
       if (addedSummary.added>0){

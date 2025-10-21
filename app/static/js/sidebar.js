@@ -18,6 +18,65 @@
   const topPanel     = document.getElementById('top-panel');
   const bottomPanel  = document.getElementById('bottom-panel');
 
+   // A11y focus trap (used by overlay open/close)
+  const a11yFocusTrap = (function(){
+    let container = null;
+    let lastFocused = null;
+    let bound = false;
+    function focusableElements(root){
+      return Array.from(root.querySelectorAll(
+        'a[href],button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])'
+      )).filter(el => el.offsetParent !== null);
+    }
+    function handleKey(e){
+      if (e.key !== 'Tab') return;
+      if (!container) return;
+      const list = focusableElements(container);
+      if (!list.length) {
+        e.preventDefault();
+        container.focus();
+        return;
+      }
+      const first = list[0];
+      const last = list[list.length - 1];
+      if (e.shiftKey) {
+        if (document.activeElement === first) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else {
+        if (document.activeElement === last) {
+          e.preventDefault();
+          first.focus();
+        }
+      }
+    }
+    return {
+      activate(root){
+        if (!root) return;
+        container = root;
+        lastFocused = document.activeElement;
+        const list = focusableElements(root);
+        (list[0] || root).focus({ preventScroll:true });
+        if (!bound){
+          document.addEventListener('keydown', handleKey, true);
+          bound = true;
+        }
+      },
+      deactivate(){
+        if (bound){
+          document.removeEventListener('keydown', handleKey, true);
+          bound = false;
+        }
+        if (lastFocused && typeof lastFocused.focus === 'function') {
+          try { lastFocused.focus({ preventScroll:true }); } catch(_){}
+        }
+        container = null;
+        lastFocused = null;
+      }
+    };
+  })();
+
   // Helper to check overlay mode
   function isOverlayMode(){
     return document.documentElement.classList.contains('sidebar-overlay-mode');
@@ -33,7 +92,7 @@
   }
 
   // Overlay (mobile) 初始化
-  (function initSidebarOverlayModeOnce() {
+ (function initSidebarOverlayModeOnce() {
     const vw = window.innerWidth;
     if (vw >= 600) return;
     const root = document.documentElement;
@@ -57,29 +116,15 @@
       }
     }
 
-    function addBackdrop() {
-      if (document.querySelector('.sidebar-overlay-backdrop')) {
-        requestAnimationFrame(()=>document.querySelector('.sidebar-overlay-backdrop')?.classList.add('is-visible'));
-        return;
-      }
-      const bd = document.createElement('div');
-      bd.className = 'sidebar-overlay-backdrop';
-      bd.addEventListener('click', () => window.__APP.sidebar.close());
-      document.body.appendChild(bd);
-      requestAnimationFrame(()=>bd.classList.add('is-visible'));
-    }
-    function removeBackdrop() {
-      const bd = document.querySelector('.sidebar-overlay-backdrop');
-      if (!bd) return;
-      bd.classList.remove('is-visible');
-      setTimeout(()=>bd.remove(), 220);
-    }
+    // 改为 no-op：不再创建/移除遮罩层
+    function addBackdrop() { /* no-op */ }
+    function removeBackdrop() { /* no-op */ }
 
     function overlayOpenSidebar() {
       if (!isOverlayMode()) return;
       if (!sidebar) return;
       sidebar.classList.remove('collapsed');
-      addBackdrop();
+      addBackdrop();              // 现在为 no-op
       lockBodyScroll();
       ensureGestureZone();
       a11yFocusTrap.activate(sidebar);
@@ -90,7 +135,7 @@
       if (!sidebar) return;
       if (!sidebar.classList.contains('collapsed')) {
         sidebar.classList.add('collapsed');
-        removeBackdrop();
+        removeBackdrop();         // 现在为 no-op
         unlockBodyScroll();
         a11yFocusTrap.deactivate();
         const mc = document.getElementById('main-content');

@@ -869,15 +869,6 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
 }
 .sidebar-overlay-mode #sidebar:not(.collapsed) { transform:translateX(0); }
 .sidebar-overlay-mode #main-content { margin-left:0; transform:none; }
-.sidebar-overlay-backdrop {
-  position:fixed;
-  inset:0;
-  background:rgba(0,0,0,.38);
-  backdrop-filter:saturate(120%) blur(8px);
-  z-index:250;
-  opacity:1;
-}
-.sidebar-overlay-backdrop.is-visible { opacity:1; }
 
 #sidebar-gesture-close-zone {
   position:absolute;
@@ -932,6 +923,56 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
   width:100%;
   scroll-snap-align:start;
   scroll-snap-stop:always;
+}
+
+/* 多选工况容器：高度≈两行控件，内部滚动条主题适配 */
+.fc-condition-multi{
+  box-sizing: border-box; /* 计入 padding/border */
+  height: calc(var(--control-height) * 2 + var(--form-row-gap) + 26px) !important;
+  overflow: auto;
+  display: block;
+  align-items: initial;
+  /* Firefox 滚动条颜色 */
+  scrollbar-color: var(--border-color) var(--bg-secondary);
+}
+
+/* WebKit 滚动条主题适配 */
+.fc-condition-multi::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.fc-condition-multi::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 4px;
+}
+.fc-condition-multi::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+.fc-condition-multi::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+}
+
+/* 多选项对齐：让复选框与文字垂直居中 */
+#conditionMulti #condList label {
+  display: flex;
+  align-items: center;  /* 核心：垂直居中 */
+  gap: 8px;
+  line-height: 1.2;
+  padding: 2px 0;
+}
+
+/* 统一复选框尺寸与主题颜色 */
+#conditionMulti input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;             /* 去掉默认外边距，避免基线偏移 */
+  accent-color: var(--fc-color-primary);
+  flex: 0 0 auto;
+}
+
+/* “全部”置顶区背景跟随主题（如果用了 sticky header） */
+#conditionMulti .sticky {
+  background: var(--bg-secondary) !important;
 }
 
 #query-count-display {
