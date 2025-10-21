@@ -1567,7 +1567,6 @@ function renderSearchResults(results, conditionLabel){
   syncQuickActionButtons();
 }
 
-// NEW: 用 get_conditions 获取“工况下拉”（value=condition_id，文本=名称）
 (function initSearchConditionSelect(){
   const sel = document.getElementById('conditionFilterSelect');
   if (!sel) return;
@@ -1580,7 +1579,9 @@ function renderSearchResults(results, conditionLabel){
       arr.forEach(it=>{
         const o = document.createElement('option');
         o.value = String(it.condition_id);
-        o.textContent = it.condition_name_zh || '';
+        const extra = formatScenario(it.resistance_type_zh, it.resistance_location_zh); // 已做转义
+        const base = it.condition_name_zh || '';
+        o.textContent = extra ? `${base} - [${extra}]` : base;
         sel.appendChild(o);
       });
     })
@@ -1697,8 +1698,15 @@ function renderConditionList(items){
   CondState.selected.clear();
 
   if (!condListEl) return;
-  // 构造“全部”+子项
-  const allId = '__ALL__';
+
+  // 预计算显示标签：名称 - 风阻类型(风阻位置)
+  const renderItems = CondState.items.map(it => {
+    const name = escapeHtml(it.condition_name_zh || '');
+    const extra = formatScenario(it.resistance_type_zh, it.resistance_location_zh); // 已转义
+    const label = extra ? `${name} - ${extra}` : name;
+    return { id: String(it.condition_id), label };
+  });
+
   const listHtml = `
     <div class="sticky top-0 bg-white pb-1 border-b border-gray-100 mb-1">
       <label class="inline-flex items-center gap-2">
@@ -1707,16 +1715,16 @@ function renderConditionList(items){
       </label>
     </div>
     <div class="space-y-1">
-      ${CondState.items.map(it => `
+      ${renderItems.map(it => `
         <label class="flex items-center gap-2">
-          <input type="checkbox" class="cond-item fc-checkbox" data-cond-id="${String(it.condition_id)}">
-          <span class="truncate">${escapeHtml(it.condition_name_zh || '')}</span>
+          <input type="checkbox" class="cond-item fc-checkbox" data-cond-id="${it.id}">
+          <span class="truncate">${it.label}</span>
         </label>
       `).join('')}
     </div>`;
   condListEl.innerHTML = listHtml;
 
-  // 事件绑定
+  // 事件绑定保持不变
   const allBox = document.getElementById('cond_all');
   const itemBoxes = Array.from(condListEl.querySelectorAll('.cond-item'));
 
@@ -1745,7 +1753,6 @@ function renderConditionList(items){
     });
   });
 
-  // 初始状态：默认不勾选
   checkAll(false);
   showCondList();
 }

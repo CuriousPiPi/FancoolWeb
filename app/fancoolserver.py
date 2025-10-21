@@ -1041,7 +1041,7 @@ def get_models(brand):
 def get_conditions(brand=None, model=None):
     if brand and model:
         rows = fetch_all(
-            "SELECT DISTINCT condition_id, condition_name_zh "
+            "SELECT DISTINCT condition_id, condition_name_zh, resistance_type_zh, resistance_location_zh "
             "FROM general_view WHERE is_valid=1 AND brand_name_zh=:b AND model_name=:m "
             "ORDER BY condition_name_zh",
             {'b': brand, 'm': model}
@@ -1050,7 +1050,7 @@ def get_conditions(brand=None, model=None):
         return _maybe_raw_array(rows)
     else:
         rows = fetch_all(
-            "SELECT condition_id, condition_name_zh "
+            "SELECT condition_id, condition_name_zh, resistance_type_zh, resistance_location_zh "
             "FROM working_condition WHERE is_valid=1 "
             "ORDER BY condition_name_zh"
         )
@@ -1231,7 +1231,7 @@ def api_conditions_by_model():
     try:
         mid = int(request.args.get('model_id') or '0')
         if not mid: return resp_err('BAD_REQUEST', 'model_id 缺失或非法')
-        rows = fetch_all("SELECT DISTINCT condition_id, condition_name_zh FROM general_view WHERE model_id=:m ORDER BY condition_name_zh", {'m': mid})
+        rows = fetch_all("SELECT DISTINCT condition_id, condition_name_zh, resistance_type_zh, resistance_location_zh FROM general_view WHERE model_id=:m ORDER BY condition_name_zh", {'m': mid})
         return resp_ok({'items': rows})
     except Exception as e:
         app.logger.exception(e); return resp_err('INTERNAL_ERROR', str(e), 500)
