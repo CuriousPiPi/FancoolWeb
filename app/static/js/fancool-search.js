@@ -47,7 +47,94 @@
     set(ns, payload, value, ttl){ return has.cache ? window.__APP.cache.set(ns, payload, value, ttl) : value; }
   };
 
-// 仅改动：通用自定义下拉，支持动态占位与禁用时提示
+// NEW: 通用门户下拉控制（定位/开关/事件绑定）
+function createPortalDropdown(btn, panel, {
+  root = btn,         // 用于判定“外点关闭”的根容器（通常是 wrap）
+  margin = 6,         // 面板与按钮的间距
+  preferredMaxH = 320,// 期望的最大高度
+  minMaxH = 120,      // 最小最大高度下限
+  getWidth            // 自定义宽度函数 (btnRect)=>number；默认=按钮宽度
+} = {}) {
+  // 确保挂到 body + 门户类名
+  if (!panel.classList.contains('fc-portal')) panel.classList.add('fc-portal');
+  if (panel.parentNode !== document.body) document.body.appendChild(panel);
+
+  let bound = false;
+  function place() {
+    const r = btn.getBoundingClientRect();
+    panel.style.visibility = 'hidden';
+    panel.classList.remove('hidden');
+
+    const spaceBelow = window.innerHeight - r.bottom - margin;
+    const spaceAbove = r.top - margin;
+    const openUp = spaceBelow < 160 && spaceAbove > spaceBelow;
+    const maxH = Math.max(minMaxH, Math.min(preferredMaxH, openUp ? spaceAbove : spaceBelow));
+
+    const width = Math.round(typeof getWidth === 'function' ? getWidth(r) : r.width);
+    panel.style.minWidth = width + 'px';
+    panel.style.width    = width + 'px';
+    panel.style.maxHeight = Math.round(maxH) + 'px';
+
+    panel.style.left = Math.round(r.left) + 'px';
+    panel.style.top  = openUp
+      ? Math.round(r.top - panel.offsetHeight - margin) + 'px'
+      : Math.round(r.bottom + margin) + 'px';
+
+    const pr = panel.getBoundingClientRect();
+    const overflowRight = pr.right - window.innerWidth;
+    if (overflowRight > 0) {
+      panel.style.left = Math.round(r.left - overflowRight - 4) + 'px';
+    }
+    if (pr.left < 0) {
+      panel.style.left = '4px';
+    }
+    panel.style.visibility = '';
+  }
+
+  function open() {
+    // 收起其它面板
+    document.querySelectorAll('.fc-custom-options').forEach(p => {
+      if (p !== panel) p.classList.add('hidden');
+    });
+    place();
+    btn.setAttribute('aria-expanded', 'true');
+
+    if (!bound) {
+      bound = true;
+      window.addEventListener('scroll', place, true);
+      window.addEventListener('resize', place, { passive: true });
+      document.addEventListener('click', onDocClick, true);
+    }
+  }
+
+  function close() {
+    panel.classList.add('hidden');
+    btn.setAttribute('aria-expanded', 'false');
+    if (bound) {
+      bound = false;
+      window.removeEventListener('scroll', place, true);
+      window.removeEventListener('resize', place);
+      document.removeEventListener('click', onDocClick, true);
+    }
+  }
+
+  function onDocClick(e) {
+    const t = e.target;
+    if (!t) return;
+    if (panel.contains(t)) return;
+    if (root && root.contains && root.contains(t)) return;
+    close();
+  }
+
+  function destroy() {
+    close();
+    // 不移除节点本身，交由上层决定；仅解绑事件
+  }
+
+  return { place, open, close, destroy };
+}
+
+// buildCustomSelectFromNative：接入 createPortalDropdown
 function buildCustomSelectFromNative(nativeSelect, {
   placeholder = '-- 请选择 --',
   filter = (opt) => opt.value !== '',
@@ -60,17 +147,20 @@ function buildCustomSelectFromNative(nativeSelect, {
 
   const wrap = document.createElement('div');
   wrap.className = 'fc-custom-select';
+
   const btn = document.createElement('button');
   btn.type = 'button';
   btn.className = 'fc-custom-button fc-field border-gray-300';
   btn.setAttribute('aria-expanded', 'false');
   btn.innerHTML = `<span class="truncate fc-custom-label">${EH(placeholder)}</span><i class="fa-solid fa-chevron-down ml-2 text-gray-500"></i>`;
-  const panel = document.createElement('div');
-  panel.className = 'fc-custom-options hidden';
-  wrap.appendChild(btn); wrap.appendChild(panel);
-  nativeSelect.parentNode.insertBefore(wrap, nativeSelect.nextSibling);
 
-  // 新增：当前占位符（可动态更新）
+  const panel = document.createElement('div');
+  panel.className = 'fc-custom-options hidden fc-portal';
+
+  wrap.appendChild(btn);
+  nativeSelect.parentNode.insertBefore(wrap, nativeSelect.nextSibling);
+  document.body.appendChild(panel);
+
   let currentPlaceholder = placeholder;
 
   (function syncStyle(){
@@ -79,16 +169,15 @@ function buildCustomSelectFromNative(nativeSelect, {
       const br = cs.borderRadius || '.375rem';
       const fs = cs.fontSize || '14px';
       btn.style.borderRadius = br;
-      panel.style.borderRadius = br;
       btn.style.fontSize = fs;
+      panel.style.borderRadius = br;
       panel.style.fontSize = fs;
     }catch(_){}
   })();
 
   function setLabelByValue(v){
     const opt = Array.from(nativeSelect.options).find(o => String(o.value) === String(v));
-    const labelEl = btn.querySelector('.fc-custom-label');
-    labelEl.innerHTML = opt ? renderLabel(opt) : EH(currentPlaceholder);
+    btn.querySelector('.fc-custom-label').innerHTML = opt ? renderLabel(opt) : EH(currentPlaceholder);
   }
   function renderOptions(){
     const html = Array.from(nativeSelect.options)
@@ -98,20 +187,18 @@ function buildCustomSelectFromNative(nativeSelect, {
     panel.innerHTML = html || '<div class="px-3 py-2 text-gray-500">无可选项</div>';
     setLabelByValue(nativeSelect.value);
   }
-
-  // 新增：监听原生 change（外部程序性变更同步按钮文案）
   nativeSelect.addEventListener('change', () => setLabelByValue(nativeSelect.value));
+  renderOptions();
+
+  // 使用通用门户控制
+  const portal = createPortalDropdown(btn, panel, {
+    root: wrap,
+    getWidth: (r) => r.width // 保持“面板宽度 = 按钮宽度”的现有行为
+  });
 
   btn.addEventListener('click', () => {
     const isHidden = panel.classList.contains('hidden');
-    if (isHidden) {
-      document.querySelectorAll('.fc-custom-options').forEach(p => p.classList.add('hidden'));
-      panel.classList.remove('hidden');
-      btn.setAttribute('aria-expanded', 'true');
-    } else {
-      panel.classList.add('hidden');
-      btn.setAttribute('aria-expanded', 'false');
-    }
+    if (isHidden) portal.open(); else portal.close();
   });
   panel.addEventListener('click', (e) => {
     const node = e.target.closest('.fc-option');
@@ -120,21 +207,11 @@ function buildCustomSelectFromNative(nativeSelect, {
     nativeSelect.value = v;
     nativeSelect.dispatchEvent(new Event('change', { bubbles: true }));
     setLabelByValue(v);
-    panel.classList.add('hidden');
-    btn.setAttribute('aria-expanded', 'false');
+    portal.close();
   });
-  document.addEventListener('click', (e) => {
-    if (!wrap.contains(e.target)) {
-      panel.classList.add('hidden');
-      btn.setAttribute('aria-expanded', 'false');
-    }
-  });
-
-  renderOptions();
 
   return {
     refresh(){ renderOptions(); },
-    // 修改：支持禁用时自定义占位提示
     setDisabled(disabled, opts = {}){
       btn.disabled = !!disabled;
       btn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
@@ -142,8 +219,8 @@ function buildCustomSelectFromNative(nativeSelect, {
         currentPlaceholder = String(opts.placeholder);
         setLabelByValue(nativeSelect.value);
       }
+      if (disabled) portal.close();
     },
-    // 新增：单独更新占位符
     setPlaceholder(text){
       currentPlaceholder = String(text || placeholder);
       setLabelByValue(nativeSelect.value);
@@ -152,101 +229,98 @@ function buildCustomSelectFromNative(nativeSelect, {
       nativeSelect.value = v;
       nativeSelect.dispatchEvent(new Event('change', { bubbles:true }));
       setLabelByValue(v);
+      portal.close();
     },
     getValue(){ return nativeSelect.value; }
   };
 }
 
-  // 自定义下拉（仅工况：带灰色后缀）
-  function buildCustomConditionDropdown(sel, items){
-    if (!sel || sel._customBuilt) return { setDisabled: ()=>{} };
-    sel._customBuilt = true;
-    sel.style.display = 'none';
+// buildCustomConditionDropdown：接入 createPortalDropdown
+function buildCustomConditionDropdown(sel, items){
+  if (!sel || sel._customBuilt) return { setDisabled: ()=>{} };
+  sel._customBuilt = true;
+  sel.style.display = 'none';
 
-    const wrap = document.createElement('div');
-    wrap.className = 'fc-custom-select';
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.className = 'fc-custom-button fc-field border-gray-300';
-    btn.setAttribute('aria-expanded', 'false');
-    btn.innerHTML = `
-      <span class="truncate fc-custom-label">-- 选择测试工况 --</span>
-      <i class="fa-solid fa-chevron-down ml-2 text-gray-500"></i>
-    `;
-    const panel = document.createElement('div');
-    panel.className = 'fc-custom-options hidden';
+  const wrap = document.createElement('div');
+  wrap.className = 'fc-custom-select';
 
-    panel.innerHTML = (items||[]).map(it => {
-      const value = String(it.condition_id);
-      const name = EH(it.condition_name_zh || '');
-      const extra = FS(it.resistance_type_zh, it.resistance_location_zh);
-      const extraHtml = extra ? `<span class="fc-cond-extra"> - ${extra}</span>` : '';
-      return `<div class="fc-option" data-value="${value}">
-                <span class="fc-cond-name">${name}</span>${extraHtml}
-              </div>`;
-    }).join('') || '<div class="px-3 py-2 text-gray-500">无可选项</div>';
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'fc-custom-button fc-field border-gray-300';
+  btn.setAttribute('aria-expanded', 'false');
+  btn.innerHTML = `
+    <span class="truncate fc-custom-label">-- 选择测试工况 --</span>
+    <i class="fa-solid fa-chevron-down ml-2 text-gray-500"></i>
+  `;
 
-    wrap.appendChild(btn); wrap.appendChild(panel);
-    sel.parentNode.insertBefore(wrap, sel.nextSibling);
+  const panel = document.createElement('div');
+  panel.className = 'fc-custom-options hidden fc-portal';
 
-    (function syncStyle(){
-      try{
-        const cs = getComputedStyle(sel);
-        const br = cs.borderRadius || '.375rem';
-        const fs = cs.fontSize || '14px';
-        btn.style.borderRadius = br;
-        panel.style.borderRadius = br;
-        btn.style.fontSize = fs;
-        panel.style.fontSize = fs;
-      }catch(_){}
-    })();
+  panel.innerHTML = (items||[]).map(it => {
+    const value = String(it.condition_id);
+    const name = EH(it.condition_name_zh || '');
+    const extra = FS(it.resistance_type_zh, it.resistance_location_zh);
+    const extraHtml = extra ? `<span class="fc-cond-extra"> - ${extra}</span>` : '';
+    return `<div class="fc-option" data-value="${value}">
+              <span class="fc-cond-name">${name}</span>${extraHtml}
+            </div>`;
+  }).join('') || '<div class="px-3 py-2 text-gray-500">无可选项</div>';
 
-    function setButtonLabelByValue(v){
-      const rec = (items||[]).find(x => String(x.condition_id) === String(v));
-      const labelBox = btn.querySelector('.fc-custom-label');
-      if (!labelBox) return;
-      if (!rec) { labelBox.innerHTML = '-- 选择测试工况 --'; return; }
-      const name = EH(rec.condition_name_zh || '');
-      const extra = FS(rec.resistance_type_zh, rec.resistance_location_zh);
-      labelBox.innerHTML = `${name}${extra ? `<span class="fc-cond-extra"> - ${extra}</span>` : ''}`;
-    }
+  sel.parentNode.insertBefore(wrap, sel.nextSibling);
+  wrap.appendChild(btn);
+  document.body.appendChild(panel);
 
-    // 新增：响应原生变更
-    sel.addEventListener('change', () => setButtonLabelByValue(sel.value));
+  (function syncStyle(){
+    try{
+      const cs = getComputedStyle(sel);
+      const br = cs.borderRadius || '.375rem';
+      const fs = cs.fontSize || '14px';
+      btn.style.borderRadius = br;
+      btn.style.fontSize = fs;
+      panel.style.borderRadius = br;
+      panel.style.fontSize = fs;
+    }catch(_){}
+  })();
 
-    btn.addEventListener('click', () => {
-      const isHidden = panel.classList.contains('hidden');
-      if (isHidden) {
-        document.querySelectorAll('.fc-custom-options').forEach(p => p.classList.add('hidden'));
-        panel.classList.remove('hidden');
-        btn.setAttribute('aria-expanded', 'true');
-      } else {
-        panel.classList.add('hidden');
-        btn.setAttribute('aria-expanded', 'false');
-      }
-    });
-    panel.addEventListener('click', (e) => {
-      const node = e.target.closest('.fc-option');
-      if (!node) return;
-      const v = node.dataset.value || '';
-      sel.value = v;
-      sel.dispatchEvent(new Event('change', { bubbles:true }));
-      setButtonLabelByValue(v);
-      panel.classList.add('hidden');
-      btn.setAttribute('aria-expanded', 'false');
-    });
-    document.addEventListener('click', (e) => {
-      if (!wrap.contains(e.target)) {
-        panel.classList.add('hidden');
-        btn.setAttribute('aria-expanded', 'false');
-      }
-    });
-
-    setButtonLabelByValue(sel.value || '');
-    return {
-      setDisabled(disabled){ btn.disabled = !!disabled; btn.setAttribute('aria-disabled', disabled ? 'true' : 'false'); }
-    };
+  function setButtonLabelByValue(v){
+    const rec = (items||[]).find(x => String(x.condition_id) === String(v));
+    const labelBox = btn.querySelector('.fc-custom-label');
+    if (!rec) { labelBox.innerHTML = '-- 选择测试工况 --'; return; }
+    const name = EH(rec.condition_name_zh || '');
+    const extra = FS(rec.resistance_type_zh, rec.resistance_location_zh);
+    labelBox.innerHTML = `${name}${extra ? `<span class="fc-cond-extra"> - ${extra}</span>` : ''}`;
   }
+  sel.addEventListener('change', () => setButtonLabelByValue(sel.value));
+  setButtonLabelByValue(sel.value || '');
+
+  // 使用通用门户控制
+  const portal = createPortalDropdown(btn, panel, {
+    root: wrap,
+    getWidth: (r) => r.width
+  });
+
+  btn.addEventListener('click', () => {
+    const isHidden = panel.classList.contains('hidden');
+    if (isHidden) portal.open(); else portal.close();
+  });
+  panel.addEventListener('click', (e) => {
+    const node = e.target.closest('.fc-option');
+    if (!node) return;
+    const v = node.dataset.value || '';
+    sel.value = v;
+    sel.dispatchEvent(new Event('change', { bubbles:true }));
+    setButtonLabelByValue(v);
+    portal.close();
+  });
+
+  return {
+    setDisabled(disabled){
+      btn.disabled = !!disabled;
+      btn.setAttribute('aria-disabled', disabled ? 'true' : 'false');
+      if (disabled) portal.close();
+    }
+  };
+}
 
   // =============== 模块 A：按工况筛选（Search by Condition） ===============
   function initConditionSearch(){
@@ -339,7 +413,8 @@ function buildCustomSelectFromNative(nativeSelect, {
       if (cached){
         if (window.__APP?.modules?.search?.render) window.__APP.modules.search.render(cached.search_results, cached.condition_label);
         else if (typeof window.renderSearchResults === 'function') window.renderSearchResults(cached.search_results, cached.condition_label);
-        has.toast && window.showInfo('已使用缓存结果，后台刷新中...');
+        document.querySelector('.fc-tabs[data-tab-group="right-panel"] .fc-tabs__item[data-tab="search-results"]')?.click();
+        has.toast && window.showInfo('已使用缓存结果...');
         refreshFromServer(cached);
       } else {
         has.toast && window.showLoading('op','搜索中...');
@@ -379,6 +454,7 @@ function buildCustomSelectFromNative(nativeSelect, {
     el.classList.remove('hidden');
     list && list.classList.add('hidden');
   }
+
   function showCondList(){
     const el = $$('#condPlaceholder'); const list = $$('#condList');
     if (el) el.classList.add('hidden');
@@ -514,7 +590,7 @@ function initModelCascade(){
     uiModel.refresh();
     uiModel.setDisabled(true, { placeholder: '-- 请先选择品牌 --' });
 
-    setCondPlaceholder('-- 请先选择品牌 --');
+    setCondPlaceholder('\u00A0-- 请先选择品牌 --');
   })();
 
   brandSelect.addEventListener('change', async ()=>{

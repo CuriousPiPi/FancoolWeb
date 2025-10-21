@@ -809,15 +809,19 @@ function loadRecentLikesIfNeeded(){
     const wrapper   = card.querySelector('.fc-tab-wrapper');
     if (!container || !wrapper) return;
 
-    // 确保有 id
+    // 确保有 id（与下方其它调用保持一致）
     if (!container.id) container.id = 'right-panel-container';
     if (!wrapper.id)   wrapper.id   = 'right-panel-wrapper';
 
-    // 初始化（不保存状态）。默认激活哪一页由 HTML 中 .active 决定，建议把“近期热门”标注为 active
+    // 标记：右侧页签已启用 Scroll Snap，供 activateTab 等逻辑识别
+    window.__RIGHT_PANEL_SNAP_ON = true;
+
+    // 初始化（不保存状态），默认激活“近期热门”
     initSnapTabScrolling({
       containerId: container.id,
       group: 'right-panel',
       persistKey: null,
+      defaultTab: 'top-queries',
       onActiveChange: (tab) => {
         // 保持既有副作用：子页签显隐 + 懒加载
         if (typeof updateRightSubseg === 'function') updateRightSubseg(tab);
@@ -1493,7 +1497,6 @@ function loadRecentUpdatesIfNeeded() {
 /* =========================================================
    搜索（移除跑马灯）
    ========================================================= */
-const searchForm = $('#searchForm');
 const searchAirflowTbody = $('#searchAirflowTbody');
 const searchLikesTbody = $('#searchLikesTbody');
 let SEARCH_RESULTS_RAW = [];
@@ -2376,11 +2379,6 @@ function maybeAutoOpenSidebarOnAdd(){
   }).catch(()=>{}).finally(()=>{
     try { sessionStorage.setItem('visit_started','1'); } catch(_){}
   });
-})();
-
-(function initSearchConditionSingleSelect(){
-  const form = document.getElementById('searchForm');
-  if (!form) return;
 })();
 
 /* 全局 Tooltip */

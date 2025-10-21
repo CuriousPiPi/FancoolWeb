@@ -1268,6 +1268,12 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
   scrollbar-color: var(--border-color) var(--bg-secondary);
 }
 
+/* 自定义下拉按钮禁用态：让显示文字变灰（占位风格） */
+.fc-custom-select .fc-custom-button[aria-disabled="true"] .fc-custom-label,
+.fc-custom-select .fc-custom-button:disabled .fc-custom-label {
+  color: var(--text-secondary) !important;
+}
+
 /* 按钮：与原生一致（JS 会覆盖圆角与字号），两处表单共用 */
 #searchForm .fc-custom-button,
 #fanForm .fc-custom-button {
@@ -1283,9 +1289,11 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
 }
 
 /* 面板：背景与自定义下拉一致，不透明深色（暗色主题） */
-#searchForm .fc-custom-options,
-#fanForm .fc-custom-options {
-  position: absolute; left: 0; right: 0; margin-top: 4px;
+.fc-custom-options:not(.fc-portal) {
+  position: absolute; 
+  left: 0; 
+  right: 0; 
+  margin-top: 4px;
   background: var(--bg-primary);
   border: 1px solid var(--border-color);
   border-radius: .375rem;
@@ -1294,17 +1302,35 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
   z-index: 40;
   font: inherit;
 }
-#searchForm .fc-custom-options.hidden,
-#fanForm .fc-custom-options.hidden { display: none; }
 
-#searchForm .fc-option,
-#fanForm .fc-option {
+.fc-custom-options.hidden { display: none !important; }
+/* 允许自定义下拉面板越过父容器裁切：门户面板样式 */
+.fc-custom-options.fc-portal {
+  box-sizing: border-box;  
+  max-width: calc(100vw - 8px);
+  position: fixed;          /* 关键：相对视口定位 */
+  left: 0; top: 0;          /* 实际坐标由 JS 设置 */
+  margin-top: 0;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: .375rem;
+  box-shadow: var(--shadow-md, 0 4px 10px rgba(0,0,0,.08));
+  max-height: 320px;
+  overflow-x: hidden;
+  z-index: 1200;            /* 高于侧栏内容、表单等 */
+  font: inherit;
+  scrollbar-gutter: stable;                /* 预留滚动条空间，避免跳动 */
+  scrollbar-color: var(--border-color) var(--bg-secondary); /* Firefox 主题色 */
+}
+
+/* 全局选项条目样式（避免仅限某表单作用域） */
+.fc-custom-options .fc-option {
   padding: .375rem .625rem;
   cursor: pointer;
   font: inherit;
 }
-#searchForm .fc-option:hover,
-#fanForm .fc-option:hover {
+
+.fc-custom-options .fc-option:hover {
   background: var(--bg-secondary);
 }
 
@@ -1316,8 +1342,9 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
   font-size: 0.92em;
 }
 
-/* 型号搜索候选：深色主题用不透明深色，和自定义下拉一致 */
-[data-theme="dark"] #searchSuggestions {
+/* 深色主题下的候选面板背景与自定义下拉一致（不透明深色） */
+[data-theme="dark"] #searchSuggestions, 
+[data-theme="dark"] .fc-custom-options.fc-portal {
   background: var(--bg-primary) !important;
   border-color: var(--border-color) !important;
   color: var(--text-primary) !important;
