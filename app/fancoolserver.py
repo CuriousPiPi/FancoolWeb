@@ -377,7 +377,7 @@ def get_top_queries(limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
                     condition_name_zh,
                     query_count, size, thickness, max_speed,
                     reference_price
-             FROM total_query_rank_d30
+             FROM total_query_rank_d30_view
              ORDER BY query_count DESC
              LIMIT :l"""
     return fetch_all(sql, {'l': limit})
@@ -388,7 +388,7 @@ def get_top_ratings(limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
                     condition_name_zh,
                     like_count, size, thickness, max_speed,
                     reference_price
-             FROM total_like_d30
+             FROM total_like_d30_view
              ORDER BY like_count DESC
              LIMIT :l"""
     return fetch_all(sql, {'l': limit})
