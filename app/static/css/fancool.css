@@ -155,7 +155,7 @@ a, button { color:var(--text-primary); }
 
 /* 2. 表单与输入 */
 .fc-form-grid { display:grid; grid-template-columns:1fr; row-gap:var(--form-row-gap); }
-.fc-form-row label { display:block; margin-bottom:6px; font-size:14px; }
+.fc-form-row label { display:block; margin-bottom:5px; font-size:15px; }
 
 .fc-field,
 .fc-btn,
@@ -925,60 +925,6 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
   scroll-snap-stop:always;
 }
 
-/* 多选工况容器：高度≈两行控件，内部滚动条主题适配 */
-.fc-condition-multi{
-  box-sizing: border-box; /* 计入 padding/border */
-  height: calc(var(--control-height) * 2 + var(--form-row-gap) + 26px) !important;
-  overflow: auto;
-  display: block;
-  align-items: initial;
-  /* Firefox 滚动条颜色 */
-  scrollbar-color: var(--border-color) var(--bg-secondary);
-}
-
-/* WebKit 滚动条主题适配 */
-.fc-condition-multi::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-.fc-condition-multi::-webkit-scrollbar-thumb {
-  background: var(--border-color);
-  border-radius: 4px;
-}
-.fc-condition-multi::-webkit-scrollbar-thumb:hover {
-  background: var(--text-secondary);
-}
-.fc-condition-multi::-webkit-scrollbar-track {
-  background: var(--bg-secondary);
-}
-
-/* 多选项对齐：让复选框与文字垂直居中 */
-#conditionMulti #condList label {
-  display: flex;
-  align-items: center;  /* 核心：垂直居中 */
-  gap: 8px;
-  line-height: 1.2;
-  padding: 2px 0;
-}
-
-#conditionMulti #condList .fc-cond-extra {
-  color: var(--text-secondary) !important;  /* 与侧栏一致的偏灰色 */
-}
-
-/* 统一复选框尺寸与主题颜色 */
-#conditionMulti input[type="checkbox"] {
-  width: 16px;
-  height: 16px;
-  margin: 0;             /* 去掉默认外边距，避免基线偏移 */
-  accent-color: var(--fc-color-primary);
-  flex: 0 0 auto;
-}
-
-/* “全部”置顶区背景跟随主题（如果用了 sticky header） */
-#conditionMulti .sticky {
-  background: var(--bg-secondary) !important;
-}
-
 #query-count-display {
   position:absolute;
   top:0; right:0;
@@ -1158,7 +1104,7 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
 }
 
 :root {
-  --toast-glass-bg: rgba(255,255,255,0.70);
+  --toast-glass-bg: rgb(255, 255, 255);
   --toast-glass-border: rgba(255,255,255,0.55);
   --toast-glass-shadow: 0 4px 18px -2px rgba(0,0,0,0.18), 0 0 0 1px rgba(0,0,0,0.06);
 }
@@ -1169,9 +1115,22 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
 }
 
 
-/*Toast 毛玻璃效果*/
 .fc-toast {
   background: var(--toast-glass-bg) !important;
+  border: 1px solid var(--toast-glass-border) !important;
+  box-shadow: var(--toast-glass-shadow) !important;
+  display: flex;
+  align-items: center;            
+  gap: .65rem;
+  padding: .85rem 1.05rem;
+  line-height: 1.35;
+  border-radius: 14px;            
+  position: relative;
+}
+
+/*Toast 深色主题毛玻璃效果*/
+[data-theme="dark"] .fc-toast {
+  background-color: var(--toast-glass-bg) !important;
   backdrop-filter: blur(8px) saturate(120%);
   -webkit-backdrop-filter: blur(8px) saturate(120%);
   border: 1px solid var(--toast-glass-border) !important;
@@ -1184,8 +1143,11 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
   line-height: 1.35;
   border-radius: 14px;            
   position: relative;
-  transition: background .25s ease, box-shadow .25s ease;
+  transition: background-color .25s ease, box-shadow .25s ease;
 }
+
+
+
 
 .fc-toast .icon,
 .fc-toast i.icon,
@@ -1207,7 +1169,7 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
   min-width: 0;
   word-break: break-word;
   white-space: normal;
-  font-size: 14px;
+  font-size: 15px;
   font-weight: 500;
 }
 
@@ -1233,3 +1195,130 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
   to { opacity:0; transform:translateY(-6px) scale(.96); }
 }
 
+/* =========================================================
+   搜索模块自定义下拉框和复选框
+   ========================================================= */
+/* 多选工况容器：高度≈两行控件，内部滚动条主题适配 */
+.fc-condition-multi{
+  box-sizing: border-box;
+  height: calc(var(--control-height) * 2 + var(--form-row-gap) + 26px) !important;
+  overflow: auto;
+  display: block;
+  align-items: initial;
+  scrollbar-color: var(--border-color) var(--bg-secondary);
+  /* 让滚动条在内容内侧留出上下间隙，减少贴边覆盖圆角的观感 */
+  scrollbar-gutter: stable;
+  padding-block: 4px;          /* Firefox/通用：顶部/底部打一点缓冲 */
+  background-clip: padding-box; /* 防止背景越过圆角边界 */
+}
+
+/* WebKit 滚动条主题适配 */
+.fc-condition-multi::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.fc-condition-multi::-webkit-scrollbar-thumb {
+  background: var(--border-color);
+  border-radius: 4px;
+  /* 为滚动条滑块创造内边距感，避免顶底贴边 */
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+.fc-condition-multi::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+  background-clip: content-box;
+}
+.fc-condition-multi::-webkit-scrollbar-track {
+  background: var(--bg-secondary);
+  margin: 6px 0;               /* 关键：轨道上下留白（Chrome/Safari 有效） */
+  border-radius: 8px;
+}
+
+/* 多选项对齐：让复选框与文字垂直居中 */
+#conditionMulti #condList label {
+  display: flex;
+  align-items: center;  /* 核心：垂直居中 */
+  gap: 8px;
+  line-height: 1.2;
+  padding: 2px 0;
+}
+
+#conditionMulti #condList .fc-cond-extra {
+  color: var(--text-secondary) !important;  /* 与侧栏一致的偏灰色 */
+}
+
+/* 统一复选框尺寸与主题颜色 */
+#conditionMulti input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin: 0;             /* 去掉默认外边距，避免基线偏移 */
+  accent-color: var(--fc-color-primary);
+  flex: 0 0 auto;
+}
+
+/* “全部”置顶区背景跟随主题（如果用了 sticky header） */
+#conditionMulti .sticky {
+  background: var(--bg-secondary) !important;
+}
+
+/* 自定义下拉：作用范围从搜索页扩展到型号添加页 */
+#searchForm .fc-custom-select,
+#fanForm .fc-custom-select { 
+  position: relative; 
+  scrollbar-color: var(--border-color) var(--bg-secondary);
+}
+
+/* 按钮：与原生一致（JS 会覆盖圆角与字号），两处表单共用 */
+#searchForm .fc-custom-button,
+#fanForm .fc-custom-button {
+  display: flex; align-items: center; justify-content: space-between;
+  width: 100%;
+  border: 1px solid var(--border-color);
+  border-radius: .375rem;
+  padding: .5rem .75rem;
+  background: var(--bg-primary);
+  color: inherit;
+  font: inherit;
+  line-height: 1.5;
+}
+
+/* 面板：背景与自定义下拉一致，不透明深色（暗色主题） */
+#searchForm .fc-custom-options,
+#fanForm .fc-custom-options {
+  position: absolute; left: 0; right: 0; margin-top: 4px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: .375rem;
+  box-shadow: var(--shadow-md, 0 4px 10px rgba(0,0,0,.08));
+  max-height: 240px; overflow: auto;
+  z-index: 40;
+  font: inherit;
+}
+#searchForm .fc-custom-options.hidden,
+#fanForm .fc-custom-options.hidden { display: none; }
+
+#searchForm .fc-option,
+#fanForm .fc-option {
+  padding: .375rem .625rem;
+  cursor: pointer;
+  font: inherit;
+}
+#searchForm .fc-option:hover,
+#fanForm .fc-option:hover {
+  background: var(--bg-secondary);
+}
+
+/* 工况后缀置灰与略缩小：两处表单共用 */
+#searchForm .fc-cond-extra,
+#fanForm .fc-cond-extra,
+#conditionMulti #condList .fc-cond-extra {
+  color: var(--text-secondary);
+  font-size: 0.92em;
+}
+
+/* 型号搜索候选：深色主题用不透明深色，和自定义下拉一致 */
+[data-theme="dark"] #searchSuggestions {
+  background: var(--bg-primary) !important;
+  border-color: var(--border-color) !important;
+  color: var(--text-primary) !important;
+}
