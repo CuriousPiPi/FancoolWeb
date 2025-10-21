@@ -23,7 +23,8 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/tailwind.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/chart-renderer.css', v=1) }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/fancool.css', v=6) }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/right-card.css', v=3) }}">
+  <!-- bumped v to 4 to refresh new styles (fc-subrow__scenario-extra) -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/right-card.css', v=4) }}">
 </head>
 <body class="bg-gray-50 min-h-screen">
   <div id="toastContainer"></div>
@@ -347,7 +348,8 @@
                                       data-tooltip="展开/收起该型号的所有工况">
                                 <i class="fa-solid fa-chevron-right"></i>
                               </button>
-                              <span class="fc-marquee-inner" style="margin-left:.25rem;">
+                              <!-- add data-role=top-cond to let JS hide/show this part on expand/collapse -->
+                              <span class="fc-marquee-inner" data-role="top-cond" style="margin-left:.25rem;">
                                 {{ q.top_condition.condition_name_zh if q.top_condition else '-' }}
                               </span>
                             </td>
@@ -522,6 +524,8 @@
   <script src="{{ url_for('static', filename='js/sidebar.js', v=2) }}"></script>
   <script src="{{ url_for('static', filename='js/recently-removed.js', v=1) }}"></script>
   <script src="{{ url_for('static', filename='js/fancool.js', v=10) }}"></script>
+  <!-- bumped v to 2 to refresh updated RightPanel logic -->
+  <script src="{{ url_for('static', filename='js/right-panel.js', v=2) }}"></script>
   <script src="{{ url_for('static', filename='js/fancool-search.js', v=1) }}"></script>
   <script src="{{ url_for('static', filename='js/analytics.js') }}"></script>
   

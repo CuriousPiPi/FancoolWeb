@@ -586,19 +586,6 @@ function resizeChart(){
 }
 
 /* =========================================================
-   子段 UI
-   ========================================================= */
-const rightSubsegContainer = $('#rightSubsegContainer');
-const segQueriesOrig = document.querySelector('#top-queries-pane .fc-seg');
-const segSearchOrig  = document.querySelector('#search-results-pane .fc-seg');
-if (segQueriesOrig && rightSubsegContainer){ segQueriesOrig.dataset.paneId='top-queries-pane'; rightSubsegContainer.appendChild(segQueriesOrig); }
-if (segSearchOrig && rightSubsegContainer){ segSearchOrig.dataset.paneId='search-results-pane'; rightSubsegContainer.appendChild(segSearchOrig); }
-function updateRightSubseg(activeTab){
-  if (segQueriesOrig) segQueriesOrig.style.display = (activeTab==='top-queries')?'inline-flex':'none';
-  if (segSearchOrig)  segSearchOrig.style.display  = (activeTab==='search-results')?'inline-flex':'none';
-}
-
-/* =========================================================
    最近点赞懒加载
    ========================================================= */
 let recentLikesLoaded = false;
@@ -801,296 +788,6 @@ function loadRecentLikesIfNeeded(){
 /* =========================================================
    顶部 / 左 / 右三个 Tab 管理
    ========================================================= */
-// 查询榜展开动画：分层覆盖 + 固定行高（展开用 FLIP，收起用固定位移 H）
-(function initTopQueriesExpander(){
-  const DURATION = 240;              // ms
-  const EASE_EXPAND = 'ease';        // 展开曲线（FLIP）
-  const EASE_COLLAPSE = 'ease';      // 收起曲线
-  function getSubrowHeightPx(){
-    // 从 CSS 变量读取 --subrow-h，兜底 34
-    const v = getComputedStyle(document.documentElement).getPropertyValue('--subrow-h').trim();
-    const n = parseFloat(v);
-    return Number.isFinite(n) ? n : 34;
-  }
-
-  function parseConds(tr){
-    try { return JSON.parse(tr.dataset.conditions || '[]') || []; } catch(_) { return []; }
-  }
-
-  // 固定高度子行（每个单元格包一层 .fc-subrow__row，行高受 --subrow-h 控制）
-  function buildSubrowHTML(parentTr, cond){
-    const brand = parentTr.dataset.brand || '';
-    const model = parentTr.dataset.model || '';
-    const mid   = parentTr.dataset.modelId || '';
-    const cid   = String(cond.condition_id || '');
-    const cname = String(cond.condition_name_zh || '');
-    const qcnt  = Number(cond.query_count || 0);
-    return `
-      <tr class="fc-subrow" data-parent-mid="${escapeHtml(mid)}">
-        <td colspan="6">
-          <div class="fc-subrow__row">
-            <div class="fc-subrow__indent">
-              <span class="fc-subrow__dot"></span>
-              <span class="fc-subrow__label">${escapeHtml(cname)}</span>
-            </div>
-          </div>
-        </td>
-        <td>
-          <div class="fc-subrow__row fc-subrow__row--count">
-            <span class="text-blue-600 font-medium">${escapeHtml(qcnt)}</span>
-          </div>
-        </td>
-        <td>
-          <div class="fc-subrow__row fc-subrow__row--actions">
-            ${buildQuickBtnHTML('ranking', brand, model, mid, cid, cname, 'top_query_expand')}
-          </div>
-        </td>
-      </tr>`;
-  }
-
-  function isSubrowOf(row, mid){
-    return row && row.classList && row.classList.contains('fc-subrow') && row.dataset.parentMid === String(mid);
-  }
-  function collectFollowers(fromTr) {
-    const arr = [];
-    let n = fromTr.nextElementSibling;
-    while (n) { arr.push(n); n = n.nextElementSibling; }
-    return arr;
-  }
-  function collectFollowersAfter(el) {
-    const arr = [];
-    let n = el ? el.nextElementSibling : null;
-    while (n) { arr.push(n); n = n.nextElementSibling; }
-    return arr;
-  }
-  function measureTops(els){
-    const m = new Map();
-    els.forEach(el => { m.set(el, el.getBoundingClientRect().top); });
-    return m;
-  }
-
-  // 为一组元素设置“动画期间覆盖层级”
-  function markAnimating(els, on){
-    els.forEach(el => {
-      if (on) el.classList.add('fc-row-animating');
-      else el.classList.remove('fc-row-animating');
-    });
-  }
-
-  // 展开：FLIP（prev -> curr），followers 覆盖子行
-  function expandRow(btn){
-    const tr = safeClosest(btn, 'tr');
-    if (!tr) return;
-    const conds = parseConds(tr);
-    if (!conds.length) return;
-
-    if (btn.getAttribute('aria-expanded') === 'true') {
-      collapseRow(btn);
-      return;
-    }
-
-    // 1) 记录后续行初始位置
-    const followers = collectFollowers(tr);
-    const prevMap = measureTops(followers);
-
-    // 2) 插入固定高度子行
-    const sorted = conds.slice().sort((a,b)=>(b.query_count||0)-(a.query_count||0));
-    tr.insertAdjacentHTML('afterend', sorted.map(c=>buildSubrowHTML(tr, c)).join(''));
-
-    // 3) 记录“插入后”的位置
-    const currMap = measureTops(followers);
-
-    // 4) FLIP：让 followers 从 prev 位置过渡到 curr（视觉上向下展开），并在动画期间抬高层级覆盖子行
-    markAnimating(followers, true);
-    followers.forEach(el => {
-      const prevTop = prevMap.get(el);
-      const currTop = currMap.get(el);
-      if (prevTop == null || currTop == null) return;
-      const dy = prevTop - currTop;
-      if (Math.abs(dy) < 0.5) return;
-      el.style.transition = 'none';
-      el.style.transform = `translateY(${dy}px)`;
-    });
-    // 强制回流
-    void document.body.offsetHeight;
-    requestAnimationFrame(() => {
-      followers.forEach(el => {
-        if (!prevMap.has(el)) return;
-        el.style.transition = `transform ${DURATION}ms ${EASE_EXPAND}`;
-        el.style.transform = 'translateY(0)';
-      });
-
-      const onEnd = (e) => {
-        if (e.propertyName !== 'transform') return;
-        const el = e.currentTarget;
-        el.removeEventListener('transitionend', onEnd);
-        el.style.transition = '';
-        el.style.transform = '';
-        // 若全部元素清理完毕，可以去掉层级
-        // 这里逐个清理即可，因为层级提升只影响动画期间
-        el.classList.remove('fc-row-animating');
-      };
-      followers.forEach(el => el.addEventListener('transitionend', onEnd));
-    });
-
-    // 5) 切换按钮状态
-    btn.setAttribute('aria-expanded', 'true');
-    btn.title = '收起';
-    btn.classList.add('is-open');
-
-    syncQuickActionButtons && syncQuickActionButtons();
-  }
-
-  // 收起：followers 上移 H（N×固定行高），动画期间覆盖子行；结束后移除子行并清理
-// 仅替换 initTopQueriesExpander 内的 collapseRow 实现（其余保持不变）
-function collapseRow(btn){
-  const tr = safeClosest(btn, 'tr');
-  if (!tr) return;
-  const mid = tr.dataset.modelId || '';
-
-  // 收集子行
-  const subrows = [];
-  let n = tr.nextElementSibling;
-  while (n && n.classList && n.classList.contains('fc-subrow') && n.dataset.parentMid === String(mid)) {
-    subrows.push(n); n = n.nextElementSibling;
-  }
-  if (!subrows.length) {
-    btn.setAttribute('aria-expanded', 'false');
-    btn.title = '展开全部工况';
-    btn.classList.remove('is-open');
-    return;
-  }
-
-  // 1) 精确测量总位移 HExact（用真实 DOM 高度，避免“最后1-2px跳变”）
-  //   方案A：逐行相加（更稳，兼容边线差异）
-  let HExact = 0;
-  for (const sr of subrows) HExact += sr.getBoundingClientRect().height;
-  //   兜底：如果测量偶发为 0（极端隐藏态），用 CSS 变量近似
-  if (HExact <= 0) {
-    const v = getComputedStyle(document.documentElement).getPropertyValue('--subrow-h').trim();
-    const h = parseFloat(v) || 34;
-    HExact = h * subrows.length;
-  }
-
-  // 2) 找到“最后一条子行之后”的 followers
-  const lastSub = subrows[subrows.length - 1];
-  const followers = [];
-  let p = lastSub.nextElementSibling;
-  while (p) { followers.push(p); p = p.nextElementSibling; }
-
-  // 没有 followers：直接移除并收尾
-  if (!followers.length) {
-    subrows.forEach(sr => sr.remove());
-    btn.setAttribute('aria-expanded', 'false');
-    btn.title = '展开全部工况';
-    btn.classList.remove('is-open');
-    return;
-  }
-
-  // 3) 动画前置：抬高层级覆盖子行，初始化 transform
-  followers.forEach(el => {
-    el.classList.add('fc-row-animating'); // z-index 覆盖子行
-    el.style.transition = 'none';
-    el.style.transform = 'translate3d(0, 0, 0)';
-    el.style.willChange = 'transform';
-  });
-  // 强制回流
-  void document.body.offsetHeight;
-
-  // 4) 开始上移动画（精确位移 HExact）
-  const DURATION = 240, EASE = 'ease';
-  requestAnimationFrame(() => {
-    followers.forEach(el => {
-      el.style.transition = `transform ${DURATION}ms ${EASE}`;
-      el.style.transform = `translate3d(0, ${-HExact}px, 0)`;
-    });
-
-    // 5) 统一等待所有 followers 动画完成
-    let rest = followers.length, fired = false;
-    const done = () => {
-      if (fired) return; fired = true;
-
-      // 5.1 先移除子行（让布局位置“真实”上移 HExact）
-      subrows.forEach(sr => sr.remove());
-
-      // 5.2 强制一次回流，确保新布局生效
-      void document.body.offsetHeight;
-
-      // 5.3 下一帧再清 transform/transition/层级（此时自然位置已与视觉重合，不会跳）
-      requestAnimationFrame(() => {
-        followers.forEach(el => {
-          el.style.transition = 'none';
-          el.style.transform = '';
-          el.style.willChange = '';
-          el.classList.remove('fc-row-animating');
-          // 再下一帧恢复 transition，避免影响之后的其它动画
-          requestAnimationFrame(() => { el.style.transition = ''; });
-        });
-      });
-    };
-
-    const onEnd = (e) => {
-      if (e.propertyName !== 'transform') return;
-      e.currentTarget.removeEventListener('transitionend', onEnd);
-      if (--rest === 0) done();
-    };
-    followers.forEach(el => el.addEventListener('transitionend', onEnd));
-    // 兜底超时：避免某个行因不可见等原因不触发 transitionend
-    setTimeout(done, DURATION + 200);
-  });
-
-  // 6) 切换按钮状态
-  btn.setAttribute('aria-expanded', 'false');
-  btn.title = '展开全部工况';
-  btn.classList.remove('is-open');
-}
-
-  // 事件绑定
-  document.addEventListener('click', (e)=>{
-    const toggle = safeClosest(e.target, '.fc-expand-toggle');
-    if (!toggle) return;
-    e.preventDefault();
-    e.stopPropagation();
-    if (toggle.getAttribute('aria-expanded') === 'true') collapseRow(toggle);
-    else expandRow(toggle);
-  });
-})();
-
-(function initRightPanelSnapTabs(){
-  function run(){
-    const card = document.querySelector('.fc-right-card');
-    if (!card) return;
-    const container = card.querySelector('.fc-tab-container');
-    const wrapper   = card.querySelector('.fc-tab-wrapper');
-    if (!container || !wrapper) return;
-
-    // 确保有 id（与下方其它调用保持一致）
-    if (!container.id) container.id = 'right-panel-container';
-    if (!wrapper.id)   wrapper.id   = 'right-panel-wrapper';
-
-    // 标记：右侧页签已启用 Scroll Snap，供 activateTab 等逻辑识别
-    window.__RIGHT_PANEL_SNAP_ON = true;
-
-    // 初始化（不保存状态），默认激活“近期热门”
-    initSnapTabScrolling({
-      containerId: container.id,
-      group: 'right-panel',
-      persistKey: null,
-      defaultTab: 'top-queries',
-      onActiveChange: (tab) => {
-        // 保持既有副作用：子页签显隐 + 懒加载
-        if (typeof updateRightSubseg === 'function') updateRightSubseg(tab);
-        if (tab === 'recent-updates' && typeof loadRecentUpdatesIfNeeded === 'function') {
-          loadRecentUpdatesIfNeeded();
-        }
-      },
-      clickScrollBehavior: 'smooth'
-    });
-  }
-  if (document.readyState !== 'loading') run();
-  else document.addEventListener('DOMContentLoaded', run, { once:true });
-})();
-
 function activateTab(group, tabName, animate = false) {
   // 右侧主容器启用 snap 后，交由 initSnapTabScrolling 接管
   if (group === 'sidebar-top' || group === 'left-panel' || (group === 'right-panel' && window.__RIGHT_PANEL_SNAP_ON)) return;
@@ -2157,104 +1854,6 @@ document.addEventListener('click',(e)=>{
   if (targetId === 'likes-panel') loadLikesIfNeeded();
 });
 
-/* 拖动式小子段切换（保留） */
-(function initRightSegSwitchLikeXAxis() {
-  const segs = document.querySelectorAll('#rightSubsegContainer .fc-seg');
-  if (!segs.length) return;
-  segs.forEach(seg => {
-    const thumb = seg.querySelector('.fc-seg__thumb');
-    const btns = seg.querySelectorAll('.fc-seg__btn');
-    if (!thumb || btns.length !== 2) return;
-    let dragging = false;
-    let startX = 0;
-    let basePercent = 0;
-    let lastPercent = 0;
-    function activeIsRight() {
-      const act = seg.getAttribute('data-active') || '';
-      return act.endsWith('likes-panel');
-    }
-    function pointInThumb(clientX, clientY) {
-      const r = thumb.getBoundingClientRect();
-      return clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom;
-    }
-    function start(e) {
-      const cx = (e.touches ? e.touches[0].clientX : e.clientX) || 0;
-      const cy = (e.touches ? e.touches[0].clientY : e.clientY) || 0;
-      if (!pointInThumb(cx, cy)) return;
-      dragging = true;
-      startX = cx;
-      basePercent = activeIsRight() ? 100 : 0;
-      lastPercent = basePercent;
-      thumb.style.transition = 'none';
-      if (e.cancelable) e.preventDefault();
-    }
-    function move(e) {
-      if (!dragging) return;
-      const cx = (e.touches ? e.touches[0].clientX : e.clientX) || 0;
-      const dx = cx - startX;
-      const w = thumb.getBoundingClientRect().width || 1;
-      let percent = basePercent + (dx / w) * 100;
-      percent = Math.max(0, Math.min(100, percent));
-      lastPercent = percent;
-      thumb.style.transform = `translateX(${percent}%)`;
-      if (e.cancelable) e.preventDefault();
-    }
-    function end() {
-      if (!dragging) return;
-      dragging = false;
-      const goRight = lastPercent >= 50;
-      const targetBtn = goRight ? btns[1] : btns[0];
-      thumb.style.transition = '';
-      thumb.style.transform = '';
-      targetBtn.click();
-    }
-    seg.addEventListener('mousedown', start);
-    document.addEventListener('mousemove', move, { passive: false });
-    document.addEventListener('mouseup', end);
-    seg.addEventListener('touchstart', start, { passive: false });
-    document.addEventListener('touchmove', move, { passive: false });
-    document.addEventListener('touchend', end);
-  });
-})();
-
-/* 主容器响应式 */
-(function initRightPanelResponsiveWrap(){
-  const card = document.querySelector('.fc-right-card');
-  if (!card || !('ResizeObserver' in window)) return;
-  const APPLY_W = 520;
-  const ro = new ResizeObserver(entries=>{
-    for (const entry of entries){
-      const w = entry.contentRect.width;
-      if (w < APPLY_W) {
-        card.classList.add('rp-narrow');
-      } else {
-        card.classList.remove('rp-narrow');
-      }
-    }
-  });
-  ro.observe(card);
-})();
-(function initMainPanelsAdaptiveStack(){
-  if (!('ResizeObserver' in window)) return;
-  const container = document.getElementById('main-panels');
-  if (!container) return;
-  const THRESHOLD = 980;
-  function apply(width){
-    if (width < THRESHOLD) {
-      container.classList.add('fc-force-col');
-    } else {
-      container.classList.remove('fc-force-col');
-    }
-  }
-  apply(container.getBoundingClientRect().width);
-  const ro = new ResizeObserver(entries=>{
-    for (const entry of entries){
-      apply(entry.contentRect.width);
-    }
-  });
-  ro.observe(container);
-})();
-
 /* =========================================================
    scheduleAdjust
    ========================================================= */
@@ -2419,9 +2018,6 @@ async function primeSelectedLikeStatus(){
 
 }
 
-/* 初始右侧子段显示状态 */
-updateRightSubseg('top-queries');
-
 /* 分享模式自动滚动 */
 (function autoScrollToChartOnShare(){
   try {
@@ -2465,20 +2061,6 @@ initSnapTabScrolling({
   containerId: 'left-panel-container',
   group: 'left-panel',
   persistKey: 'activeTab_left-panel'
-});
-
-// 新增：右侧主页签 Scroll Snap（不保存状态，默认“近期热门”）
-initSnapTabScrolling({
-  containerId: 'right-panel-container',
-  group: 'right-panel',
-  persistKey: null,             // 不保存状态
-  defaultTab: 'top-queries',    // 默认激活“近期热门”
-  onActiveChange: (tab) => {
-    updateRightSubseg && updateRightSubseg(tab);
-    if (tab === 'recent-updates') {
-      loadRecentUpdatesIfNeeded && loadRecentUpdatesIfNeeded();
-    }
-  }
 });
 
 /* 模块注册 */
@@ -2636,10 +2218,11 @@ function maybeAutoOpenSidebarOnAdd(){
   });
 })();
 
-/* 全局 Tooltip */
 (function initGlobalTooltip(){
   const MARGIN = 8;
-  let tip = null, currAnchor = null, hideTimer = null;
+  let tip = null, currAnchor = null, hideTimer = null, autoHideTimer = null;
+  const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+
   function ensureTip(){
     if (tip) return tip;
     tip = document.createElement('div');
@@ -2675,12 +2258,18 @@ function maybeAutoOpenSidebarOnAdd(){
   }
   function show(anchor){
     clearTimeout(hideTimer);
+    clearTimeout(autoHideTimer);
     currAnchor = anchor;
     const txt = anchor.getAttribute('data-tooltip') || anchor.getAttribute('title') || '';
     if (anchor.hasAttribute('title')) anchor.setAttribute('data-title', anchor.getAttribute('title')), anchor.removeAttribute('title');
     setText(txt);
     placeAround(anchor, anchor.getAttribute('data-tooltip-placement') || 'top');
     ensureTip().dataset.show = '1';
+
+    // 触屏场景：自动隐藏
+    if (isTouch) {
+      autoHideTimer = setTimeout(() => hide(true), 1200);
+    }
   }
   function hide(immediate=false){
     const t = ensureTip();
@@ -2688,7 +2277,10 @@ function maybeAutoOpenSidebarOnAdd(){
     if (immediate) return doHide();
     hideTimer = setTimeout(doHide, 60);
   }
+
+  // 桌面端：hover/focus 行为
   document.addEventListener('mouseenter', (e) => {
+    if (isTouch) return; // 触屏跳过 mouse 事件
     let node = e.target;
     if (node && node.nodeType !== 1) node = node.parentElement;
     if (!node) return;
@@ -2701,6 +2293,7 @@ function maybeAutoOpenSidebarOnAdd(){
     show(el);
   }, true);
   document.addEventListener('mouseleave', (e) => {
+    if (isTouch) return;
     let node = e.target;
     if (node && node.nodeType !== 1) node = node.parentElement;
     if (!node) return;
@@ -2713,18 +2306,34 @@ function maybeAutoOpenSidebarOnAdd(){
     hide(false);
   }, true);
   document.addEventListener('focusin', (e)=>{
+    if (isTouch) return;
     const el = safeClosest(e.target, '[data-tooltip]');
     if (!el) return;
     show(el);
   });
   document.addEventListener('focusout', (e)=>{
+    if (isTouch) return;
     const el = safeClosest(e.target, '[data-tooltip]');
     if (!el) return;
     hide(false);
   });
+
+  // 触屏端：tap 显示 + 自动隐藏；点到其它区域立即隐藏
+  document.addEventListener('touchstart', (e) => {
+    const el = safeClosest(e.target, '[data-tooltip]');
+    if (el) {
+      show(el);
+    } else if (currAnchor) {
+      hide(true);
+    }
+  }, { passive: true, capture: true });
+
+  // 布局变化时重新定位
   const onRelayout = ()=>{ if (currAnchor && document.body.contains(currAnchor)) placeAround(currAnchor, currAnchor.getAttribute('data-tooltip-placement') || 'top'); };
   window.addEventListener('resize', onRelayout);
   window.addEventListener('scroll', onRelayout, { passive: true, capture: true });
+
+  // 页面卸载前恢复 title
   window.addEventListener('beforeunload', ()=>{
     document.querySelectorAll('[data-title]').forEach(el=>{
       el.setAttribute('title', el.getAttribute('data-title') || '');
