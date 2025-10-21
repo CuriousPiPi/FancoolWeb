@@ -801,6 +801,261 @@ function loadRecentLikesIfNeeded(){
 /* =========================================================
    顶部 / 左 / 右三个 Tab 管理
    ========================================================= */
+// 查询榜展开动画：分层覆盖 + 固定行高（展开用 FLIP，收起用固定位移 H）
+(function initTopQueriesExpander(){
+  const DURATION = 240;              // ms
+  const EASE_EXPAND = 'ease';        // 展开曲线（FLIP）
+  const EASE_COLLAPSE = 'ease';      // 收起曲线
+  function getSubrowHeightPx(){
+    // 从 CSS 变量读取 --subrow-h，兜底 34
+    const v = getComputedStyle(document.documentElement).getPropertyValue('--subrow-h').trim();
+    const n = parseFloat(v);
+    return Number.isFinite(n) ? n : 34;
+  }
+
+  function parseConds(tr){
+    try { return JSON.parse(tr.dataset.conditions || '[]') || []; } catch(_) { return []; }
+  }
+
+  // 固定高度子行（每个单元格包一层 .fc-subrow__row，行高受 --subrow-h 控制）
+  function buildSubrowHTML(parentTr, cond){
+    const brand = parentTr.dataset.brand || '';
+    const model = parentTr.dataset.model || '';
+    const mid   = parentTr.dataset.modelId || '';
+    const cid   = String(cond.condition_id || '');
+    const cname = String(cond.condition_name_zh || '');
+    const qcnt  = Number(cond.query_count || 0);
+    return `
+      <tr class="fc-subrow" data-parent-mid="${escapeHtml(mid)}">
+        <td colspan="6">
+          <div class="fc-subrow__row">
+            <div class="fc-subrow__indent">
+              <span class="fc-subrow__dot"></span>
+              <span class="fc-subrow__label">${escapeHtml(cname)}</span>
+            </div>
+          </div>
+        </td>
+        <td>
+          <div class="fc-subrow__row fc-subrow__row--count">
+            <span class="text-blue-600 font-medium">${escapeHtml(qcnt)}</span>
+          </div>
+        </td>
+        <td>
+          <div class="fc-subrow__row fc-subrow__row--actions">
+            ${buildQuickBtnHTML('ranking', brand, model, mid, cid, cname, 'top_query_expand')}
+          </div>
+        </td>
+      </tr>`;
+  }
+
+  function isSubrowOf(row, mid){
+    return row && row.classList && row.classList.contains('fc-subrow') && row.dataset.parentMid === String(mid);
+  }
+  function collectFollowers(fromTr) {
+    const arr = [];
+    let n = fromTr.nextElementSibling;
+    while (n) { arr.push(n); n = n.nextElementSibling; }
+    return arr;
+  }
+  function collectFollowersAfter(el) {
+    const arr = [];
+    let n = el ? el.nextElementSibling : null;
+    while (n) { arr.push(n); n = n.nextElementSibling; }
+    return arr;
+  }
+  function measureTops(els){
+    const m = new Map();
+    els.forEach(el => { m.set(el, el.getBoundingClientRect().top); });
+    return m;
+  }
+
+  // 为一组元素设置“动画期间覆盖层级”
+  function markAnimating(els, on){
+    els.forEach(el => {
+      if (on) el.classList.add('fc-row-animating');
+      else el.classList.remove('fc-row-animating');
+    });
+  }
+
+  // 展开：FLIP（prev -> curr），followers 覆盖子行
+  function expandRow(btn){
+    const tr = safeClosest(btn, 'tr');
+    if (!tr) return;
+    const conds = parseConds(tr);
+    if (!conds.length) return;
+
+    if (btn.getAttribute('aria-expanded') === 'true') {
+      collapseRow(btn);
+      return;
+    }
+
+    // 1) 记录后续行初始位置
+    const followers = collectFollowers(tr);
+    const prevMap = measureTops(followers);
+
+    // 2) 插入固定高度子行
+    const sorted = conds.slice().sort((a,b)=>(b.query_count||0)-(a.query_count||0));
+    tr.insertAdjacentHTML('afterend', sorted.map(c=>buildSubrowHTML(tr, c)).join(''));
+
+    // 3) 记录“插入后”的位置
+    const currMap = measureTops(followers);
+
+    // 4) FLIP：让 followers 从 prev 位置过渡到 curr（视觉上向下展开），并在动画期间抬高层级覆盖子行
+    markAnimating(followers, true);
+    followers.forEach(el => {
+      const prevTop = prevMap.get(el);
+      const currTop = currMap.get(el);
+      if (prevTop == null || currTop == null) return;
+      const dy = prevTop - currTop;
+      if (Math.abs(dy) < 0.5) return;
+      el.style.transition = 'none';
+      el.style.transform = `translateY(${dy}px)`;
+    });
+    // 强制回流
+    void document.body.offsetHeight;
+    requestAnimationFrame(() => {
+      followers.forEach(el => {
+        if (!prevMap.has(el)) return;
+        el.style.transition = `transform ${DURATION}ms ${EASE_EXPAND}`;
+        el.style.transform = 'translateY(0)';
+      });
+
+      const onEnd = (e) => {
+        if (e.propertyName !== 'transform') return;
+        const el = e.currentTarget;
+        el.removeEventListener('transitionend', onEnd);
+        el.style.transition = '';
+        el.style.transform = '';
+        // 若全部元素清理完毕，可以去掉层级
+        // 这里逐个清理即可，因为层级提升只影响动画期间
+        el.classList.remove('fc-row-animating');
+      };
+      followers.forEach(el => el.addEventListener('transitionend', onEnd));
+    });
+
+    // 5) 切换按钮状态
+    btn.setAttribute('aria-expanded', 'true');
+    btn.title = '收起';
+    btn.classList.add('is-open');
+
+    syncQuickActionButtons && syncQuickActionButtons();
+  }
+
+  // 收起：followers 上移 H（N×固定行高），动画期间覆盖子行；结束后移除子行并清理
+// 仅替换 initTopQueriesExpander 内的 collapseRow 实现（其余保持不变）
+function collapseRow(btn){
+  const tr = safeClosest(btn, 'tr');
+  if (!tr) return;
+  const mid = tr.dataset.modelId || '';
+
+  // 收集子行
+  const subrows = [];
+  let n = tr.nextElementSibling;
+  while (n && n.classList && n.classList.contains('fc-subrow') && n.dataset.parentMid === String(mid)) {
+    subrows.push(n); n = n.nextElementSibling;
+  }
+  if (!subrows.length) {
+    btn.setAttribute('aria-expanded', 'false');
+    btn.title = '展开全部工况';
+    btn.classList.remove('is-open');
+    return;
+  }
+
+  // 1) 精确测量总位移 HExact（用真实 DOM 高度，避免“最后1-2px跳变”）
+  //   方案A：逐行相加（更稳，兼容边线差异）
+  let HExact = 0;
+  for (const sr of subrows) HExact += sr.getBoundingClientRect().height;
+  //   兜底：如果测量偶发为 0（极端隐藏态），用 CSS 变量近似
+  if (HExact <= 0) {
+    const v = getComputedStyle(document.documentElement).getPropertyValue('--subrow-h').trim();
+    const h = parseFloat(v) || 34;
+    HExact = h * subrows.length;
+  }
+
+  // 2) 找到“最后一条子行之后”的 followers
+  const lastSub = subrows[subrows.length - 1];
+  const followers = [];
+  let p = lastSub.nextElementSibling;
+  while (p) { followers.push(p); p = p.nextElementSibling; }
+
+  // 没有 followers：直接移除并收尾
+  if (!followers.length) {
+    subrows.forEach(sr => sr.remove());
+    btn.setAttribute('aria-expanded', 'false');
+    btn.title = '展开全部工况';
+    btn.classList.remove('is-open');
+    return;
+  }
+
+  // 3) 动画前置：抬高层级覆盖子行，初始化 transform
+  followers.forEach(el => {
+    el.classList.add('fc-row-animating'); // z-index 覆盖子行
+    el.style.transition = 'none';
+    el.style.transform = 'translate3d(0, 0, 0)';
+    el.style.willChange = 'transform';
+  });
+  // 强制回流
+  void document.body.offsetHeight;
+
+  // 4) 开始上移动画（精确位移 HExact）
+  const DURATION = 240, EASE = 'ease';
+  requestAnimationFrame(() => {
+    followers.forEach(el => {
+      el.style.transition = `transform ${DURATION}ms ${EASE}`;
+      el.style.transform = `translate3d(0, ${-HExact}px, 0)`;
+    });
+
+    // 5) 统一等待所有 followers 动画完成
+    let rest = followers.length, fired = false;
+    const done = () => {
+      if (fired) return; fired = true;
+
+      // 5.1 先移除子行（让布局位置“真实”上移 HExact）
+      subrows.forEach(sr => sr.remove());
+
+      // 5.2 强制一次回流，确保新布局生效
+      void document.body.offsetHeight;
+
+      // 5.3 下一帧再清 transform/transition/层级（此时自然位置已与视觉重合，不会跳）
+      requestAnimationFrame(() => {
+        followers.forEach(el => {
+          el.style.transition = 'none';
+          el.style.transform = '';
+          el.style.willChange = '';
+          el.classList.remove('fc-row-animating');
+          // 再下一帧恢复 transition，避免影响之后的其它动画
+          requestAnimationFrame(() => { el.style.transition = ''; });
+        });
+      });
+    };
+
+    const onEnd = (e) => {
+      if (e.propertyName !== 'transform') return;
+      e.currentTarget.removeEventListener('transitionend', onEnd);
+      if (--rest === 0) done();
+    };
+    followers.forEach(el => el.addEventListener('transitionend', onEnd));
+    // 兜底超时：避免某个行因不可见等原因不触发 transitionend
+    setTimeout(done, DURATION + 200);
+  });
+
+  // 6) 切换按钮状态
+  btn.setAttribute('aria-expanded', 'false');
+  btn.title = '展开全部工况';
+  btn.classList.remove('is-open');
+}
+
+  // 事件绑定
+  document.addEventListener('click', (e)=>{
+    const toggle = safeClosest(e.target, '.fc-expand-toggle');
+    if (!toggle) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (toggle.getAttribute('aria-expanded') === 'true') collapseRow(toggle);
+    else expandRow(toggle);
+  });
+})();
+
 (function initRightPanelSnapTabs(){
   function run(){
     const card = document.querySelector('.fc-right-card');

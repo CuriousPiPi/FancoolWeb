@@ -316,8 +316,12 @@
                         </tr>
                         </thead>
                         <tbody>
-                        {% for query in top_queries %}
-                          <tr class="hover:bg-gray-50">
+                        {% for q in top_queries %}
+                          <tr class="hover:bg-gray-50 fc-qrow"
+                              data-model-id="{{ q.model_id }}"
+                              data-brand="{{ q.brand_name_zh }}"
+                              data-model="{{ q.model_name }}"
+                              data-conditions='{{ q.conditions|tojson }}'>
                             <td class="fc-rank-cell">
                               {% if loop.index == 1 %}
                                 <i class="fa-solid fa-medal gold text-2xl"></i>
@@ -329,24 +333,43 @@
                                 <span class="font-medium">{{ loop.index }}</span>
                               {% endif %}
                             </td>
-                            <td>{{ query.brand_name_zh }}</td>
-                            <td>{{ query.model_name }} ({{ query.max_speed }} RPM)</td>
-                            <td>{{ query.size }}x{{ query.thickness }}</td>
-                            <td>{{ query.reference_price if query.reference_price > 0 else '-' }}</td>
-                            <td>{{ query.condition_name_zh }}</td>
-                            <td class="text-blue-600 font-medium">{{ query.query_count }}</td>
+                            <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">{{ q.brand_name_zh }}</span></td>
+                            <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">{{ q.model_name }} ({{ q.max_speed }} RPM)</span></td>
+                            <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">{{ q.size }}x{{ q.thickness }}</span></td>
+                            <td class="nowrap fc-marquee-cell">
+                              <span class="fc-marquee-inner">{{ q.reference_price if q.reference_price > 0 else '-' }}</span>
+                            </td>
+                            <td class="nowrap fc-marquee-cell">
+                              <button class="fc-row-expander fc-expand-toggle"
+                                      type="button"
+                                      aria-expanded="false"
+                                      title="展开全部工况"
+                                      data-tooltip="展开/收起该型号的所有工况">
+                                <i class="fa-solid fa-chevron-right"></i>
+                              </button>
+                              <span class="fc-marquee-inner" style="margin-left:.25rem;">
+                                {{ q.top_condition.condition_name_zh if q.top_condition else '-' }}
+                              </span>
+                            </td>
+                            <td class="text-blue-600 font-medium">{{ q.total_query_count }}</td>
                             <td>
+                              {% if q.top_condition %}
                               <button class="fc-btn-icon-add js-ranking-add fc-tooltip-target"
                                       title="添加到图表"
                                       data-add-type="ranking"
                                       data-log-source="top_query"
-                                      data-brand="{{ query.brand_name_zh }}"
-                                      data-model="{{ query.model_name }}"
-                                      data-condition="{{ query.condition_name_zh }}"
-                                      data-model-id="{{ query.model_id }}"
-                                      data-condition-id="{{ query.condition_id }}">
+                                      data-brand="{{ q.brand_name_zh }}"
+                                      data-model="{{ q.model_name }}"
+                                      data-condition="{{ q.top_condition.condition_name_zh }}"
+                                      data-model-id="{{ q.model_id }}"
+                                      data-condition-id="{{ q.top_condition.condition_id }}">
                                 <i class="fa-solid fa-plus"></i>
                               </button>
+                              {% else %}
+                              <button class="fc-btn-icon-add fc-tooltip-target" title="无可添加工况" disabled>
+                                <i class="fa-solid fa-plus"></i>
+                              </button>
+                              {% endif %}
                             </td>
                           </tr>
                         {% endfor %}

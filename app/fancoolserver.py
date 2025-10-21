@@ -106,7 +106,7 @@ engine = create_engine(
 )
 
 SIZE_OPTIONS = ["不限", "120"] #, "140"]
-TOP_QUERIES_LIMIT = 10
+TOP_QUERIES_LIMIT = 50
 RECENT_LIKES_LIMIT = 50
 CLICK_COOLDOWN_SECONDS = 0.5
 RECENT_UPDATES_LIMIT = 50
@@ -371,16 +371,87 @@ def compute_like_fingerprint(user_id: str) -> dict:
 # =========================================
 # Query Helpers
 # =========================================
+# 修复：补回 reference_price 字段，避免模板访问 r.reference_price 报错
 def get_top_queries(limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
+    """
+    返回结构：
+    [
+      {
+        model_id, brand_name_zh, model_name, size, thickness, max_speed,
+        reference_price,                     # <== 新增文档说明
+        total_query_count: int,
+        top_condition: { condition_id, condition_name_zh, query_count },
+        conditions: [ { condition_id, condition_name_zh, query_count }, ... ]  -- 按 query_count DESC
+      },
+      ...
+    ]
+    """
     sql = """SELECT model_id, condition_id,
                     brand_name_zh, model_name,
                     condition_name_zh,
                     query_count, size, thickness, max_speed,
-                    reference_price
-             FROM total_query_rank_d30_view
-             ORDER BY query_count DESC
-             LIMIT :l"""
-    return fetch_all(sql, {'l': limit})
+                    reference_price                     
+             FROM query_count_d30_view
+             ORDER BY model_id, condition_id"""
+    rows = fetch_all(sql, {})
+
+    groups: dict[int, dict] = {}
+    for r in rows:
+        mid = int(r['model_id'])
+        g = groups.setdefault(mid, {
+            'model_id': mid,
+            'brand_name_zh': r['brand_name_zh'],
+            'model_name': r['model_name'],
+            'size': r['size'],
+            'thickness': r['thickness'],
+            'max_speed': r['max_speed'],
+            'reference_price': r['reference_price'],            # <== 初始化字段，确保存在
+            'total_query_count': 0,
+            'conditions': []
+        })
+        # 保障 max_speed 为最大值
+        try:
+            if r['max_speed'] is not None:
+                g['max_speed'] = max(int(g['max_speed'] or 0), int(r['max_speed']))
+        except Exception:
+            pass
+
+        # 聚合 reference_price（优先取非空；如多值可取最大或最新，这里取最大以保证存在一个稳定的值）
+        try:
+            rp = r.get('reference_price')
+            if rp is not None:
+                # 若之前为 None，或希望稳定为“较大值”，用 max；如需其他策略，可改为首次赋值
+                g['reference_price'] = max(int(g['reference_price'] or 0), int(rp))
+        except Exception:
+            pass
+
+        qc = int(r['query_count'] or 0)
+        g['total_query_count'] += qc
+        g['conditions'].append({
+            'condition_id': int(r['condition_id']),
+            'condition_name_zh': r['condition_name_zh'],
+            'query_count': qc
+        })
+
+    items = []
+    for mid, g in groups.items():
+        conds = sorted(g['conditions'], key=lambda c: c['query_count'], reverse=True)
+        top_c = conds[0] if conds else None
+        items.append({
+            'model_id': g['model_id'],
+            'brand_name_zh': g['brand_name_zh'],
+            'model_name': g['model_name'],
+            'size': g['size'],
+            'thickness': g['thickness'],
+            'max_speed': g['max_speed'],
+            'reference_price': g['reference_price'],   # <== 返回字段
+            'total_query_count': g['total_query_count'],
+            'top_condition': top_c,
+            'conditions': conds
+        })
+
+    items.sort(key=lambda x: x['total_query_count'], reverse=True)
+    return items[:limit]
 
 def get_top_ratings(limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
     sql = """SELECT model_id, condition_id,
@@ -1309,6 +1380,8 @@ def index():
     brands_rows = fetch_all("SELECT DISTINCT brand_name_zh FROM fan_brand WHERE is_valid=1")
     brands = [r['brand_name_zh'] for r in brands_rows]
     conditions_rows = fetch_all("SELECT DISTINCT condition_name_zh FROM working_condition WHERE is_valid=1")
+    
+    # NEW: Pass the full structured data from get_top_queries to the template
     top_queries = get_top_queries(limit=TOP_QUERIES_LIMIT)
     top_ratings = get_top_ratings(limit=TOP_QUERIES_LIMIT)
 

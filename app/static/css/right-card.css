@@ -233,3 +233,85 @@
   scroll-snap-align: start;
   scroll-snap-stop: always;
 }
+
+/* 新增：查询榜展开 UI 与子行样式 */
+.fc-row-expander {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px; height: 22px;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  margin-right: 6px;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
+}
+.fc-row-expander:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.fc-row-expander i { transition: transform .18s ease; }
+.fc-row-expander.is-open i,
+.fc-row-expander[aria-expanded="true"] i { transform: rotate(90deg); }
+
+:root {
+  --subrow-h: 34px; /* 可按设计微调；与 JS 中 getSubrowHeightPx 一致 */
+}
+
+/* 子行基础：固定行高由 .fc-subrow__row 控制 */
+.fc-subrow {
+  position: relative;     /* 参与堆叠 */
+  z-index: 1;             /* 子行在下层 */
+}
+.fc-subrow td {
+  background: none;
+}
+.fc-subrow td:first-child { padding: 0; }
+.fc-subrow .fc-subrow__row {
+  height: var(--subrow-h);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0;                 /* 改为 0，由列规则单独加 */
+  box-sizing: border-box;
+}
+.fc-subrow td:first-child .fc-subrow__row { padding: 0 .6rem; }
+.fc-subrow .fc-subrow__indent { padding-left: 50px; }
+
+.fc-subrow .fc-subrow__dot {
+  display: inline-block;     /* 明确生成盒子 */
+  width: 6px;
+  height: 6px;
+  flex: 0 0 6px;             /* 在 flex 容器中固定尺寸且不收缩 */
+  border-radius: 50%;
+  background-color: var(--text-secondary);
+  opacity: .6;
+  /* 轻微描边提升不同底色下的可见性（可保留/去除） */
+  box-shadow: 0 0 0 0.5px rgba(0,0,0,.12);
+}
+/* 保持点与文字同一行并留出间距 */
+.fc-subrow .fc-subrow__indent {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-left: 80px;  /* 你当前的缩进值，可按需调整 */
+}
+
+.fc-subrow td:nth-last-child(2) { text-align: left; }        /* 确保左对齐 */
+.fc-subrow td:nth-last-child(2) .fc-subrow__row {
+  justify-content: flex-start;
+  padding: 0;                                                /* 关键：不要叠加 8px */
+}
+/* 操作列（最后一列）：保持居中，避免与 td 的 padding 叠加 */
+.fc-subrow td:last-child .fc-subrow__row {
+  justify-content: center;
+  padding: 0;
+}
+
+/* 动画中的“下方条目”抬高层级并用表格背景遮盖子行 */
+.fc-row-animating {
+  position: relative;
+  z-index: 3;                    /* 高于子行（1）与普通行（默认层） */
+  background: transparent; /* 覆盖视觉缝隙，确保完全遮住子行 */
+  will-change: transform;
+  -webkit-backdrop-filter: blur(1000px) saturate(100%);
+  backdrop-filter: blur(1000px) saturate(100%);
+}
