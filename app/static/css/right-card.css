@@ -362,3 +362,6 @@
   position: relative;
   z-index: 1;
 }
+
+/* 新增：列裁切工具类，供“接力式”位移动画期间使用 */
+.fc-col-clip { overflow: hidden !important; }

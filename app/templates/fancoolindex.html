@@ -344,7 +344,6 @@
                               <button class="fc-row-expander fc-expand-toggle"
                                       type="button"
                                       aria-expanded="false"
-                                      title="展开全部工况"
                                       data-tooltip="展开/收起该型号的所有工况">
                                 <i class="fa-solid fa-chevron-right"></i>
                               </button>
@@ -357,7 +356,7 @@
                             <td>
                               {% if q.top_condition %}
                               <button class="fc-btn-icon-add js-ranking-add fc-tooltip-target"
-                                      title="添加到图表"
+                                      data-tooltip="添加到图表"
                                       data-add-type="ranking"
                                       data-log-source="top_query"
                                       data-brand="{{ q.brand_name_zh }}"
@@ -368,7 +367,7 @@
                                 <i class="fa-solid fa-plus"></i>
                               </button>
                               {% else %}
-                              <button class="fc-btn-icon-add fc-tooltip-target" title="无可添加工况" disabled>
+                              <button class="fc-btn-icon-add fc-tooltip-target" data-tooltip="无可添加工况" disabled>
                                 <i class="fa-solid fa-plus"></i>
                               </button>
                               {% endif %}

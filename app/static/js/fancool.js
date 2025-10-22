@@ -670,7 +670,8 @@ function rebuildRecentLikes(list){
         <div class="flex items-center justify-between scenario-row">
           <div class="scenario-text text-sm text-gray-700">${scenText}</div>
           <div class="actions">
-            <button class="like-button recent-like-button" title="取消点赞"
+            <button class="like-button recent-like-button"
+                    data-tooltip="取消点赞"
                     data-model-id="${escapeHtml(s.mid||'')}"
                     data-condition-id="${escapeHtml(s.cid||'')}">
               <i class="fa-solid fa-thumbs-up text-red-500"></i>
@@ -1026,7 +1027,7 @@ function buildQuickBtnHTML(addType, brand, model, modelId, conditionId, conditio
     : selectedMapSet.has(mapKey);
 
   const mode = isDup ? 'remove' : 'add';
-  const title = isDup ? '从图表移除' : '添加到图表';
+  const tipText = isDup ? '从图表移除' : '添加到图表';
   const icon = isDup ? '<i class="fa-solid fa-xmark"></i>' : '<i class="fa-solid fa-plus"></i>';
   const defaultSourceMap = { likes:'liked', rating:'top_rating', ranking:'top_query', search:'search' };
   const sourceAttr = logSource || defaultSourceMap[addType] || 'unknown';
@@ -1040,7 +1041,7 @@ function buildQuickBtnHTML(addType, brand, model, modelId, conditionId, conditio
 
   return `
     <button class="fc-btn-icon-add ${cls} fc-tooltip-target"
-            title="${title}"
+            data-tooltip="${tipText}"
             data-mode="${mode}"
             data-add-type="${addType}"
             data-log-source="${escapeHtml(sourceAttr)}"
@@ -1057,7 +1058,8 @@ function toRemoveState(btn){
   btn.dataset.mode='remove';
   btn.classList.remove('js-ranking-add','js-rating-add','js-search-add','js-likes-add');
   btn.classList.add('js-list-remove');
-  btn.title='从图表移除';
+  btn.setAttribute('data-tooltip','从图表移除');
+  btn.removeAttribute('title');
   btn.innerHTML='<i class="fa-solid fa-xmark"></i>';
 }
 function toAddState(btn){
@@ -1069,7 +1071,8 @@ function toAddState(btn){
   btn.classList.add(addType==='rating'?'js-rating-add'
     : addType==='ranking'?'js-ranking-add'
       : addType==='search'?'js-search-add':'js-likes-add');
-  btn.title='添加到图表';
+  btn.setAttribute('data-tooltip','添加到图表');
+  btn.removeAttribute('title');
   btn.innerHTML='<i class="fa-solid fa-plus"></i>';
 }
 function mapKeyFromDataset(d){
@@ -1147,7 +1150,7 @@ function rebuildSelectedFans(fans){
         <button class="like-button mr-3" data-fan-key="${f.key}" data-model-id="${f.model_id}" data-condition-id="${f.condition_id}">
           <i class="fa-solid fa-thumbs-up ${isLiked?'text-red-500':'text-gray-400'}"></i>
         </button>
-        <button class="fc-icon-remove text-lg js-remove-fan" data-fan-key="${f.key}" title="移除">
+        <button class="fc-icon-remove text-lg js-remove-fan" data-fan-key="${f.key}" data-tooltip="移除">
           <i class="fa-solid fa-xmark"></i>
         </button>
       </div>`;
@@ -2220,19 +2223,46 @@ function maybeAutoOpenSidebarOnAdd(){
 
 (function initGlobalTooltip(){
   const MARGIN = 8;
-  let tip = null, currAnchor = null, hideTimer = null, autoHideTimer = null;
+
+  // 托管范围：带 data-tooltip + 展开/收起 + 快捷按钮/操作
+  const EXPAND_TOGGLE_SELECTOR = '.fc-expand-toggle';
+  const TOOLTIP_ANCHOR_SELECTOR = [
+    '[data-tooltip]',
+    EXPAND_TOGGLE_SELECTOR,
+    '.fc-tooltip-target',
+    '.fc-btn-icon-add',
+    '.like-button',
+    '.js-remove-fan',
+    '.js-restore-fan',
+    '#sidebar-toggle',   // 侧栏开关
+    '#themeToggle',      // 主题切换
+    '.fc-info-btn'       // 数据来源与说明
+  ].join(', ');
+
+  function isTopControl(el){
+    return !!(el && (el.matches('#sidebar-toggle') || el.matches('#themeToggle') || el.matches('.fc-info-btn')));
+  }
+
+  // 延迟
+  const EXPAND_TOGGLE_TIP_KEY = 'suppress_expand_toggle_tooltip';
+  const EXPAND_TOGGLE_DELAY = 700; // 展开/收起延迟
+  const QUICK_ACTION_DELAY = 700;  // 快捷按钮：轻微延迟
   const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+
+  let tip = null, currAnchor = null;
+  let hideTimer = null, autoHideTimer = null, showTimer = null;
 
   function ensureTip(){
     if (tip) return tip;
     tip = document.createElement('div');
     tip.id = 'appTooltip';
+    // 防换行：几个字不再折 3 行
+    tip.style.whiteSpace = 'nowrap';
+    tip.style.maxWidth = 'none';
     document.body.appendChild(tip);
     return tip;
   }
-  function setText(html){
-    ensureTip().innerHTML = html;
-  }
+  function setText(html){ ensureTip().innerHTML = html; }
   function placeAround(anchor, preferred='top'){
     const t = ensureTip();
     const rect = anchor.getBoundingClientRect();
@@ -2242,98 +2272,183 @@ function maybeAutoOpenSidebarOnAdd(){
     t.style.left = '-9999px';
     t.style.top  = '-9999px';
     const tw = t.offsetWidth, th = t.offsetHeight;
+
     let placement = preferred;
     const topSpace = rect.top;
     const bottomSpace = vh - rect.bottom;
     if (preferred === 'top' && topSpace < th + 12) placement = 'bottom';
     if (preferred === 'bottom' && bottomSpace < th + 12) placement = 'top';
+
     let cx = rect.left + rect.width / 2;
     cx = Math.max(MARGIN + tw/2, Math.min(vw - MARGIN - tw/2, cx));
-    let top;
-    if (placement === 'top') top = rect.top - th - 10; else top = rect.bottom + 10;
+    const top = placement === 'top' ? (rect.top - th - 10) : (rect.bottom + 10);
+
     t.dataset.placement = placement;
     t.style.left = `${Math.round(cx)}px`;
     t.style.top  = `${Math.round(top)}px`;
     t.style.visibility = '';
   }
+
+  // 立刻托管原生 title
+  function hoistNativeTitle(el){
+    if (!el) return;
+    if (el.hasAttribute('title')) {
+      el.setAttribute('data-title', el.getAttribute('title') || '');
+      el.removeAttribute('title');
+    }
+  }
+
+  // 分类与抑制
+  const isExpandToggle = (el) => !!(el && el.matches(EXPAND_TOGGLE_SELECTOR));
+  const isQuickAction  = (el) => !!(el && el.matches('.fc-btn-icon-add, .like-button, .js-remove-fan, .js-restore-fan'));
+  function isSuppressed(el){
+    if (!isExpandToggle(el)) return false;
+    try { return sessionStorage.getItem(EXPAND_TOGGLE_TIP_KEY) === '1'; } catch(_) { return false; }
+  }
+  function suppressExpandToggleTip(){ try { sessionStorage.setItem(EXPAND_TOGGLE_TIP_KEY, '1'); } catch(_) {} }
+
+  // 点击后静默：直到 mouseleave/focusout 清除
+  function markSilent(el){
+    if (!el) return;
+    el.setAttribute('data-tip-silence', '1');
+  }
+  function clearSilent(el){
+    if (!el) return;
+    el.removeAttribute('data-tip-silence');
+  }
+  function isSilent(el){ return !!(el && el.getAttribute('data-tip-silence') === '1'); }
+
+  // 动态文案
+  function getExpandToggleText(el){
+    const expanded = el.getAttribute('aria-expanded') === 'true';
+    return expanded ? '收起该型号的所有工况' : '展开该型号的所有工况';
+  }
+  function getQuickActionText(el){
+    if (!el) return '';
+    if (el.matches('.fc-btn-icon-add')) {
+      const mode = el.dataset.mode || '';
+      return mode === 'remove' ? '从图表移除' : '添加到图表';
+    }
+    if (el.matches('.like-button')) {
+      const icon = el.querySelector('i');
+      const liked = !!(icon && icon.classList.contains('text-red-500'));
+      return liked ? '取消点赞' : '点赞';
+    }
+    if (el.matches('.js-remove-fan'))  return '移除';
+    if (el.matches('.js-restore-fan')) return '恢复';
+    return '';
+  }
+  function getTooltipText(el){
+    if (isExpandToggle(el)) return getExpandToggleText(el);
+    if (isQuickAction(el))  return getQuickActionText(el);
+    const fromData = el.getAttribute('data-tooltip');
+    if (fromData && fromData.trim() !== '') return fromData;
+    if (el.hasAttribute('title')) return el.getAttribute('title') || '';
+    return el.getAttribute('data-title') || '';
+  }
+
+  function cancelShow(){ if (showTimer){ clearTimeout(showTimer); showTimer = null; } }
   function show(anchor){
+    cancelShow();
     clearTimeout(hideTimer);
     clearTimeout(autoHideTimer);
+    if (isSilent(anchor)) return; // 静默中不显示
     currAnchor = anchor;
-    const txt = anchor.getAttribute('data-tooltip') || anchor.getAttribute('title') || '';
-    if (anchor.hasAttribute('title')) anchor.setAttribute('data-title', anchor.getAttribute('title')), anchor.removeAttribute('title');
+
+    const txt = getTooltipText(anchor);
+    if (!txt) return;
+
     setText(txt);
     placeAround(anchor, anchor.getAttribute('data-tooltip-placement') || 'top');
     ensureTip().dataset.show = '1';
 
-    // 触屏场景：自动隐藏
     if (isTouch) {
       autoHideTimer = setTimeout(() => hide(true), 1200);
     }
   }
+  function scheduleShow(anchor){
+    cancelShow();
+    if (isSilent(anchor)) return;
+    const delay =
+      (anchor && (anchor.matches(EXPAND_TOGGLE_SELECTOR) || isTopControl(anchor)))
+        ? EXPAND_TOGGLE_DELAY
+        : (anchor && anchor.matches('.fc-btn-icon-add, .like-button, .js-remove-fan, .js-restore-fan'))
+          ? QUICK_ACTION_DELAY
+          : 0;
+    if (delay <= 0) { show(anchor); return; }
+    showTimer = setTimeout(() => show(anchor), delay);
+  }
   function hide(immediate=false){
     const t = ensureTip();
     const doHide = () => { t.dataset.show = '0'; currAnchor = null; };
-    if (immediate) return doHide();
+    if (immediate){ cancelShow(); return doHide(); }
     hideTimer = setTimeout(doHide, 60);
   }
 
-  // 桌面端：hover/focus 行为
+  // Hover/focus：进入即托管 title，再调度显示
   document.addEventListener('mouseenter', (e) => {
-    if (isTouch) return; // 触屏跳过 mouse 事件
-    let node = e.target;
-    if (node && node.nodeType !== 1) node = node.parentElement;
-    if (!node) return;
-    let el = null;
-    if (node && typeof node.closest === 'function') {
-      try { el = node.closest('[data-tooltip]'); } catch(_) {}
-    }
-    if (!el) el = safeClosest(node, '[data-tooltip]');
-    if (!el) return;
-    show(el);
-  }, true);
-  document.addEventListener('mouseleave', (e) => {
     if (isTouch) return;
-    let node = e.target;
-    if (node && node.nodeType !== 1) node = node.parentElement;
-    if (!node) return;
-    let el = null;
-    if (node && typeof node.closest === 'function') {
-      try { el = node.closest('[data-tooltip]'); } catch(_) {}
-    }
-    if (!el) el = safeClosest(node, '[data-tooltip]');
+    const el = safeClosest(e.target, TOOLTIP_ANCHOR_SELECTOR);
     if (!el) return;
-    hide(false);
+    if (isExpandToggle(el) && isSuppressed(el)) return;
+    hoistNativeTitle(el);
+    scheduleShow(el);
   }, true);
+
+  document.addEventListener('mouseout', (e) => {
+    if (isTouch) return;
+    const el = safeClosest(e.target, TOOLTIP_ANCHOR_SELECTOR);
+    if (!el) return;
+    const to = e.relatedTarget;
+    // 如果仍在同一锚点内移动，不算真正离开
+    if (to && (to === el || el.contains(to))) return;
+    cancelShow();
+    hide(false);
+    clearSilent(el); // 真正离开才解除“本次抑制”
+  }, true);
+
   document.addEventListener('focusin', (e)=>{
     if (isTouch) return;
-    const el = safeClosest(e.target, '[data-tooltip]');
+    const el = safeClosest(e.target, TOOLTIP_ANCHOR_SELECTOR);
     if (!el) return;
-    show(el);
+    if (isExpandToggle(el) && isSuppressed(el)) return;
+    hoistNativeTitle(el);
+    scheduleShow(el);
   });
   document.addEventListener('focusout', (e)=>{
     if (isTouch) return;
-    const el = safeClosest(e.target, '[data-tooltip]');
+    const el = safeClosest(e.target, TOOLTIP_ANCHOR_SELECTOR);
     if (!el) return;
+    cancelShow();
     hide(false);
+    clearSilent(el); // 失焦后解除静默
   });
 
-  // 触屏端：tap 显示 + 自动隐藏；点到其它区域立即隐藏
+  // 触屏：tap 显示 + 自动隐藏
   document.addEventListener('touchstart', (e) => {
-    const el = safeClosest(e.target, '[data-tooltip]');
-    if (el) {
-      show(el);
-    } else if (currAnchor) {
-      hide(true);
-    }
+    const el = safeClosest(e.target, TOOLTIP_ANCHOR_SELECTOR);
+    if (!el) return;
+    if (isExpandToggle(el) && isSuppressed(el)) return;
+    hoistNativeTitle(el);
+    show(el);
   }, { passive: true, capture: true });
+
+  // 点击后：立即托管 title + 本会话抑制（仅展开按钮）+ 至离开前静默该锚点
+  document.addEventListener('click', (e) => {
+    const el = safeClosest(e.target, TOOLTIP_ANCHOR_SELECTOR);
+    if (!el) return;
+    hoistNativeTitle(el);
+    markSilent(el);   // 到 mouseout/focusout 为止不再显示
+    cancelShow();
+    hide(true);
+  }, true);
 
   // 布局变化时重新定位
   const onRelayout = ()=>{ if (currAnchor && document.body.contains(currAnchor)) placeAround(currAnchor, currAnchor.getAttribute('data-tooltip-placement') || 'top'); };
   window.addEventListener('resize', onRelayout);
   window.addEventListener('scroll', onRelayout, { passive: true, capture: true });
 
-  // 页面卸载前恢复 title
+  // 页面卸载前恢复 title（可选）
   window.addEventListener('beforeunload', ()=>{
     document.querySelectorAll('[data-title]').forEach(el=>{
       el.setAttribute('title', el.getAttribute('data-title') || '');
