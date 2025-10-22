@@ -6,7 +6,6 @@
    - buildQuickBtnHTML
    - syncQuickActionButtons (可选)
    - initSnapTabScrolling（通用 Scroll Snap 初始化）
-   - loadRecentUpdatesIfNeeded（可选：用于“近期更新”页签懒加载）
    ========================================================= */
 
 (function attachRightPanelModule(global){
@@ -15,14 +14,15 @@
 
   let segQueriesEl = null;
   let segSearchEl  = null;
+  let __HOT_COL_LOCKED_W = null;
 
-  const ANIM = { rowMs: 240,       // 行位移动画（followers + 接力） 
-                rowEase: 'ease', 
-                fadeOutMs: 200,    // 仅用于非接力场景的淡出 
-                fadeInMs: 220,     // 仅用于非接力场景的淡入 
-                cleanupMs: 120,    // 动画结束后的清理延时 
-                guardMs: 200,       // transitionend 兜底超时 
-                relayNudgeLabelY: 0 // 工况文本衔接微调（px），正值=子行更往下，负值=更往上
+  const ANIM = { rowMs: 240,
+                rowEase: 'ease',
+                fadeOutMs: 200,
+                fadeInMs: 220,
+                cleanupMs: 120,
+                guardMs: 200,
+                relayNudgeLabelY: 0
                 };
 
   function init() {
@@ -32,9 +32,12 @@
     initRightPanelResponsiveWrap();
     initMainPanelsAdaptiveStack();
     initRightSubsegDragSwitch();
+    // 初始时为热门工况列预留并锁定列宽（等待表格行渲染完成）
+    initAndLockHotColWidthsOnce();
     updateRightSubseg('top-queries');
-    initRightSegButtonClicks();    
+    initRightSegButtonClicks();
   }
+
   // 行级动画锁
   function isRowAnimating(tr){ return !!(tr && tr.dataset && tr.dataset._relay_anim === '1'); }
   function setRowAnimating(tr, on, btn){
@@ -52,12 +55,179 @@
     if (segSearchEl)  { segSearchEl.dataset.paneId  = 'search-results-pane'; rightSubsegContainer.appendChild(segSearchEl); }
   }
 
+  // 简易文本测量器（单例）
+  let __measureEl = null;
+  function measureTextPx(text, baseEl, fontSizePx = 14, fontWeight = 400){
+    if (!__measureEl) {
+      __measureEl = document.createElement('span');
+      __measureEl.style.position = 'absolute';
+      __measureEl.style.left = '-99999px';
+      __measureEl.style.top = '-99999px';
+      __measureEl.style.visibility = 'hidden';
+      __measureEl.style.whiteSpace = 'nowrap';
+      document.body.appendChild(__measureEl);
+    }
+    const cs = baseEl ? getComputedStyle(baseEl) : getComputedStyle(document.body);
+    __measureEl.style.fontFamily = cs.fontFamily || 'system-ui,-apple-system,"Segoe UI","Helvetica Neue","Microsoft YaHei",Arial,sans-serif';
+    __measureEl.style.fontSize = `${fontSizePx}px`;
+    __measureEl.style.fontWeight = String(fontWeight);
+    __measureEl.textContent = String(text || '');
+    return __measureEl.offsetWidth || 0;
+  }
+
+  // 确保表格具有与表头列数一致的 colgroup
+  function ensureColgroup(table){
+    if (!table) return null;
+    let colgroup = table.querySelector('colgroup');
+    const thCount = (() => {
+      const thead = table.tHead;
+      if (thead && thead.rows && thead.rows[0]) return thead.rows[0].children.length || 0;
+      const firstRow = table.querySelector('tr');
+      return firstRow ? firstRow.children.length : 0;
+    })();
+
+    if (!colgroup) {
+      colgroup = document.createElement('colgroup');
+      for (let i=0;i<thCount;i++){ colgroup.appendChild(document.createElement('col')); }
+      table.insertBefore(colgroup, table.firstChild);
+      table.dataset.colCount = String(thCount);
+    } else if (colgroup.children.length !== thCount) {
+      colgroup.innerHTML = '';
+      for (let i=0;i<thCount;i++){ colgroup.appendChild(document.createElement('col')); }
+      table.dataset.colCount = String(thCount);
+    }
+    return colgroup;
+  }
+
+  // 新增：将第 6 列直接按给定像素锁定（即使表是隐藏的）
+  function lockHotColWidth(table, px){
+    if (!table || !Number.isFinite(px) || px <= 0) return;
+    const colgroup = ensureColgroup(table);
+    const card = table.closest('.fc-right-card');
+    const hostW = card ? card.getBoundingClientRect().width : window.innerWidth;
+    const fracStr = card ? getComputedStyle(card).getPropertyValue('--hot-col-max-frac').trim() : '';
+    const frac = Number.isFinite(parseFloat(fracStr)) ? parseFloat(fracStr) : 0.38;
+    const maxAllow = Math.max(180, Math.floor(hostW * frac));
+    const need = Math.min(Math.round(px), maxAllow);
+    table.style.setProperty('--hot-col-min-w', need + 'px');
+    const c6 = colgroup && colgroup.children && colgroup.children[5];
+    if (c6) c6.style.width = need + 'px';
+    table.dataset.hotColLocked = '1';
+  }
+
+  // 计算并“锁定”热门工况列宽（仅在初次加载时执行一次）
+function computeAndLockHotColWidth(table){
+  try {
+    if (!table || table.dataset.hotColLocked === '1') return true;
+    const rows = table.querySelectorAll('tbody > tr:not(.fc-subrow)[data-conditions]');
+    if (!rows.length) return false; // 没有行，留给观察者重试
+
+    const colgroup = ensureColgroup(table);
+    const first = rows[0];
+    const td6 = first.children && first.children[5];
+    if (!td6) { table.dataset.hotColLocked = '1'; return true; }
+
+    // 计算第 6 列内部起点（可见时精确，不可见时用保守回退）
+    const td6Rect = td6.getBoundingClientRect();
+    const visible = (td6Rect.width || 0) > 0 && td6.offsetParent !== null;
+    let anchorInTdX = 0;
+    if (visible) {
+      const labelEl = td6.querySelector('.fc-marquee-inner');
+      if (labelEl) {
+        const lr = labelEl.getBoundingClientRect();
+        anchorInTdX = Math.max(0, lr.left - td6Rect.left);
+      }
+    }
+    if (!anchorInTdX) {
+      const cs6 = getComputedStyle(td6);
+      const pl6 = parseFloat(cs6.paddingLeft) || 0;
+      const expBtn = td6.querySelector('.fc-row-expander');
+      let expW = expBtn ? expBtn.getBoundingClientRect().width : 22;
+      let expMr = expBtn ? parseFloat(getComputedStyle(expBtn).marginRight) || 6 : 6;
+      const labelGap = 4;
+      anchorInTdX = pl6 + expW + expMr + labelGap;
+    }
+
+    // 汇总所有行子工况最长主标签宽度
+    let maxLabelW = 0;
+    rows.forEach(tr => {
+      let conds = [];
+      try { conds = JSON.parse(tr.dataset.conditions || '[]') || []; } catch(_) {}
+      if (!Array.isArray(conds) || !conds.length) return;
+      conds.forEach(c => {
+        const txt = String(c.condition_name_zh || '');
+        if (!txt) return;
+        maxLabelW = Math.max(maxLabelW, measureTextPx(txt, td6, 14, 400));
+      });
+    });
+
+    const padRight = 12;
+    let need = Math.round(anchorInTdX + maxLabelW + padRight);
+    const currW = Math.round(td6Rect.width || 0);
+    if (currW && need < currW) need = currW;
+
+    // 写入并锁定
+    lockHotColWidth(table, need);
+
+    // 更新全局缓存（用于给其它隐藏表复用）
+    __HOT_COL_LOCKED_W = Math.max(__HOT_COL_LOCKED_W || 0, need);
+    return true;
+  } catch(_) {
+    return true;
+  }
+}
+
+  // 新增：把全局已算出的宽度传播到还没锁定的表（包括隐藏的好评榜）
+  function propagateHotColWidthToAllTables(){
+    if (!(__HOT_COL_LOCKED_W > 0)) return;
+    document.querySelectorAll('.fc-right-card .fc-rank-table').forEach(tbl => {
+      if (tbl.dataset.hotColLocked === '1') return;
+      lockHotColWidth(tbl, __HOT_COL_LOCKED_W);
+    });
+  }
+
+  // 初始化并锁定所有相关表格的热门工况列宽（支持延迟渲染）
+  function initAndLockHotColWidthsOnce(){
+    const tables = Array.from(document.querySelectorAll('.fc-right-card .fc-rank-table'));
+  
+    // 先用“可见”的表（通常是查询榜）计算一次
+    const visibleTables = tables.filter(t => t.offsetParent !== null);
+    let anyLocked = false;
+    for (const t of visibleTables) {
+      const ok = computeAndLockHotColWidth(t);
+      if (ok) anyLocked = true;
+    }
+    if (anyLocked) {
+      propagateHotColWidthToAllTables(); // 立即把查询榜的宽度复用到好评榜
+    }
+  
+    // 对尚未锁定的表，监听一次数据注入后锁定；若期间已有全局宽度，则直接传播并停止监听
+    tables.forEach(table => {
+      if (table.dataset.hotColLocked === '1') return;
+      const target = table.tBodies && table.tBodies[0] ? table.tBodies[0] : table;
+      const mo = new MutationObserver(() => {
+        if (__HOT_COL_LOCKED_W > 0) {
+          propagateHotColWidthToAllTables();
+          mo.disconnect();
+          return;
+        }
+        const ok = computeAndLockHotColWidth(table);
+        if (ok) {
+          propagateHotColWidthToAllTables();
+          mo.disconnect();
+        }
+      });
+      mo.observe(target, { childList: true, subtree: true });
+      setTimeout(() => mo.disconnect(), 5000);
+    });
+  }
+
   function updateRightSubseg(activeTab){
     if (segQueriesEl) segQueriesEl.style.display = (activeTab === 'top-queries') ? 'inline-flex' : 'none';
     if (segSearchEl)  segSearchEl.style.display  = (activeTab === 'search-results') ? 'inline-flex' : 'none';
   }
 
-  // REPLACE: initRightPanelSnapTabs 内 onActiveChange 的近期更新调用，使用本地函数
+  // 右侧 Scroll Snap 初始化（保持不变）
   function initRightPanelSnapTabs(){
     const card = document.querySelector('.fc-right-card');
     if (!card) return;
@@ -77,7 +247,8 @@
         onActiveChange: (tab) => {
           updateRightSubseg(tab);
           if (tab === 'recent-updates') {
-            loadRecentUpdatesIfNeeded();
+            // recent-updates 懒加载，已内聚在 RightPanel
+            RightPanel.recentUpdates?.loadIfNeeded?.();
           }
         },
         clickScrollBehavior: 'smooth'
@@ -159,6 +330,7 @@
       const table = parentTr.closest('table');
       if (!table) return;
       const rowRect = parentTr.getBoundingClientRect();
+      const locked = table.dataset.hotColLocked === '1';
 
       // 第 6 列（热门工况列）
       const td6 = parentTr.children && parentTr.children[5];
@@ -166,20 +338,64 @@
         let anchorPx;
         const labelEl = td6.querySelector('.fc-marquee-inner');
         if (labelEl) {
-          // 直接以父行工况文本的左边缘为锚点
           anchorPx = labelEl.getBoundingClientRect().left - rowRect.left;
         } else {
-          // 回退：td 左 + padding-left + 展开按钮宽度与右距 + 文案自身 margin-left(.25rem≈4px)
           const tdBox = td6.getBoundingClientRect();
           const cs6 = getComputedStyle(td6);
           const pl6 = parseFloat(cs6.paddingLeft) || 0;
           const expBtn = td6.querySelector('.fc-row-expander');
           const expW = expBtn ? expBtn.getBoundingClientRect().width : 0;
           const expMr = expBtn ? parseFloat(getComputedStyle(expBtn).marginRight) || 0 : 0;
-          const labelGap = 4; // 0.25rem ≈ 4px
+          const labelGap = 4;
           anchorPx = (tdBox.left + pl6 + expW + expMr + labelGap) - rowRect.left;
         }
         table.style.setProperty('--subrow-anchor-x', Math.round(anchorPx) + 'px');
+
+        // 宽度：若已锁定，则不再更新
+        if (!locked) {
+          const td6Rect = td6.getBoundingClientRect();
+          let anchorInTdX = 0;
+          if (labelEl) {
+            const lr = labelEl.getBoundingClientRect();
+            anchorInTdX = Math.max(0, lr.left - td6Rect.left);
+          } else {
+            const cs6 = getComputedStyle(td6);
+            const pl6 = parseFloat(cs6.paddingLeft) || 0;
+            const expBtn = td6.querySelector('.fc-row-expander');
+            const expW = expBtn ? expBtn.getBoundingClientRect().width : 0;
+            const expMr = expBtn ? parseFloat(getComputedStyle(expBtn).marginRight) || 0 : 0;
+            const labelGap = 4;
+            anchorInTdX = pl6 + expW + expMr + labelGap;
+          }
+          let conds = [];
+          try { conds = JSON.parse(parentTr.dataset.conditions || '[]') || []; } catch(_) {}
+          if (Array.isArray(conds) && conds.length) {
+            let maxLabelW = 0;
+            conds.forEach(c => {
+              const txt = String(c.condition_name_zh || '');
+              if (!txt) return;
+              maxLabelW = Math.max(maxLabelW, measureTextPx(txt, td6, 14, 400));
+            });
+            const padRight = 12;
+            let need = Math.round(anchorInTdX + maxLabelW + padRight);
+            const currW = Math.round(td6Rect.width);
+            if (need < currW) need = currW;
+
+            const card = table.closest('.fc-right-card');
+            const hostW = card ? card.getBoundingClientRect().width : window.innerWidth;
+            const fracStr = card ? getComputedStyle(card).getPropertyValue('--hot-col-max-frac').trim() : '';
+            const frac = Number.isFinite(parseFloat(fracStr)) ? parseFloat(fracStr) : 0.38;
+            const maxAllow = Math.max(180, Math.floor(hostW * frac));
+            need = Math.min(need, maxAllow);
+
+            // 确保 colgroup 存在后再写
+            const colgroup = ensureColgroup(table);
+            table.style.setProperty('--hot-col-min-w', need + 'px');
+            const c6 = colgroup && colgroup.children && colgroup.children[5];
+            if (c6) c6.style.width = need + 'px';
+            table.dataset.hotColLocked = '1'; // 第一次展开若触发到这里，也锁定
+          }
+        }
       }
 
       // 第 7 列（次数列）左内边距（注入为子行计数左 padding）

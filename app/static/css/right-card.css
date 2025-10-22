@@ -11,6 +11,10 @@
   height: clamp(480px, 62vh, 600px);
   min-height: 0;
   min-width: 0;
+
+  /* 新增：热门工况列最小宽度（JS 会动态写入），默认 0 */
+  --hot-col-min-w: 0px;
+  --hot-col-max-frac: 0.38;
 }
 
 @media (max-width: 600px) {
@@ -137,6 +141,18 @@
   background: var(--bg-secondary);
   box-shadow: 0 2px 3px -1px rgba(0,0,0,.08);
 }
+
+/* 新增：右侧面板所有列表表头字体 15px（覆盖通用 14px） */
+.fc-right-card .fc-rank-table thead th {
+  font-size: 15px;
+}
+
+/* 通过 colgroup 控制第 6 列宽度（仍保留上限，作为兜底） */
+.fc-right-card .fc-rank-table colgroup col:nth-child(6) {
+  width: min(var(--hot-col-min-w, 0px), calc(var(--hot-col-max-frac, 0.38) * 100vw));
+  min-width: min(var(--hot-col-min-w, 0px), calc(var(--hot-col-max-frac, 0.38) * 100vw));
+}
+
 [data-theme="dark"] .fc-right-card .fc-rank-table thead th {
   box-shadow: 0 2px 3px -1px rgba(0,0,0,.45);
   backdrop-filter:saturate(120%) blur(8px);
@@ -158,6 +174,12 @@
 .fc-right-card .fc-rank-table td:last-child {
   padding: 8px;
   background: linear-gradient(to left, transparent 30px, rgba(0,0,0,0) 50px);
+}
+
+/* 新增：热门工况（第 6 列）最小宽度，受 --hot-col-min-w 约束，设置上限避免狭窄屏过宽 */
+.fc-right-card .fc-rank-table th:nth-child(6),
+.fc-right-card .fc-rank-table td:nth-child(6) {
+  min-width: min(var(--hot-col-min-w, 0px), 52vw);
 }
 
 .fc-right-card .fc-rank-box { position: relative; }
