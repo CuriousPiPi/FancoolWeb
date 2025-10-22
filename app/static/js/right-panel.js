@@ -366,154 +366,259 @@ function initTopQueriesAndLikesExpander(){
   function getChildRank(rec) { return Number(rec.cond_rank || 1e9); }
   function getChildCount(rec) { return Number(rec.count || 0); }
 
-  async function expandRow(btn){
-    const tr = safeClosest(btn, 'tr'); if (!tr) return;
-    if (isRowAnimating(tr)) return;
-    setRowAnimating(tr, true, btn);
-    const unlock = () => setRowAnimating(tr, false, btn);
-
-    setSubrowAnchorVar(tr);
-
-    const followers = collectFollowers(tr);
-    const prevMap = measureTops(followers);
-
-    const condsRaw = parseConds(tr);
-    const sorted = condsRaw.slice().sort((a,b)=>{
-      const ra = getChildRank(a);
-      const rb = getChildRank(b);
-      if (ra !== rb) return ra - rb;
-      const ca = getChildCount(a);
-      const cb = getChildCount(b);
-      return cb - ca;
-    });
-
-    tr.insertAdjacentHTML('afterend', sorted.map(c=>{
-      return buildSubrowHTML(tr, c, getChildCount(c));
-    }).join(''));
-
-    const firstSub = tr.nextElementSibling && tr.nextElementSibling.classList.contains('fc-subrow')
-      ? tr.nextElementSibling : null;
-
-    let dyLabel = null, dyBtn = null;
-    if (firstSub) {
-      const pLabel = (tr.children[5]?.querySelector('.fc-marquee-inner')) || tr.querySelector('[data-role="top-cond"], .js-top-cond');
-      const cLabel = firstSub.querySelector('td[colspan] .fc-subrow__label');
-      const pBtn   = tr.querySelector('td:last-child .fc-btn-icon-add');
-      const cBtn   = firstSub.querySelector('td:last-child .fc-btn-icon-add');
-    
-      if (pLabel && cLabel) {
-        const pr = pLabel.getBoundingClientRect();
-        const cr = cLabel.getBoundingClientRect();
-        const pCenter = pr.top + pr.height/2;
-        const cCenter = cr.top + cr.height/2;
-        dyLabel = Math.round((cCenter - pCenter) + 0);
-        const fromY = Math.round((pCenter - cCenter) + 0);
-        cLabel.style.transition = 'none';
-        cLabel.style.transform = `translateY(${fromY}px)`;
-        addClip(firstSub.querySelector('td[colspan]'));
-      }
-      if (pBtn && cBtn) {
-        const prb = pBtn.getBoundingClientRect();
-        const crb = cBtn.getBoundingClientRect();
-        dyBtn = Math.round(crb.top - prb.top);
-        cBtn.style.transition = 'none';
-        cBtn.style.transform = `translateY(${Math.round(prb.top - crb.top)}px)`;
-        addClip(firstSub.querySelector('td:last-child'));
-      }
-    
-      requestAnimationFrame(()=> {
-        if (cLabel){ cLabel.style.transition = `transform 240ms ease`; cLabel.style.transform = 'translateY(0)'; }
-        if (cBtn){   cBtn.style.transition   = `transform 240ms ease`; cBtn.style.transform   = 'translateY(0)'; }
-      
-        setTimeout(()=> {
-          removeClip(firstSub.querySelector('td[colspan]'));
-          removeClip(firstSub.querySelector('td:last-child'));
-          if (cLabel){ cLabel.style.transition=''; cLabel.style.transform=''; }
-          if (cBtn){   cBtn.style.transition='';   cBtn.style.transform=''; }
-        }, 240 + 120);
-      });
-    }
-
-    const currMap = measureTops(followers);
-
-    toggleParentHotCondAndAction(tr, true, {
-      mode:'relay',
-      duration: 240,
-      easing: 'ease',
-      dyLabel,
-      dyBtn
-    });
-
-    markAnimating(followers, true);
-    startRowMaskTracking(followers);
-    
-    if (!followers.length) {
-      setTimeout(() => {
-        stopRowMaskTracking();
-        unlock();
-      }, 240 + 120);
-    } else {
-      startRowMaskTracking(followers);
-      followers.forEach(el => {
-        const prevTop = prevMap.get(el), currTop = currMap.get(el);
-        if (prevTop == null || currTop == null) return;
-        const dy = prevTop - currTop; if (Math.abs(dy) < 0.5) return;
-        el.style.transition = 'none'; el.style.transform = `translateY(${dy}px)`;
-      });
-      void document.body.offsetWidth;
-
-      let rest = followers.length;
-      requestAnimationFrame(() => {
-        followers.forEach(el => {
-          if (!prevMap.has(el)) return;
-          el.style.transition = `transform 240ms ease`;
-          el.style.transform = 'translateY(0)';
-        });
-        const onEnd = (e) => {
-          if (e.propertyName !== 'transform') return;
-          const el = e.currentTarget;
-          el.removeEventListener('transitionend', onEnd);
-          el.style.transition = '';
-          el.style.transform = '';
-          el.classList.remove('fc-row-animating');
-          if (--rest === 0) {
-            stopRowMaskTracking();
-            unlock();
-          }
-        };
-        followers.forEach(el => el.addEventListener('transitionend', onEnd));
-        setTimeout(() => {
-          if (rest > 0) {
-            rest = 0;
-            stopRowMaskTracking();
-            unlock();     
-          }
-        }, 240 + 200);
-      });
-    }
-    btn.setAttribute('aria-expanded','true');
-    btn.removeAttribute('title');
-    btn.classList.add('is-open');
-
-    if (typeof syncQuickActionButtons === 'function') syncQuickActionButtons();
+  // 新增：获取“最后一条主行”（非子行）
+  function getLastMainRow(tr){
+    const tbody = tr?.closest?.('tbody');
+    if (!tbody) return null;
+    const mains = tbody.querySelectorAll('tr:not(.fc-subrow)');
+    return mains.length ? mains[mains.length - 1] : null;
   }
 
-// REPLACE this function
+  // 展开阶段：动态阈值滚动（正向累计）
+  // totalDelta>0；freeSpacePx = 基准边到 scroller 可视底的初始空隙；仅当 currentDelta 超过该空隙时开始上移，滚动量=over
+  function startTrackScrollPinDynamic(scroller, totalDelta, freeSpacePx){
+    if (!scroller || !isFinite(totalDelta) || totalDelta <= 0) return;
+    const easeInOut = (t)=> t<.5 ? (2*t*t) : (1 - Math.pow(-2*t+2,2)/2);
+    const dur = ANIM.rowMs;
+    const startTop = scroller.scrollTop;
+    const threshold = Math.max(0, freeSpacePx || 0);
+
+    let startTs = 0;
+    function frame(ts){
+      if (!startTs) startTs = ts;
+      const k = Math.min(1, (ts - startTs)/Math.max(1,dur));
+      const e = easeInOut(k);
+
+      const currentDelta = e * totalDelta;
+      const over = currentDelta - threshold;
+      const next = over > 0 ? (startTop + over) : startTop;
+
+      clampScrollTop(scroller, next);
+      if (k < 1) requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  }
+
+  // 收起阶段：动态阈值滚动（反向累计，触顶即止）
+  // totalDelta>0；freeSpacePx = 基准边到 scroller 可视底的初始空隙；仅当 currentDelta 超过该空隙时开始减少 scrollTop
+  function startTrackScrollPinDynamicCollapse(scroller, totalDelta, freeSpacePx){
+    if (!scroller || !isFinite(totalDelta) || totalDelta <= 0) return;
+    const easeInOut = (t)=> t<.5 ? (2*t*t) : (1 - Math.pow(-2*t+2,2)/2);
+    const dur = ANIM.rowMs;
+    const startTop = scroller.scrollTop;
+    const threshold = Math.max(0, freeSpacePx || 0);
+
+    let startTs = 0;
+    function frame(ts){
+      if (!startTs) startTs = ts;
+      const k = Math.min(1, (ts - startTs)/Math.max(1,dur));
+      const e = easeInOut(k);
+
+      const currentDelta = e * totalDelta;
+      const over = currentDelta - threshold;
+      let next = startTop;
+      if (over > 0) {
+        next = startTop - over; // 收起：减少 scrollTop
+      }
+      clampScrollTop(scroller, next);
+
+      if (k < 1 && scroller.scrollTop > 0) requestAnimationFrame(frame);
+    }
+    requestAnimationFrame(frame);
+  }
+
+// ===== 展开 =====
+async function expandRow(btn){
+  const tr = safeClosest(btn, 'tr'); if (!tr) return;
+  if (isRowAnimating(tr)) return;
+  setRowAnimating(tr, true, btn);
+  const unlock = () => setRowAnimating(tr, false, btn);
+
+  const scroller = getScroller(tr);
+  const trRectBefore = tr.getBoundingClientRect(); // 供“最后一行”基准使用
+
+  setSubrowAnchorVar(tr);
+
+  // 插入前：收集“后续主行”及其可视 top
+  const followers = collectFollowers(tr);
+  const prevMap = measureTops(followers);
+
+  // 构造并插入子行
+  const condsRaw = parseConds(tr);
+  const sorted = condsRaw.slice().sort((a,b)=>{
+    const ra = getChildRank(a);
+    const rb = getChildRank(b);
+    if (ra !== rb) return ra - rb;
+    const ca = getChildCount(a);
+    const cb = getChildCount(b);
+    return cb - ca;
+  });
+  tr.insertAdjacentHTML('afterend', sorted.map(c=>{
+    return buildSubrowHTML(tr, c, getChildCount(c));
+  }).join(''));
+
+  // 子行总高度增量
+  let HExact = 0; {
+    let n=tr.nextElementSibling;
+    while(n && n.classList.contains('fc-subrow')) { HExact += n.getBoundingClientRect().height; n = n.nextElementSibling; }
+    if (!isFinite(HExact) || HExact<=0) {
+      const v = getComputedStyle(document.documentElement).getPropertyValue('--subrow-h').trim();
+      const h = parseFloat(v) || 26; HExact = h * sorted.length;
+    }
+  }
+
+  const firstSub = tr.nextElementSibling && tr.nextElementSibling.classList.contains('fc-subrow')
+    ? tr.nextElementSibling : null;
+
+  // 父→子接力位移
+  let dyLabel = null, dyBtn = null;
+  if (firstSub) {
+    const pLabel = (tr.children[5]?.querySelector('.fc-marquee-inner')) || tr.querySelector('[data-role="top-cond"], .js-top-cond');
+    const cLabel = firstSub.querySelector('td[colspan] .fc-subrow__label');
+    const pBtn   = tr.querySelector('td:last-child .fc-btn-icon-add');
+    const cBtn   = firstSub.querySelector('td:last-child .fc-btn-icon-add');
+  
+    if (pLabel && cLabel) {
+      const pr = pLabel.getBoundingClientRect();
+      const cr = cLabel.getBoundingClientRect();
+      const pCenter = pr.top + pr.height/2;
+      const cCenter = cr.top + cr.height/2;
+      dyLabel = Math.round((cCenter - pCenter) + 0);
+      const fromY = Math.round((pCenter - cCenter) + 0);
+      cLabel.style.transition = 'none';
+      cLabel.style.transform = `translateY(${fromY}px)`;
+      addClip(firstSub.querySelector('td[colspan]'));
+    }
+    if (pBtn && cBtn) {
+      const prb = pBtn.getBoundingClientRect();
+      const crb = cBtn.getBoundingClientRect();
+      dyBtn = Math.round(crb.top - prb.top);
+      cBtn.style.transition = 'none';
+      cBtn.style.transform = `translateY(${Math.round(prb.top - crb.top)}px)`;
+      addClip(firstSub.querySelector('td:last-child'));
+    }
+  
+    requestAnimationFrame(()=> {
+      if (cLabel){ cLabel.style.transition = `transform 240ms ease`; cLabel.style.transform = 'translateY(0)'; }
+      if (cBtn){   cBtn.style.transition   = `transform 240ms ease`; cBtn.style.transform   = 'translateY(0)'; }
+    
+      setTimeout(()=> {
+        removeClip(firstSub.querySelector('td[colspan]'));
+        removeClip(firstSub.querySelector('td:last-child'));
+        if (cLabel){ cLabel.style.transition=''; cLabel.style.transform=''; }
+        if (cBtn){   cBtn.style.transition='';   cBtn.style.transform=''; }
+      }, 240 + 120);
+    });
+  }
+
+  // followers 位移测量
+  const currMap = measureTops(followers);
+
+  // 父行工况/按钮接力位移
+  toggleParentHotCondAndAction(tr, true, {
+    mode:'relay',
+    duration: 240,
+    easing: 'ease',
+    dyLabel,
+    dyBtn
+  });
+
+  // 新：展开滚动同步（你的新规则）
+  if (scroller) {
+    const scRect = scroller.getBoundingClientRect();
+    let freeSpacePx = 0;
+
+    if (followers.length === 0) {
+      // 最后一行：基于“父行底边”
+      freeSpacePx = Math.max(0, Math.round(scRect.bottom - trRectBefore.bottom));
+    } else {
+      // 非最后一行：基于“第一条下移主行的插入前顶边”
+      const firstFollower = followers[0];
+      const prevTopFF = prevMap.get(firstFollower);
+      if (typeof prevTopFF === 'number') {
+        freeSpacePx = Math.max(0, Math.round(scRect.bottom - prevTopFF));
+      } else {
+        // 兜底：用“插入后 top - 预计下移量”近似回推
+        const ffRect = firstFollower.getBoundingClientRect();
+        freeSpacePx = Math.max(0, Math.round(scRect.bottom - (ffRect.top - HExact)));
+      }
+    }
+    startTrackScrollPinDynamic(scroller, +HExact, freeSpacePx);
+  }
+
+  // followers 位移动画
+  markAnimating(followers, true);
+  startRowMaskTracking(followers);
+  
+  if (!followers.length) {
+    setTimeout(() => {
+      stopRowMaskTracking();
+      unlock();
+    }, 240 + 120);
+  } else {
+    startRowMaskTracking(followers);
+    followers.forEach(el => {
+      const prevTop = prevMap.get(el), currTop = currMap.get(el);
+      if (prevTop == null || currTop == null) return;
+      const dy = prevTop - currTop; if (Math.abs(dy) < 0.5) return;
+      el.style.transition = 'none'; el.style.transform = `translateY(${dy}px)`;
+    });
+    void document.body.offsetWidth;
+
+    let rest = followers.length;
+    requestAnimationFrame(() => {
+      followers.forEach(el => {
+        if (!prevMap.has(el)) return;
+        el.style.transition = `transform 240ms ease`;
+        el.style.transform = 'translateY(0)';
+      });
+      const onEnd = (e) => {
+        if (e.propertyName !== 'transform') return;
+        const el = e.currentTarget;
+        el.removeEventListener('transitionend', onEnd);
+        el.style.transition = '';
+        el.style.transform = '';
+        el.classList.remove('fc-row-animating');
+        if (--rest === 0) {
+          stopRowMaskTracking();
+          unlock();
+        }
+      };
+      followers.forEach(el => el.addEventListener('transitionend', onEnd));
+      setTimeout(() => {
+        if (rest > 0) {
+          rest = 0;
+          stopRowMaskTracking();
+          unlock();     
+        }
+      }, 240 + 200);
+    });
+  }
+  btn.setAttribute('aria-expanded','true');
+  btn.removeAttribute('title');
+  btn.classList.add('is-open');
+
+  if (typeof syncQuickActionButtons === 'function') syncQuickActionButtons();
+}
+
+// REPLACE: collapseRow —— 融合“最后一行收起：容器平滑移动后再移除子行”
 function collapseRow(btn){
   const tr = safeClosest(btn, 'tr'); if (!tr) return;
-  if (isRowAnimating(tr)) return; // 动画中直接忽略
-  setRowAnimating(tr, true, btn); // 开始上锁
-  const unlock = () => setRowAnimating(tr, false, btn); // 解锁函数
+  if (isRowAnimating(tr)) return;
+  setRowAnimating(tr, true, btn);
+  const unlock = () => setRowAnimating(tr, false, btn);
+
+  const scroller = getScroller(tr);
 
   const mid = tr.dataset.modelId || '';
-  const subrows=[]; let n=tr.nextElementSibling; while(isSubrowOf(n, mid)){ subrows.push(n); n=n.nextElementSibling; }
+  const subrows=[]; let n=tr.nextElementSibling; while (isSubrowOf(n, mid)) { subrows.push(n); n = n.nextElementSibling; }
   if (!subrows.length) {
-    toggleParentHotCondAndAction(tr, false); // 无子行，走默认显现
-    unlock(); // 解锁（收起：无子行早退）
+    toggleParentHotCondAndAction(tr, false);
+    unlock();
     btn.setAttribute('aria-expanded','false'); btn.removeAttribute('title'); btn.classList.remove('is-open'); return;
   }
 
-  // 预先计算“接力式”位移（子第一行 -> 父行），无论是否存在 followers 都需要
+  // 预先接力：父→子（保持原有）
   const firstSub = subrows[0] || null;
   let fromDyLabel = null, fromDyBtn = null;
   if (firstSub) {
@@ -527,13 +632,10 @@ function collapseRow(btn){
       const cr = cLabel.getBoundingClientRect();
       const pCenter = pr.top + pr.height/2;
       const cCenter = cr.top + cr.height/2;
-      // 父行入场起点（自子行位置上移）：正值
-      fromDyLabel = Math.round((cCenter - pCenter));
-      // 子行退场：从 0 上移到父行中线
-      const toY = Math.round((pCenter - cCenter));
+      fromDyLabel = Math.round((cCenter - pCenter) + 0);
       addClip(firstSub.querySelector('td[colspan]'));
       cLabel.style.transition = `transform ${ANIM.rowMs}ms ${ANIM.rowEase}`;
-      cLabel.style.transform  = `translateY(${toY}px)`;
+      cLabel.style.transform  = `translateY(${Math.round((pCenter - cCenter) + 0)}px)`;
     }
     if (pBtn && cBtn) {
       const prb = pBtn.getBoundingClientRect();
@@ -552,16 +654,14 @@ function collapseRow(btn){
     }, ANIM.rowMs + ANIM.cleanupMs);
   }
 
-  // 计算子行总高度
+  // 本次将减少的总高度（用于非最后一行 followers 动画）
   let HExact = 0; for (const sr of subrows) HExact += sr.getBoundingClientRect().height;
-  if (HExact <= 0) {
+  if (!isFinite(HExact) || HExact<=0) {
     const v = getComputedStyle(document.documentElement).getPropertyValue('--subrow-h').trim();
-    const h = parseFloat(v) || 34; HExact = h * subrows.length;
+    const h = parseFloat(v) || 26; HExact = h * subrows.length;
   }
-  const lastSub = subrows[subrows.length - 1];
-  const followers = collectFollowersAfter(lastSub);
 
-  // 父行“接力式”向上入场（无 followers 也执行，保证父行工况与按钮复位）
+  // 父行接力入场（保持原有）
   toggleParentHotCondAndAction(tr, false, {
     mode:'relay',
     duration: ANIM.rowMs,
@@ -570,79 +670,76 @@ function collapseRow(btn){
     fromDyBtn
   });
 
-  if (!followers.length) {
-    // 无后续行：添加“自下而上”遮罩覆盖动画（背景与 .fc-row-animating 保持一致）
-    const tbody = tr.parentElement;
-    const needRestorePos = ensureRelPos(tbody);
+  // 判断是否“最后一行”
+  const lastSub = subrows[subrows.length - 1];
+  const followers = collectFollowersAfter(lastSub);
+  const isLastMainRow = followers.length === 0;
 
-    // 用几何差值保证 top 准确（避免 offsetParent 差异）
-    const tbodyRect = tbody.getBoundingClientRect();
-    const anchorRect = (firstSub || tr).getBoundingClientRect();
-    const top = anchorRect.top - tbodyRect.top;
-
-    const mask = createCollapseMask(
-      tbody,
-      top,          // 遮罩起点 = 第一条子行相对 tbody 的 top
-      HExact
-    );
-
-    // 动画结束后：移除子行与遮罩，恢复定位并解锁
-    setTimeout(() => {
-      subrows.forEach(sr => sr.remove());
-      if (mask && mask.parentNode) mask.parentNode.removeChild(mask);
-      if (needRestorePos) restoreRelPos(tbody);
-      unlock();
-    }, ANIM.rowMs + ANIM.cleanupMs);
-
-    btn.setAttribute('aria-expanded','false');
-    btn.removeAttribute('title'); // 防止原生 tooltip 复活
-    btn.classList.remove('is-open');
-    return;
-  }
-
-  // 有后续行：维持原 followers 上移动画 + 暗色遮罩
-  followers.forEach(el => { 
-    el.classList.add('fc-row-animating'); 
-    el.style.transition='none'; 
-    el.style.transform='translate3d(0,0,0)'; 
-    el.style.willChange='transform'; 
-  });
-  void document.body.offsetWidth;
-
-  startRowMaskTracking(followers);
-  requestAnimationFrame(() => {
-    followers.forEach(el => {
-      el.style.transition = `transform ${ANIM.rowMs}ms ${ANIM.rowEase}`;
-      el.style.transform = `translate3d(0, ${-HExact}px, 0)`;
-    });
-
-    let rest = followers.length, fired = false;
-    const done = () => {
-      if (fired) return; fired = true;
-      subrows.forEach(sr => sr.remove());
-      void document.body.offsetWidth;
-      requestAnimationFrame(() => {
-        followers.forEach(el => {
-          el.style.transition = 'none'; el.style.transform = ''; el.style.willChange = '';
-          el.classList.remove('fc-row-animating');
-          requestAnimationFrame(() => { el.style.transition = ''; });
-        });
-        stopRowMaskTracking();
+  if (isLastMainRow) {
+    // 融合 Version1 的正确过渡：容器在整个时长内按绝对量平滑上移，动画结束再移除子行，避免瞬跳
+    if (scroller) {
+      collapseLastRowWithMask(tr, scroller, subrows, ANIM.rowMs, () => {
         unlock();
       });
-    };
-    const onEnd = (e) => {
-      if (e.propertyName !== 'transform') return;
-      e.currentTarget.removeEventListener('transitionend', onEnd);
-      if (--rest === 0) done();
-    };
-    followers.forEach(el => el.addEventListener('transitionend', onEnd));
-    setTimeout(done, ANIM.rowMs + ANIM.guardMs);
-  });
+    } else {
+      // 无滚动容器兜底
+      setTimeout(() => { subrows.forEach(sr => sr.remove()); unlock(); }, ANIM.rowMs + ANIM.cleanupMs);
+    }
+  } else {
+    // 非最后一行：沿用你当前的“动态阈值”方案（以最后一条主行底边为基准）
+    if (scroller) {
+      const scRect = scroller.getBoundingClientRect();
+      const lastMain = getLastMainRow(tr);
+      if (lastMain) {
+        const lmRect = lastMain.getBoundingClientRect();
+        const freeSpacePx = Math.max(0, Math.round(scRect.bottom - lmRect.bottom));
+        startTrackScrollPinDynamicCollapse(scroller, HExact, freeSpacePx);
+      }
+    }
+
+    // followers 上移动画（保持原有）
+    followers.forEach(el => { 
+      el.classList.add('fc-row-animating'); 
+      el.style.transition='none'; 
+      el.style.transform='translate3d(0,0,0)'; 
+      el.style.willChange='transform'; 
+    });
+    void document.body.offsetWidth;
+
+    startRowMaskTracking(followers);
+    requestAnimationFrame(() => {
+      followers.forEach(el => {
+        el.style.transition = `transform ${ANIM.rowMs}ms ${ANIM.rowEase}`;
+        el.style.transform = `translate3d(0, ${-HExact}px, 0)`;
+      });
+
+      let rest = followers.length, fired = false;
+      const done = () => {
+        if (fired) return; fired = true;
+        subrows.forEach(sr => sr.remove());
+        void document.body.offsetWidth;
+        requestAnimationFrame(() => {
+          followers.forEach(el => {
+            el.style.transition = 'none'; el.style.transform = ''; el.style.willChange = '';
+            el.classList.remove('fc-row-animating');
+            requestAnimationFrame(() => { el.style.transition = ''; });
+          });
+          stopRowMaskTracking();
+          unlock();
+        });
+      };
+      const onEnd = (e) => {
+        if (e.propertyName !== 'transform') return;
+        e.currentTarget.removeEventListener('transitionend', onEnd);
+        if (--rest === 0) done();
+      };
+      followers.forEach(el => el.addEventListener('transitionend', onEnd));
+      setTimeout(done, ANIM.rowMs + ANIM.guardMs);
+    });
+  }
 
   btn.setAttribute('aria-expanded','false');
-  btn.removeAttribute('title'); // 防止原生 tooltip 复活
-  btn.classList.remove('is-open');
+  btn.removeAttribute('title'); btn.classList.remove('is-open');
 }
 
   document.addEventListener('click', (e)=>{
@@ -656,7 +753,7 @@ function collapseRow(btn){
   });
 }
 
-// ADD this helper: ensure container is position:relative during mask animation
+// 工具：position:relative 兜底（保留，遮罩相关）
 function ensureRelPos(el){
   if (!el) return false;
   const cs = getComputedStyle(el);
@@ -703,7 +800,7 @@ function createCollapseMask(container, top, height){
   function addClip(el){ if(el){ el.classList.add('fc-col-clip'); el.style.position = el.style.position || 'relative'; } }
   function removeClip(el){ if(el){ el.classList.remove('fc-col-clip'); } }
 
-  /* 仅位移的隐藏：从 0 → translateY(toDy)；结束后 visibility:hidden 并复位样式 */
+  // 仅位移的隐藏/显示（保留）
   function slideHideEl(el, toDy, duration=ANIM.rowMs, easing=ANIM.rowEase){
     if (!el) return;
     el.style.visibility = 'visible';
@@ -722,8 +819,6 @@ function createCollapseMask(container, top, height){
     };
     el.addEventListener('transitionend', onEnd);
   }
-
-  /* 仅位移的显示：从 translateY(fromDy) → 0；开始前 visibility:visible */
   function slideShowEl(el, fromDy, duration=ANIM.rowMs, easing=ANIM.rowEase){
     if (!el) return;
     el.style.visibility = 'visible';
@@ -744,6 +839,157 @@ function createCollapseMask(container, top, height){
     };
     el.addEventListener('transitionend', onEnd);
   }
+
+  // 滚动容器与贴边判定（保留基础工具）
+function getScroller(tr){
+  return tr?.closest?.('.fc-rank-scroll') || null;
+}
+function isTopStuck(scroller, eps=1){
+  if (!scroller) return false;
+  return scroller.scrollTop <= eps;
+}
+function isBottomStuck(scroller, eps=1){
+  if (!scroller) return false;
+  const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+  return scroller.scrollTop >= (maxScroll - eps);
+}
+function clampScrollTop(scroller, v){
+  const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+  scroller.scrollTop = Math.max(0, Math.min(maxScroll, v));
+}
+
+// 子行单位高度解析（px）
+function getUnitSubrowHeight(){
+  try {
+    const v = getComputedStyle(document.documentElement).getPropertyValue('--subrow-h').trim();
+    const h = parseFloat(v);
+    if (h && isFinite(h)) return h;
+  } catch(_) {}
+  return 26; // fallback
+}
+
+// 子行高度动画（保持）
+function animateSubrowsHeight(subrows, expand=true, durationMs=240, onProgress, onDone){
+  const unitH = getUnitSubrowHeight();
+  const inners = [];
+  for (const sr of subrows) {
+    const inner = sr.querySelector('.fc-subrow__row');
+    if (!inner) continue;
+    inners.push(inner);
+  }
+  if (!inners.length) { if (typeof onDone==='function') onDone(); return; }
+
+  const startH = expand ? 0 : unitH;
+  const endH   = expand ? unitH : 0;
+
+  inners.forEach(el => {
+    el.style.overflow = 'hidden';
+    el.style.willChange = 'height';
+    el.style.transition = 'none';
+    el.style.height = startH + 'px';
+  });
+  void document.body.offsetWidth;
+
+  inners.forEach(el => {
+    el.style.transition = `height ${durationMs}ms ${ANIM.rowEase}`;
+  });
+  let finished = false;
+  let ended = 0;
+  const totalCount = inners.length;
+  function cleanup(){
+    if (finished) return;
+    finished = true;
+    inners.forEach(el => {
+      el.style.transition = '';
+      el.style.willChange = '';
+      el.style.overflow = '';
+      el.style.height = endH + 'px';
+    });
+    if (typeof onDone === 'function') onDone();
+  }
+  const onEnd = (e) => {
+    if (e.propertyName !== 'height') return;
+    e.currentTarget.removeEventListener('transitionend', onEnd);
+    if (++ended >= totalCount) cleanup();
+  };
+  inners.forEach(el => el.addEventListener('transitionend', onEnd));
+
+  let prevSum = startH * inners.length;
+  let startTs = 0, rafId = 0;
+  function frame(ts){
+    if (!startTs) startTs = ts;
+    let sum = 0;
+    for (const el of inners) {
+      const h = parseFloat(getComputedStyle(el).height) || 0;
+      sum += h;
+    }
+    const delta = sum - prevSum;
+    prevSum = sum;
+    if (typeof onProgress === 'function' && Math.abs(delta) > 0.1) onProgress(delta);
+
+    const t = (ts - startTs);
+    if (t < durationMs + ANIM.guardMs && !finished) {
+      rafId = requestAnimationFrame(frame);
+    } else {
+      cancelAnimationFrame(rafId);
+      cleanup();
+    }
+  }
+  requestAnimationFrame(frame);
+
+  requestAnimationFrame(()=> {
+    inners.forEach(el => { el.style.height = endH + 'px'; });
+  });
+}
+
+// REPLACE: 最后一行“收起”专用的绝对量平滑滚动（保持不变，确保存在）
+function startTrackScrollPinCollapseAbsolute(scroller, totalDelta, duration=ANIM.rowMs){
+  if (!scroller || !isFinite(totalDelta) || totalDelta <= 0) return;
+  const easeInOut = (t)=> t<.5 ? (2*t*t) : (1 - Math.pow(-2*t+2,2)/2);
+  const startTop = scroller.scrollTop;
+  let startTs = 0, raf = 0, stopped = false;
+
+  function frame(ts){
+    if (!startTs) startTs = ts;
+    const k = Math.min(1, (ts - startTs) / Math.max(1, duration));
+    const e = easeInOut(k);
+    const next = startTop - e * totalDelta; // 收起：scrollTop 逐步减少，容器“向下”运动
+    clampScrollTop(scroller, next);
+    if (scroller.scrollTop <= 0) stopped = true;  // 触顶即止
+    if (k < 1 && !stopped) raf = requestAnimationFrame(frame);
+  }
+  raf = requestAnimationFrame(frame);
+}
+
+// REPLACE: 最后一行“收起”的平滑方案 —— 去掉遮罩，仅平滑滚动，结束后再移除子行
+function collapseLastRowWithMask(tr, scroller, subrows, duration=ANIM.rowMs, onDone){
+  try {
+    if (!subrows || !subrows.length) { if (typeof onDone==='function') onDone(); return; }
+
+    // 计算本次将减少的总高度（不改动子行 DOM）
+    let HExact = 0;
+    for (const sr of subrows) HExact += sr.getBoundingClientRect().height;
+    if (!isFinite(HExact) || HExact <= 0) {
+      const v = getComputedStyle(document.documentElement).getPropertyValue('--subrow-h').trim();
+      const h = parseFloat(v) || 26;
+      HExact = h * subrows.length;
+    }
+
+    // 容器平滑“向下”移动：按绝对量 HExact 逐步减少 scrollTop（触顶即止）
+    if (scroller) {
+      startTrackScrollPinCollapseAbsolute(scroller, HExact, duration);
+    }
+
+    // 动画结束后再移除子行（scrollTop 已同步完成，不会瞬跳）
+    const cleanup = () => {
+      subrows.forEach(sr => sr.remove());
+      if (typeof onDone==='function') onDone();
+    };
+    setTimeout(cleanup, duration + ANIM.cleanupMs);
+  } catch(_) {
+    if (typeof onDone==='function') onDone();
+  }
+}
 
 })(window);
 
