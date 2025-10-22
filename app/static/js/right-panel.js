@@ -33,6 +33,7 @@
     initMainPanelsAdaptiveStack();
     initRightSubsegDragSwitch();
     updateRightSubseg('top-queries');
+    initRightSegButtonClicks();    
   }
   // 行级动画锁
   function isRowAnimating(tr){ return !!(tr && tr.dataset && tr.dataset._relay_anim === '1'); }
@@ -56,6 +57,7 @@
     if (segSearchEl)  segSearchEl.style.display  = (activeTab === 'search-results') ? 'inline-flex' : 'none';
   }
 
+  // REPLACE: initRightPanelSnapTabs 内 onActiveChange 的近期更新调用，使用本地函数
   function initRightPanelSnapTabs(){
     const card = document.querySelector('.fc-right-card');
     if (!card) return;
@@ -74,8 +76,8 @@
         defaultTab: 'top-queries',
         onActiveChange: (tab) => {
           updateRightSubseg(tab);
-          if (tab === 'recent-updates' && typeof global.loadRecentUpdatesIfNeeded === 'function') {
-            global.loadRecentUpdatesIfNeeded();
+          if (tab === 'recent-updates') {
+            loadRecentUpdatesIfNeeded();
           }
         },
         clickScrollBehavior: 'smooth'
@@ -736,18 +738,18 @@ function collapseRow(btn){
 
   btn.setAttribute('aria-expanded','false');
   btn.removeAttribute('title'); btn.classList.remove('is-open');
-}
+  }
 
   document.addEventListener('click', (e)=>{
-    const toggle = safeClosest(e.target, '.fc-expand-toggle');
-    if (!toggle) return;
-    const tr = safeClosest(toggle, 'tr');
-    if (tr && isRowAnimating(tr)) { e.preventDefault(); e.stopPropagation(); return; }
-    e.preventDefault(); e.stopPropagation();
-    if (toggle.getAttribute('aria-expanded') === 'true') collapseRow(toggle);
-    else expandRow(toggle);
-  });
-}
+      const toggle = safeClosest(e.target, '.fc-expand-toggle');
+      if (!toggle) return;
+      const tr = safeClosest(toggle, 'tr');
+      if (tr && isRowAnimating(tr)) { e.preventDefault(); e.stopPropagation(); return; }
+      e.preventDefault(); e.stopPropagation();
+      if (toggle.getAttribute('aria-expanded') === 'true') collapseRow(toggle);
+      else expandRow(toggle);
+    });
+  }
 
   function addClip(el){ if(el){ el.classList.add('fc-col-clip'); el.style.position = el.style.position || 'relative'; } }
   function removeClip(el){ if(el){ el.classList.remove('fc-col-clip'); } }
@@ -793,65 +795,190 @@ function collapseRow(btn){
   }
 
   // 滚动容器与贴边判定（保留基础工具）
-function getScroller(tr){
-  return tr?.closest?.('.fc-rank-scroll') || null;
-}
-
-function clampScrollTop(scroller, v){
-  const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-  scroller.scrollTop = Math.max(0, Math.min(maxScroll, v));
-}
-
-
-// REPLACE: 最后一行“收起”专用的绝对量平滑滚动（保持不变，确保存在）
-function startTrackScrollPinCollapseAbsolute(scroller, totalDelta, duration=ANIM.rowMs){
-  if (!scroller || !isFinite(totalDelta) || totalDelta <= 0) return;
-  const easeInOut = (t)=> t<.5 ? (2*t*t) : (1 - Math.pow(-2*t+2,2)/2);
-  const startTop = scroller.scrollTop;
-  let startTs = 0, raf = 0, stopped = false;
-
-  function frame(ts){
-    if (!startTs) startTs = ts;
-    const k = Math.min(1, (ts - startTs) / Math.max(1, duration));
-    const e = easeInOut(k);
-    const next = startTop - e * totalDelta; // 收起：scrollTop 逐步减少，容器“向下”运动
-    clampScrollTop(scroller, next);
-    if (scroller.scrollTop <= 0) stopped = true;  // 触顶即止
-    if (k < 1 && !stopped) raf = requestAnimationFrame(frame);
+  function getScroller(tr){
+    return tr?.closest?.('.fc-rank-scroll') || null;
   }
-  raf = requestAnimationFrame(frame);
-}
 
-// REPLACE: 最后一行“收起”的平滑方案 —— 去掉遮罩，仅平滑滚动，结束后再移除子行
-function collapseLastRowWithMask(tr, scroller, subrows, duration=ANIM.rowMs, onDone){
-  try {
-    if (!subrows || !subrows.length) { if (typeof onDone==='function') onDone(); return; }
+  function clampScrollTop(scroller, v){
+    const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+    scroller.scrollTop = Math.max(0, Math.min(maxScroll, v));
+  }
 
-    // 计算本次将减少的总高度（不改动子行 DOM）
-    let HExact = 0;
-    for (const sr of subrows) HExact += sr.getBoundingClientRect().height;
-    if (!isFinite(HExact) || HExact <= 0) {
-      const v = getComputedStyle(document.documentElement).getPropertyValue('--subrow-h').trim();
-      const h = parseFloat(v) || 26;
-      HExact = h * subrows.length;
+
+  // REPLACE: 最后一行“收起”专用的绝对量平滑滚动（保持不变，确保存在）
+  function startTrackScrollPinCollapseAbsolute(scroller, totalDelta, duration=ANIM.rowMs){
+    if (!scroller || !isFinite(totalDelta) || totalDelta <= 0) return;
+    const easeInOut = (t)=> t<.5 ? (2*t*t) : (1 - Math.pow(-2*t+2,2)/2);
+    const startTop = scroller.scrollTop;
+    let startTs = 0, raf = 0, stopped = false;
+
+    function frame(ts){
+      if (!startTs) startTs = ts;
+      const k = Math.min(1, (ts - startTs) / Math.max(1, duration));
+      const e = easeInOut(k);
+      const next = startTop - e * totalDelta; // 收起：scrollTop 逐步减少，容器“向下”运动
+      clampScrollTop(scroller, next);
+      if (scroller.scrollTop <= 0) stopped = true;  // 触顶即止
+      if (k < 1 && !stopped) raf = requestAnimationFrame(frame);
     }
+    raf = requestAnimationFrame(frame);
+  }
 
-    // 容器平滑“向下”移动：按绝对量 HExact 逐步减少 scrollTop（触顶即止）
-    if (scroller) {
-      startTrackScrollPinCollapseAbsolute(scroller, HExact, duration);
-    }
+  // REPLACE: 最后一行“收起”的平滑方案 —— 去掉遮罩，仅平滑滚动，结束后再移除子行
+  function collapseLastRowWithMask(tr, scroller, subrows, duration=ANIM.rowMs, onDone){
+    try {
+      if (!subrows || !subrows.length) { if (typeof onDone==='function') onDone(); return; }
 
-    // 动画结束后再移除子行（scrollTop 已同步完成，不会瞬跳）
-    const cleanup = () => {
-      subrows.forEach(sr => sr.remove());
+      // 计算本次将减少的总高度（不改动子行 DOM）
+      let HExact = 0;
+      for (const sr of subrows) HExact += sr.getBoundingClientRect().height;
+      if (!isFinite(HExact) || HExact <= 0) {
+        const v = getComputedStyle(document.documentElement).getPropertyValue('--subrow-h').trim();
+        const h = parseFloat(v) || 26;
+        HExact = h * subrows.length;
+      }
+
+      // 容器平滑“向下”移动：按绝对量 HExact 逐步减少 scrollTop（触顶即止）
+      if (scroller) {
+        startTrackScrollPinCollapseAbsolute(scroller, HExact, duration);
+      }
+
+      // 动画结束后再移除子行（scrollTop 已同步完成，不会瞬跳）
+      const cleanup = () => {
+        subrows.forEach(sr => sr.remove());
+        if (typeof onDone==='function') onDone();
+      };
+      setTimeout(cleanup, duration + ANIM.cleanupMs);
+    } catch(_) {
       if (typeof onDone==='function') onDone();
-    };
-    setTimeout(cleanup, duration + ANIM.cleanupMs);
-  } catch(_) {
-    if (typeof onDone==='function') onDone();
+    }
   }
-}
 
+  // ADD: 近期更新（右侧面板内聚）
+  let updatesTabLoaded = false;
+  let updatesTabLastLoad = 0;
+  const UPDATES_TTL = 600000; // 10 分钟
+  let _updatesPending = false, _updatesDebounce = null;
+
+  function needReloadUpdates() {
+    if (!updatesTabLoaded) return true;
+    return (Date.now() - updatesTabLastLoad) > UPDATES_TTL;
+  }
+  function applyRecentUpdatesTable(resp) {
+    const tbody = document.getElementById('recentUpdatesTbody');
+    if (!tbody) return;
+
+    const list = (resp && resp.items) ||
+                 (resp && resp.data && Array.isArray(resp.data.items) ? resp.data.items : []);
+
+    if (!Array.isArray(list)) {
+      tbody.innerHTML = '<tr><td colspan="7" class="text-center text-red-500 py-6">数据格式异常</td></tr>';
+      return;
+    }
+    if (list.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="7" class="text-center text-gray-500 py-6">暂无近期更新数据</td></tr>';
+      return;
+    }
+
+    let html = '';
+    list.forEach(r => {
+      const brand = r.brand_name_zh || '';
+      const model = r.model_name || '';
+      const maxSpeed = (r.max_speed != null) ? ` (${r.max_speed} RPM)` : '';
+      const sizeText = `${escapeHtml(r.size)}x${escapeHtml(r.thickness)}`;
+      const scen = escapeHtml(r.condition_name_zh || '');
+      const updateText = escapeHtml(r.update_date);
+      const descRaw = (r.description != null && String(r.description).trim() !== '') ? String(r.description) : '-';
+      const desc = escapeHtml(descRaw);
+
+      html += `
+        <tr class="hover:bg-gray-50">
+          <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(brand)}</span></td>
+          <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(model)}${maxSpeed}</span></td>
+          <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${sizeText}</span></td>
+          <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${scen}</span></td>
+          <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${updateText}</span></td>
+          <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${desc}</span></td>
+          <td>
+            ${buildQuickBtnHTML('ranking', brand, model, r.model_id, r.condition_id, r.condition_name_zh, 'update_notice')}
+          </td>
+        </tr>`;
+    });
+
+    tbody.innerHTML = html;
+    updatesTabLoaded = true;
+    updatesTabLastLoad = Date.now();
+    if (typeof syncQuickActionButtons === 'function') syncQuickActionButtons();
+  }
+  function reloadRecentUpdates(debounce = true) {
+    if (debounce) {
+      if (_updatesDebounce) clearTimeout(_updatesDebounce);
+      return new Promise(resolve => {
+        _updatesDebounce = setTimeout(() => resolve(reloadRecentUpdates(false)), 220);
+      });
+    }
+    if (_updatesPending) return Promise.resolve();
+    _updatesPending = true;
+
+    const cacheNS = 'recent_updates';
+    const payload = {};
+    const cached = window.__APP?.cache?.get(cacheNS, payload);
+    if (cached && !needReloadUpdates()) {
+      applyRecentUpdatesTable(cached.data);
+      _updatesPending = false;
+      return Promise.resolve();
+    }
+
+    const tbody = document.getElementById('recentUpdatesTbody');
+    if (tbody && !updatesTabLoaded) {
+      tbody.innerHTML = '<tr><td colspan="7" class="text-center text-gray-500 py-6">加载中...</td></tr>';
+    }
+
+    return fetch('/api/recent_updates')
+      .then(r => r.json())
+      .then(j => {
+        const n = normalizeApiResponse(j);
+        if (!n.ok) {
+          if (typeof showError === 'function') showError(n.error_message || '获取近期更新失败');
+          return;
+        }
+        const data = n.data; // { items:[...] }
+        window.__APP?.cache?.set(cacheNS, payload, { data }, UPDATES_TTL);
+        applyRecentUpdatesTable(data);
+      })
+      .catch(err => { if (typeof showError === 'function') showError('获取近期更新异常: ' + err.message); })
+      .finally(() => { _updatesPending = false; });
+  }
+  function loadRecentUpdatesIfNeeded() {
+    if (!needReloadUpdates()) return;
+    if (typeof showLoading === 'function') showLoading('updates-refresh', '加载近期更新...');
+    reloadRecentUpdates(false).finally(() => { if (typeof hideLoading === 'function') hideLoading('updates-refresh'); });
+  }
+
+  // ADD: 右侧分段按钮点击（局部委托到 #rightSubsegContainer，避免全局监听）
+  function initRightSegButtonClicks(){
+    const root = document.getElementById('rightSubsegContainer');
+    if (!root) return;
+    root.addEventListener('click', (e) => {
+      const btn = safeClosest(e.target, '.fc-seg__btn');
+      if (!btn || !root.contains(btn)) return;
+      const seg = btn.closest('.fc-seg'); if (!seg) return;
+      const targetId = btn.dataset.target;
+      seg.querySelectorAll('.fc-seg__btn').forEach(b=>b.classList.toggle('is-active', b===btn));
+      seg.setAttribute('data-active', targetId);
+      const paneId = seg.dataset.paneId;
+      const pane = paneId ? document.getElementById(paneId):null;
+      if (pane) pane.querySelectorAll('.fc-rank-panel').forEach(p=>p.classList.toggle('active', p.id===targetId));
+    });
+  }
+
+  // 对外暴露（供其它模块按需调用）
+  global.RightPanel.recentUpdates = {
+    loadIfNeeded: loadRecentUpdatesIfNeeded,
+    reload: () => reloadRecentUpdates(false)
+  };
+  global.RightPanel.updateSubseg = updateRightSubseg;
+  
 })(window);
 
 if (document.readyState !== 'loading') { window.RightPanel?.init(); }

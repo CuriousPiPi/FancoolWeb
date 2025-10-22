@@ -814,9 +814,12 @@ function activateTab(group, tabName, animate = false) {
     localStorage.setItem('activeTab_' + group, tabName);
   }
   if (group === 'right-panel') {
-    updateRightSubseg(tabName);
+    // 原：updateRightSubseg(tabName)
+    // 现：通过 RightPanel 暴露的 API 调用，避免直接依赖内部函数
+    window.RightPanel?.updateSubseg?.(tabName);
     if (tabName === 'recent-updates') {
-      loadRecentUpdatesIfNeeded();
+      // 通过 right-panel 内聚 API 触发懒加载
+      window.RightPanel?.recentUpdates?.loadIfNeeded?.();
     }
   }
 }
@@ -1235,120 +1238,6 @@ async function apiPost(url, payload){
 }
 
 /* =========================================================
-   点赞排行
-   ========================================================= */
-let likesTabLastLoad = 0;
-const LIKES_TTL = 120000;
-
-let updatesTabLoaded = false;
-let updatesTabLastLoad = 0;
-const UPDATES_TTL = 600000; // 10 分钟
-let _updatesPending = false, _updatesDebounce = null;
-
-let _rtPending = false, _rtDebounce = null;
-
-// 3) 近期更新：加载函数（仿照 reloadTopRatings）
-function reloadRecentUpdates(debounce = true) {
-  if (debounce) {
-    if (_updatesDebounce) clearTimeout(_updatesDebounce);
-    return new Promise(resolve => {
-      _updatesDebounce = setTimeout(() => resolve(reloadRecentUpdates(false)), 220);
-    });
-  }
-  if (_updatesPending) return Promise.resolve();
-  _updatesPending = true;
-
-  const cacheNS = 'recent_updates';
-  const payload = {};
-  const cached = window.__APP.cache.get(cacheNS, payload);
-  if (cached && !needReloadUpdates()) {
-    applyRecentUpdatesTable(cached.data);
-    _updatesPending = false;
-    return Promise.resolve();
-  }
-
-  const tbody = document.getElementById('recentUpdatesTbody');
-  if (tbody && !updatesTabLoaded) {
-    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-gray-500 py-6">加载中...</td></tr>';
-  }
-
-  return fetch('/api/recent_updates')
-    .then(r => r.json())
-    .then(j => {
-      const n = normalizeApiResponse(j);
-      if (!n.ok) {
-        showError(n.error_message || '获取近期更新失败');
-        return;
-      }
-      const data = n.data; // { items:[...] }
-      window.__APP.cache.set(cacheNS, payload, { data }, UPDATES_TTL);
-      applyRecentUpdatesTable(data);
-    })
-    .catch(err => showError('获取近期更新异常: ' + err.message))
-    .finally(() => { _updatesPending = false; });
-}
-
-function needReloadUpdates() {
-  if (!updatesTabLoaded) return true;
-  return (Date.now() - updatesTabLastLoad) > UPDATES_TTL;
-}
-
-// CHANGED: 近期更新渲染，使用新签名
-function applyRecentUpdatesTable(resp) {
-  const tbody = document.getElementById('recentUpdatesTbody');
-  if (!tbody) return;
-
-  const list = (resp && resp.items) ||
-               (resp && resp.data && Array.isArray(resp.data.items) ? resp.data.items : []);
-
-  if (!Array.isArray(list)) {
-    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-red-500 py-6">数据格式异常</td></tr>';
-    return;
-  }
-  if (list.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-gray-500 py-6">暂无近期更新数据</td></tr>';
-    return;
-  }
-
-  let html = '';
-  list.forEach(r => {
-    const brand = r.brand_name_zh || '';
-    const model = r.model_name || '';
-    const maxSpeed = (r.max_speed != null) ? ` (${r.max_speed} RPM)` : '';
-    const sizeText = `${escapeHtml(r.size)}x${escapeHtml(r.thickness)}`;
-    const scen = escapeHtml(r.condition_name_zh || '');
-    const updateText = escapeHtml(r.update_date);
-    const descRaw = (r.description != null && String(r.description).trim() !== '') ? String(r.description) : '-';
-    const desc = escapeHtml(descRaw);
-
-    html += `
-      <tr class="hover:bg-gray-50">
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(brand)}</span></td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(model)}${maxSpeed}</span></td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${sizeText}</span></td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${scen}</span></td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${updateText}</span></td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${desc}</span></td>
-        <td>
-          ${buildQuickBtnHTML('ranking', brand, model, r.model_id, r.condition_id, r.condition_name_zh, 'update_notice')}
-        </td>
-      </tr>`;
-  });
-
-  tbody.innerHTML = html;
-  updatesTabLoaded = true;
-  updatesTabLastLoad = Date.now();
-  syncQuickActionButtons();
-}
-
-// 5) 近期更新：触发装载（供 activateTab 调用）
-function loadRecentUpdatesIfNeeded() {
-  if (!needReloadUpdates()) return;
-  showLoading('updates-refresh', '加载近期更新...');
-  reloadRecentUpdates(false).finally(() => hideLoading('updates-refresh'));
-}
-
-/* =========================================================
    搜索（移除跑马灯）
    ========================================================= */
 const searchAirflowTbody = $('#searchAirflowTbody');
@@ -1735,20 +1624,6 @@ document.addEventListener('mouseleave', (e)=>{
   stopRecentLikesMarquee(row);
 }, true);
 
-/* =========================================================
-   Segment 切换
-   ========================================================= */
-document.addEventListener('click',(e)=>{
-  const btn = safeClosest(e.target,'.fc-seg__btn');
-  if (!btn) return;
-  const seg = btn.closest('.fc-seg'); if (!seg) return;
-  const targetId = btn.dataset.target;
-  seg.querySelectorAll('.fc-seg__btn').forEach(b=>b.classList.toggle('is-active', b===btn));
-  seg.setAttribute('data-active', targetId);
-  const paneId = seg.dataset.paneId;
-  const pane = paneId ? document.getElementById(paneId):null;
-  if (pane) pane.querySelectorAll('.fc-rank-panel').forEach(p=>p.classList.toggle('active', p.id===targetId));
-});
 
 /* =========================================================
    scheduleAdjust
