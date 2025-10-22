@@ -338,8 +338,27 @@
 .fc-row-animating {
   position: relative;
   z-index: 3;
-  background: transparent;
-  will-change: transform;
-  -webkit-backdrop-filter: blur(1000px) saturate(100%);
-  backdrop-filter: blur(1000px) saturate(100%);
+
+  /* 顶层：容器半透明层（需用 image 层保证在最上） */
+  /* 中层：网页渐变（视口尺寸 + 运行时坐标对齐“对应那一块”） */
+  background-image:
+    linear-gradient(var(--bg-secondary), var(--bg-secondary)),
+    var(--dark-rand-gradient);
+  background-repeat: no-repeat, no-repeat;
+  background-size: 100% 100%, 100vw 100vh;
+  background-position:
+    0 0,
+    calc(var(--row-vp-left, 0px) * -1) calc(var(--row-vp-top, 0px) * -1);
+
+  /* 关闭毛玻璃以防透色；可保留，也可去掉 isolation（看你实际是否需要） */
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  isolation: isolate;
+}
+
+/* 行内容在遮罩之上正常显示 */
+.fc-row-animating > td,
+.fc-row-animating > th {
+  position: relative;
+  z-index: 1;
 }

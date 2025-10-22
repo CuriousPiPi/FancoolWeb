@@ -174,6 +174,56 @@ function setSubrowAnchorVar(parentTr){
   } catch(_) {}
 }
 
+  /* 只在暗色主题且存在渐变时才需要追踪 */
+  function isDarkTheme() {
+    return document.documentElement.getAttribute('data-theme') === 'dark';
+  }
+  function hasDarkGradient() {
+    try {
+      const g = getComputedStyle(document.documentElement).getPropertyValue('--dark-rand-gradient');
+      return !!g && g.trim() !== '' && g.trim() !== 'none';
+    } catch(_) { return false; }
+  }
+  function shouldTrackMask() {
+    return isDarkTheme() && hasDarkGradient();
+  }
+
+  let __maskRaf = null;
+  let __maskRows = null;
+
+  function __maskStep() {
+    if (!__maskRows) return;
+    for (const el of __maskRows) {
+      if (!el || !el.isConnected) continue;
+      const r = el.getBoundingClientRect();
+      el.style.setProperty('--row-vp-left', Math.round(r.left) + 'px');
+      el.style.setProperty('--row-vp-top',  Math.round(r.top)  + 'px');
+    }
+    __maskRaf = requestAnimationFrame(__maskStep);
+  }
+  function startRowMaskTracking(rows) {
+    // 浅色主题或无渐变时，直接跳过追踪
+    if (!shouldTrackMask()) {
+      stopRowMaskTracking();
+      return;
+    }
+    cancelAnimationFrame(__maskRaf);
+    __maskRows = Array.from(rows || []);
+    __maskStep(); // 立即跑一帧，避免首帧错位
+  }
+  function stopRowMaskTracking() {
+    cancelAnimationFrame(__maskRaf);
+    __maskRaf = null;
+    if (__maskRows) {
+      for (const el of __maskRows) {
+        if (!el) continue;
+        el.style.removeProperty('--row-vp-left');
+        el.style.removeProperty('--row-vp-top');
+      }
+    }
+    __maskRows = null;
+  }
+
   function animateHideEl(el, dx=0, dy=6, duration=200) {
     if (!el || el.dataset._anim_state === 'hiding') return;
     el.dataset._anim_state = 'hiding';
@@ -272,114 +322,140 @@ function setSubrowAnchorVar(parentTr){
     function measureTops(els){ const m=new Map(); els.forEach(el=>{ m.set(el, el.getBoundingClientRect().top); }); return m; }
     function markAnimating(els,on){ els.forEach(el=>{ if(on) el.classList.add('fc-row-animating'); else el.classList.remove('fc-row-animating'); }); }
 
-    function expandRow(btn){
-      const tr = safeClosest(btn, 'tr'); if (!tr) return;
-      const conds = parseConds(tr); if (!conds.length) return;
-      if (btn.getAttribute('aria-expanded') === 'true') { collapseRow(btn); return; }
+  /* —— 仅替换：expandRow（展开）内与遮罩相关的部分 —— */
+  function expandRow(btn){
+    const tr = safeClosest(btn, 'tr'); if (!tr) return;
+    const conds = parseConds(tr); if (!conds.length) return;
+    if (btn.getAttribute('aria-expanded') === 'true') { collapseRow(btn); return; }
 
-      // 展开前计算并设置锚点与第7列 padding-left
-      setSubrowAnchorVar(tr);
+    // 展开前计算并设置锚点与第7列 padding-left
+    setSubrowAnchorVar(tr);
 
-      const followers = collectFollowers(tr);
-      const prevMap = measureTops(followers);
+    const followers = collectFollowers(tr);
+    const prevMap = measureTops(followers);
 
-      const sorted = conds.slice().sort((a,b)=>(b.query_count||0)-(a.query_count||0));
-      tr.insertAdjacentHTML('afterend', sorted.map(c=>buildSubrowHTML(tr, c)).join(''));
+    const sorted = conds.slice().sort((a,b)=>(b.query_count||0)-(a.query_count||0));
+    tr.insertAdjacentHTML('afterend', sorted.map(c=>buildSubrowHTML(tr, c)).join(''));
 
-      const currMap = measureTops(followers);
+    const currMap = measureTops(followers);
 
-      toggleParentHotCondAndAction(tr, true);
+    // 隐藏父行“热门工况”和“添加按钮”（带动画）
+    toggleParentHotCondAndAction(tr, true);
 
-      markAnimating(followers, true);
+    markAnimating(followers, true);
+
+    // 开始遮罩追踪（仅暗色主题且有渐变时有效）
+    startRowMaskTracking(followers);
+
+    followers.forEach(el => {
+      const prevTop = prevMap.get(el), currTop = currMap.get(el);
+      if (prevTop == null || currTop == null) return;
+      const dy = prevTop - currTop; if (Math.abs(dy) < 0.5) return;
+      el.style.transition = 'none'; el.style.transform = `translateY(${dy}px)`;
+    });
+    void document.body.offsetWidth;
+
+    const DURATION = 240, EASE_EXPAND = 'ease';
+    let rest = followers.length;
+    requestAnimationFrame(() => {
       followers.forEach(el => {
-        const prevTop = prevMap.get(el), currTop = currMap.get(el);
-        if (prevTop == null || currTop == null) return;
-        const dy = prevTop - currTop; if (Math.abs(dy) < 0.5) return;
-        el.style.transition = 'none'; el.style.transform = `translateY(${dy}px)`;
+        if (!prevMap.has(el)) return;
+        el.style.transition = `transform ${DURATION}ms ${EASE_EXPAND}`;
+        el.style.transform = 'translateY(0)';
       });
-      void document.body.offsetWidth;
-      requestAnimationFrame(() => {
-        followers.forEach(el => {
-          if (!prevMap.has(el)) return;
-          el.style.transition = `transform ${DURATION}ms ${EASE_EXPAND}`;
-          el.style.transform = 'translateY(0)';
-        });
-        const onEnd = (e) => {
-          if (e.propertyName !== 'transform') return;
-          const el = e.currentTarget;
-          el.removeEventListener('transitionend', onEnd);
-          el.style.transition = '';
-          el.style.transform = '';
-          el.classList.remove('fc-row-animating');
-        };
-        followers.forEach(el => el.addEventListener('transitionend', onEnd));
-      });
+      const onEnd = (e) => {
+        if (e.propertyName !== 'transform') return;
+        const el = e.currentTarget;
+        el.removeEventListener('transitionend', onEnd);
+        el.style.transition = '';
+        el.style.transform = '';
+        el.classList.remove('fc-row-animating');
+        if (--rest === 0) {
+          // 所有行结束后再停止追踪，保证整段动画期间颜色完全对上
+          stopRowMaskTracking();
+        }
+      };
+      followers.forEach(el => el.addEventListener('transitionend', onEnd));
+      // 超时兜底，避免遗漏 transitionend
+      setTimeout(() => { if (rest > 0) { rest = 0; stopRowMaskTracking(); } }, DURATION + 200);
+    });
 
-      btn.setAttribute('aria-expanded','true');
-      btn.title = '收起';
-      btn.classList.add('is-open');
+    // 之前这里有 stopRowMaskTracking()，已移除
 
-      if (typeof syncQuickActionButtons === 'function') syncQuickActionButtons();
+    btn.setAttribute('aria-expanded','true');
+    btn.title = '收起';
+    btn.classList.add('is-open');
+
+    if (typeof syncQuickActionButtons === 'function') syncQuickActionButtons();
+  }
+
+  /* —— 仅替换：collapseRow（收起）内与遮罩相关的部分 —— */
+  function collapseRow(btn){
+    const tr = safeClosest(btn, 'tr'); if (!tr) return;
+    const mid = tr.dataset.modelId || '';
+  
+    const subrows=[]; let n=tr.nextElementSibling; while(isSubrowOf(n, mid)){ subrows.push(n); n=n.nextElementSibling; }
+    if (!subrows.length) {
+      toggleParentHotCondAndAction(tr, false);
+      btn.setAttribute('aria-expanded','false'); btn.title='展开全部工况'; btn.classList.remove('is-open'); return;
     }
-
-    function collapseRow(btn){
-      const tr = safeClosest(btn, 'tr'); if (!tr) return;
-      const mid = tr.dataset.modelId || '';
-      const subrows=[]; let n=tr.nextElementSibling; while(isSubrowOf(n, mid)){ subrows.push(n); n=n.nextElementSibling; }
-      if (!subrows.length) {
-        toggleParentHotCondAndAction(tr, false);
-        btn.setAttribute('aria-expanded','false'); btn.title='展开全部工况'; btn.classList.remove('is-open'); return;
-      }
-
-      let HExact = 0; for (const sr of subrows) HExact += sr.getBoundingClientRect().height;
-      if (HExact <= 0) {
-        const v = getComputedStyle(document.documentElement).getPropertyValue('--subrow-h').trim();
-        const h = parseFloat(v) || 34; HExact = h * subrows.length;
-      }
-
-      const lastSub = subrows[subrows.length - 1];
-      const followers = collectFollowersAfter(lastSub);
-      if (!followers.length) {
+  
+    let HExact = 0; for (const sr of subrows) HExact += sr.getBoundingClientRect().height;
+    if (HExact <= 0) {
+      const v = getComputedStyle(document.documentElement).getPropertyValue('--subrow-h').trim();
+      const h = parseFloat(v) || 34; HExact = h * subrows.length;
+    }
+  
+    const lastSub = subrows[subrows.length - 1];
+    const followers = collectFollowersAfter(lastSub);
+    if (!followers.length) {
+      subrows.forEach(sr => sr.remove());
+      toggleParentHotCondAndAction(tr, false);
+      btn.setAttribute('aria-expanded','false'); btn.title='展开全部工况'; btn.classList.remove('is-open'); return;
+    }
+  
+    followers.forEach(el => { el.classList.add('fc-row-animating'); el.style.transition='none'; el.style.transform='translate3d(0,0,0)'; el.style.willChange='transform'; });
+    void document.body.offsetWidth;
+  
+    // 开始遮罩追踪（仅暗色主题且有渐变时有效）
+    startRowMaskTracking(followers);
+  
+    const DURATION = 240, EASE_COLLAPSE = 'ease';
+    requestAnimationFrame(() => {
+      followers.forEach(el => {
+        el.style.transition = `transform ${DURATION}ms ${EASE_COLLAPSE}`;
+        el.style.transform = `translate3d(0, ${-HExact}px, 0)`;
+      });
+    
+      let rest = followers.length, fired = false;
+      const done = () => {
+        if (fired) return; fired = true;
         subrows.forEach(sr => sr.remove());
-        toggleParentHotCondAndAction(tr, false);
-        btn.setAttribute('aria-expanded','false'); btn.title='展开全部工况'; btn.classList.remove('is-open'); return;
-      }
-
-      followers.forEach(el => { el.classList.add('fc-row-animating'); el.style.transition='none'; el.style.transform='translate3d(0,0,0)'; el.style.willChange='transform'; });
-      void document.body.offsetWidth;
-
-      requestAnimationFrame(() => {
-        followers.forEach(el => {
-          el.style.transition = `transform ${DURATION}ms ${EASE_COLLAPSE}`;
-          el.style.transform = `translate3d(0, ${-HExact}px, 0)`;
-        });
-
-        let rest = followers.length, fired = false;
-        const done = () => {
-          if (fired) return; fired = true;
-          subrows.forEach(sr => sr.remove());
-          void document.body.offsetWidth;
-          requestAnimationFrame(() => {
-            followers.forEach(el => {
-              el.style.transition = 'none'; el.style.transform = ''; el.style.willChange = '';
-              el.classList.remove('fc-row-animating');
-              requestAnimationFrame(() => { el.style.transition = ''; });
-            });
-            toggleParentHotCondAndAction(tr, false);
+        void document.body.offsetWidth;
+        requestAnimationFrame(() => {
+          followers.forEach(el => {
+            el.style.transition = 'none'; el.style.transform = ''; el.style.willChange = '';
+            el.classList.remove('fc-row-animating');
+            requestAnimationFrame(() => { el.style.transition = ''; });
           });
-        };
-        const onEnd = (e) => { if (e.propertyName !== 'transform') return;
-          e.currentTarget.removeEventListener('transitionend', onEnd);
-          if (--rest === 0) done();
-        };
-        followers.forEach(el => el.addEventListener('transitionend', onEnd));
-        setTimeout(done, DURATION + 200);
-      });
-
-      btn.setAttribute('aria-expanded','false');
-      btn.title='展开全部工况';
-      btn.classList.remove('is-open');
-    }
+          toggleParentHotCondAndAction(tr, false);
+          // 在完全完成后统一停止追踪
+          stopRowMaskTracking();
+        });
+      };
+      const onEnd = (e) => {
+        if (e.propertyName !== 'transform') return;
+        e.currentTarget.removeEventListener('transitionend', onEnd);
+        if (--rest === 0) done();
+      };
+      followers.forEach(el => el.addEventListener('transitionend', onEnd));
+      setTimeout(done, DURATION + 200);
+    });
+  
+    btn.setAttribute('aria-expanded','false');
+    btn.title='展开全部工况';
+    btn.classList.remove('is-open');
+  }
 
     document.addEventListener('click', (e)=>{
       const toggle = safeClosest(e.target, '.fc-expand-toggle');
