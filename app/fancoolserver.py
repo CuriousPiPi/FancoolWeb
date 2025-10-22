@@ -106,10 +106,10 @@ engine = create_engine(
 )
 
 SIZE_OPTIONS = ["不限", "120"] #, "140"]
-TOP_QUERIES_LIMIT = 50
-RECENT_LIKES_LIMIT = 50
+TOP_QUERIES_LIMIT = 100
+RECENT_LIKES_LIMIT = 100
 CLICK_COOLDOWN_SECONDS = 0.5
-RECENT_UPDATES_LIMIT = 50
+RECENT_UPDATES_LIMIT = 100
 
 query_count_cache = 0
 
@@ -371,90 +371,109 @@ def compute_like_fingerprint(user_id: str) -> dict:
 # =========================================
 # Query Helpers
 # =========================================
-def get_top_queries(limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
+def get_top_rankings(metric: str, limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
     """
-    返回结构：
-    [
-      {
-        model_id, brand_name_zh, model_name, size, thickness, max_speed,
-        reference_price,
-        total_query_count: int,
-        top_condition: { condition_id, condition_name_zh, query_count,
-                         resistance_type_zh, resistance_location_zh },
-        conditions: [ { condition_id, condition_name_zh, query_count,
-                        resistance_type_zh, resistance_location_zh }, ... ]  -- 按 query_count DESC
-      },
-      ...
-    ]
-    说明：
-    - 以 model_id 分组汇总最近 30 天（或视图定义范围）的查询次数
-    - 保障 max_speed 取该型号下最大转速
-    - reference_price 取该型号下的最大（或你认为合适的）参考价，保证字段存在
+    统一榜单数据获取：
+      metric: 'like' 或 'query'
+    统一输出字段（无旧别名）：
+      - 型号层：model_id, brand_name_zh, model_name, size, thickness, max_speed, reference_price
+      - model_rank: int
+      - total_count: int
+      - conditions: [ { condition_id, condition_name_zh, cond_rank, count,
+                        resistance_type_zh, resistance_location_zh }, ... ]
+      - top_condition: 同上，取 cond_rank 最小（再以 count 降序兜底）
+    排序：
+      - 型号：model_rank ASC，然后 total_count DESC 兜底
+      - 子行：cond_rank ASC，然后 count DESC 兜底
     """
-    sql = """
+    metric = (metric or '').strip().lower()
+    if metric not in ('like', 'query'):
+        raise ValueError("metric must be 'like' or 'query'")
+
+    pref = 'like' if metric == 'like' else 'query'
+    view = f"{pref}_rank_d30_view"
+    model_total_col = f"{pref}_by_model_d30"
+    model_rank_col  = f"{pref}_rank_by_m_d30"
+    cond_count_col  = f"{pref}_by_model_condition_d30"
+    cond_rank_col   = f"{pref}_rank_by_m_c_d30"
+
+    sql = f"""
       SELECT
         model_id, condition_id,
-        brand_name_zh, model_name,
-        condition_name_zh,
+        brand_name_zh, model_name, condition_name_zh,
         resistance_type_zh, resistance_location_zh,
-        query_count,
-        size, thickness, max_speed,
-        reference_price
-      FROM query_count_d30_view
-      WHERE query_rank_d30 <= 10
+        size, thickness, max_speed, reference_price,
+        {model_total_col} AS total_count,
+        {model_rank_col}  AS model_rank,
+        {cond_count_col}  AS cond_count,
+        {cond_rank_col}   AS cond_rank
+      FROM {view}
+      WHERE {pref}_rank_by_m_d30 <= 10
       ORDER BY model_id, condition_id
     """
     rows = fetch_all(sql, {})
 
     groups: dict[int, dict] = {}
     for r in rows:
-        mid = int(r['model_id'])
+        try:
+            mid = int(r['model_id'])
+            cid = int(r['condition_id'])
+        except Exception:
+            continue
+
         g = groups.setdefault(mid, {
             'model_id': mid,
             'brand_name_zh': r['brand_name_zh'],
             'model_name': r['model_name'],
             'size': r['size'],
             'thickness': r['thickness'],
-            'max_speed': None,
-            'reference_price': None,
-            'total_query_count': 0,
+            'max_speed': r.get('max_speed'),
+            'reference_price': r.get('reference_price'),
+            'total_count': 0,
+            'model_rank': None,
             'conditions': []
         })
 
-        # 累计总查询次数
-        qc = int(r['query_count'] or 0)
-        g['total_query_count'] += qc
-
-        # 保障 max_speed 为最大值
+        # 型号层（视图每行重复，同型号取最大总数/最小排名）
         try:
-            ms = r.get('max_speed')
-            if ms is not None:
-                g['max_speed'] = max(int(g['max_speed'] or 0), int(ms))
+            tc = int(r.get('total_count') or 0)
+            g['total_count'] = max(int(g['total_count'] or 0), tc)
+        except Exception:
+            pass
+        try:
+            rk = int(r.get('model_rank') or 999999)
+            prev = g['model_rank']
+            g['model_rank'] = min(int(prev if prev is not None else rk), rk)
         except Exception:
             pass
 
-        # 参考价聚合：取最大，保证存在稳定值
+        # 子行
         try:
-            rp = r.get('reference_price')
-            if rp is not None:
-                g['reference_price'] = max(int(g['reference_price'] or 0), int(rp))
+            cc = int(r.get('cond_count') or 0)
         except Exception:
-            pass
+            cc = 0
+        try:
+            cr = int(r.get('cond_rank') or 999999)
+        except Exception:
+            cr = 999999
 
-        # 条件列表（含风阻字段）
         g['conditions'].append({
-            'condition_id': int(r['condition_id']),
+            'condition_id': cid,
             'condition_name_zh': r['condition_name_zh'],
-            'query_count': qc,
+            'count': cc,
+            'cond_rank': cr,
             'resistance_type_zh': r.get('resistance_type_zh'),
             'resistance_location_zh': r.get('resistance_location_zh')
         })
 
-    # 按型号汇总，给出 top_condition
     items: List[dict] = []
     for g in groups.values():
-        conds = sorted(g['conditions'], key=lambda c: c['query_count'], reverse=True)
-        top_c = conds[0] if conds else None
+        conds_sorted = sorted(
+            g['conditions'],
+            key=lambda c: (int(c.get('cond_rank') or 999999), -int(c.get('count') or 0))
+        )
+        top_c = conds_sorted[0] if conds_sorted else None
+
         items.append({
             'model_id': g['model_id'],
             'brand_name_zh': g['brand_name_zh'],
@@ -463,24 +482,22 @@ def get_top_queries(limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
             'thickness': g['thickness'],
             'max_speed': g['max_speed'],
             'reference_price': g['reference_price'],
-            'total_query_count': g['total_query_count'],
+            'total_count': g['total_count'],
+            'model_rank': g['model_rank'] or 999999,
             'top_condition': top_c,
-            'conditions': conds
+            'conditions': conds_sorted
         })
 
-    items.sort(key=lambda x: x['total_query_count'], reverse=True)
+    items.sort(key=lambda x: (int(x['model_rank'] or 999999), -int(x['total_count'] or 0)))
     return items[:limit]
 
+
+def get_top_queries(limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
+    return get_top_rankings('query', limit)
+
 def get_top_ratings(limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
-    sql = """SELECT model_id, condition_id,
-                    brand_name_zh, model_name,
-                    condition_name_zh,
-                    like_count, size, thickness, max_speed,
-                    reference_price
-             FROM total_like_d30_view
-             ORDER BY like_count DESC
-             LIMIT :l"""
-    return fetch_all(sql, {'l': limit})
+    return get_top_rankings('like', limit)
+
 
 def _effective_value_for_series(series_rows: list, model_id: int, condition_id: int,
                                 axis: str, limit_value: float | None):
@@ -1331,7 +1348,7 @@ def api_conditions_by_model():
 @app.route('/api/top_ratings', methods=['GET'])
 def api_top_ratings():
     try:
-        data = get_top_ratings(limit=10)
+        data = get_top_ratings(limit=TOP_QUERIES_LIMIT)
         return resp_ok({'items': data})
     except Exception as e:
         app.logger.exception(e)

@@ -324,14 +324,14 @@
                               data-model="{{ q.model_name }}"
                               data-conditions='{{ q.conditions|tojson }}'>
                             <td class="fc-rank-cell">
-                              {% if loop.index == 1 %}
+                              {% if q.model_rank == 1 %}
                                 <i class="fa-solid fa-medal gold text-2xl"></i>
-                              {% elif loop.index == 2 %}
+                              {% elif q.model_rank == 2 %}
                                 <i class="fa-solid fa-medal silver text-2xl"></i>
-                              {% elif loop.index == 3 %}
+                              {% elif q.model_rank == 3 %}
                                 <i class="fa-solid fa-medal bronze text-2xl"></i>
                               {% else %}
-                                <span class="font-medium">{{ loop.index }}</span>
+                                <span class="font-medium">{{ q.model_rank }}</span>
                               {% endif %}
                             </td>
                             <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">{{ q.brand_name_zh }}</span></td>
@@ -352,7 +352,7 @@
                                 {{ q.top_condition.condition_name_zh if q.top_condition else '-' }}
                               </span>
                             </td>
-                            <td class="text-blue-600 font-medium">{{ q.total_query_count }}</td>
+                            <td class="text-blue-600 font-medium">{{ q.total_count }}</td>
                             <td>
                               {% if q.top_condition %}
                               <button class="fc-btn-icon-add js-ranking-add fc-tooltip-target"
@@ -393,9 +393,62 @@
                           <th>好评次数</th>
                           <th class="add-header">添加</th>
                         </tr>
-                        </thead>
+                      </thead>
                         <tbody id="ratingRankTbody">
-                          <tr><td colspan="7" class="text-center text-gray-500 py-6">首次点击“好评榜”加载...</td></tr>
+                          {% for r in top_ratings %}
+                            <tr class="hover:bg-gray-50 fc-like-row"
+                                data-model-id="{{ r.model_id }}"
+                                data-brand="{{ r.brand_name_zh }}"
+                                data-model="{{ r.model_name }}"
+                                data-conditions='{{ r.conditions|tojson }}'>
+                              <td class="fc-rank-cell">
+                                {% if r.model_rank == 1 %}
+                                  <i class="fa-solid fa-medal gold text-2xl"></i>
+                                {% elif r.model_rank == 2 %}
+                                  <i class="fa-solid fa-medal silver text-2xl"></i>
+                                {% elif r.model_rank == 3 %}
+                                  <i class="fa-solid fa-medal bronze text-2xl"></i>
+                                {% else %}
+                                  <span class="font-medium">{{ r.model_rank }}</span>
+                                {% endif %}
+                              </td>
+                              <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">{{ r.brand_name_zh }}</span></td>
+                              <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">{{ r.model_name }} ({{ r.max_speed }} RPM)</span></td>
+                              <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">{{ r.size }}x{{ r.thickness }}</span></td>
+                              <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">{{ r.reference_price if r.reference_price > 0 else '-' }}</span></td>
+                              <td class="nowrap fc-marquee-cell">
+                                <button class="fc-row-expander fc-expand-toggle"
+                                        type="button"
+                                        aria-expanded="false"
+                                        data-tooltip="展开/收起该型号的所有工况">
+                                  <i class="fa-solid fa-chevron-right"></i>
+                                </button>
+                                <span class="fc-marquee-inner" data-role="top-cond" style="margin-left:.25rem;">
+                                  {{ r.top_condition.condition_name_zh if r.top_condition else '-' }}
+                                </span>
+                              </td>
+                              <td class="text-blue-600 font-medium">{{ r.total_count }}</td>
+                              <td>
+                                {% if r.top_condition %}
+                                <button class="fc-btn-icon-add js-rating-add fc-tooltip-target"
+                                        data-tooltip="添加到图表"
+                                        data-add-type="rating"
+                                        data-log-source="top_rating"
+                                        data-brand="{{ r.brand_name_zh }}"
+                                        data-model="{{ r.model_name }}"
+                                        data-condition="{{ r.top_condition.condition_name_zh }}"
+                                        data-model-id="{{ r.model_id }}"
+                                        data-condition-id="{{ r.top_condition.condition_id }}">
+                                  <i class="fa-solid fa-plus"></i>
+                                </button>
+                                {% else %}
+                                <button class="fc-btn-icon-add fc-tooltip-target" data-tooltip="无可添加工况" disabled>
+                                  <i class="fa-solid fa-plus"></i>
+                                </button>
+                                {% endif %}
+                              </td>
+                            </tr>
+                          {% endfor %}
                         </tbody>
                       </table>
                     </div>
@@ -523,7 +576,6 @@
   <script src="{{ url_for('static', filename='js/sidebar.js', v=2) }}"></script>
   <script src="{{ url_for('static', filename='js/recently-removed.js', v=1) }}"></script>
   <script src="{{ url_for('static', filename='js/fancool.js', v=10) }}"></script>
-  <!-- bumped v to 2 to refresh updated RightPanel logic -->
   <script src="{{ url_for('static', filename='js/right-panel.js', v=2) }}"></script>
   <script src="{{ url_for('static', filename='js/fancool-search.js', v=1) }}"></script>
   <script src="{{ url_for('static', filename='js/analytics.js') }}"></script>

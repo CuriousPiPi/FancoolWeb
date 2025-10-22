@@ -1237,7 +1237,6 @@ async function apiPost(url, payload){
 /* =========================================================
    点赞排行
    ========================================================= */
-let likesTabLoaded = false;
 let likesTabLastLoad = 0;
 const LIKES_TTL = 120000;
 
@@ -1246,107 +1245,7 @@ let updatesTabLastLoad = 0;
 const UPDATES_TTL = 600000; // 10 分钟
 let _updatesPending = false, _updatesDebounce = null;
 
-function needReloadLikes(){
-  if (!likesTabLoaded) return true;
-  return (Date.now() - likesTabLastLoad) > LIKES_TTL;
-}
 let _rtPending = false, _rtDebounce = null;
-
-/* reloadTopRatings：保持结构但移除旧兼容缓存结构中 root.data/items 多层拆解 */
-function reloadTopRatings(debounce=true){
-  if (debounce){
-    if (_rtDebounce) clearTimeout(_rtDebounce);
-    return new Promise(resolve=>{
-      _rtDebounce = setTimeout(()=>resolve(reloadTopRatings(false)), 220);
-    });
-  }
-  if (_rtPending) return Promise.resolve();
-  _rtPending = true;
-  const cacheNS = 'top_ratings';
-  const payload = {};
-  const cached = window.__APP.cache.get(cacheNS, payload);
-  if (cached && !needReloadLikes()){
-    applyRatingTable(cached.data);  // 缓存中直接存标准结构
-    _rtPending = false;
-    return Promise.resolve();
-  }
-  const tbody = document.getElementById('ratingRankTbody');
-  if (tbody && !likesTabLoaded){
-    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-gray-500 py-6">加载中...</td></tr>';
-  }
-  return fetch('/api/top_ratings')
-    .then(r=>r.json())
-    .then(j=>{
-      const n = normalizeApiResponse(j);
-      if (!n.ok){
-        showError(n.error_message || '获取失败');
-        return;
-      }
-      const data = n.data; // { items:[...] }
-      window.__APP.cache.set(cacheNS, payload, { data }, LIKES_TTL);
-      applyRatingTable(data);
-    })
-    .catch(err=>showError('获取点赞排行异常: '+err.message))
-    .finally(()=>{ _rtPending=false; });
-}
-
-// CHANGED: 顶部“好评榜”渲染，使用 condition_name_zh，并传入新签名
-function applyRatingTable(resp){
-  const tbody = document.getElementById('ratingRankTbody');
-  if (!tbody) return;
-
-  const list = (resp && resp.items) ||
-               (resp && resp.data && resp.data.items) ||
-               (resp && resp.data && Array.isArray(resp.data.items) ? resp.data.items : []);
-
-  if (!Array.isArray(list)) {
-    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-red-500 py-6">数据格式异常</td></tr>';
-    return;
-  }
-  if (list.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-gray-500 py-6">暂无点赞排行数据</td></tr>';
-    return;
-  }
-
-  let html = '';
-  list.forEach((r, idx)=>{
-    const rank = idx + 1;
-    const medal = rank===1?'gold':rank===2?'silver':rank===3?'bronze':'';
-    const rankCell = medal
-      ? `<i class="fa-solid fa-medal ${medal} text-2xl"></i>`
-      : `<span class="font-medium">${rank}</span>`;
-
-    const scen = escapeHtml(r.condition_name_zh || '');
-    const priceText = (r.reference_price > 0) ? escapeHtml(String(r.reference_price)) : '-';
-
-    html += `
-      <tr class="hover:bg-gray-50">
-        <td class="fc-rank-cell">${rankCell}</td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(r.brand_name_zh)}</span></td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(r.model_name)} (${r.max_speed} RPM)</span></td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(r.size)}x${escapeHtml(r.thickness)}</span></td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${priceText}</span></td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${scen}</span></td>
-        <td class="text-blue-600 font-medium">${escapeHtml(r.like_count)}</td>
-        <td>
-          ${buildQuickBtnHTML('rating', r.brand_name_zh, r.model_name, r.model_id, r.condition_id, r.condition_name_zh, 'top_rating')}
-        </td>
-      </tr>`;
-  });
-  tbody.innerHTML = html;
-  likesTabLoaded = true;
-  likesTabLastLoad = Date.now();
-  syncQuickActionButtons();
-}
-
-function loadLikesIfNeeded(){
-  if (!needReloadLikes()) return;
-  showLoading('rating-refresh','加载好评榜...');
-  reloadTopRatings(false).finally(()=>hideLoading('rating-refresh'));
-}
-document.addEventListener('DOMContentLoaded', () => {
-  reloadTopRatings(false).catch(()=>{});
-});
 
 // 3) 近期更新：加载函数（仿照 reloadTopRatings）
 function reloadRecentUpdates(debounce = true) {
@@ -1547,10 +1446,6 @@ const scheduleRecentLikesRefresh = (function(){
   const debounced = createDelayed(()=>{ if (recentLikesLoaded) reloadRecentLikes(); }, RECENT_LIKES_REFRESH_DELAY);
   return function(){ debounced(); };
 })();
-const scheduleTopRatingsRefresh = (function(){
-  const debounced = createDelayed(()=>{ if (likesTabLoaded) reloadTopRatings(false); }, TOP_RATINGS_REFRESH_DELAY);
-  return function(){ debounced(); };
-})();
 
 document.addEventListener('click', async e=>{
   const likeBtn = safeClosest(e.target, '.like-button');
@@ -1591,7 +1486,6 @@ document.addEventListener('click', async e=>{
           fetchAllLikeKeys();
         }
         scheduleRecentLikesRefresh();
-        scheduleTopRatingsRefresh();
         showSuccess(prevLiked ? '已取消点赞' : '已点赞');
       })
       .catch(err=>{
@@ -1854,7 +1748,6 @@ document.addEventListener('click',(e)=>{
   const paneId = seg.dataset.paneId;
   const pane = paneId ? document.getElementById(paneId):null;
   if (pane) pane.querySelectorAll('.fc-rank-panel').forEach(p=>p.classList.toggle('active', p.id===targetId));
-  if (targetId === 'likes-panel') loadLikesIfNeeded();
 });
 
 /* =========================================================
@@ -2085,8 +1978,8 @@ window.__APP.modules = {
     cache: window.__APP.cache
   },
   rankings: {
-    reloadTopRatings: typeof reloadTopRatings === 'function' ? reloadTopRatings : function(){},
-    loadLikesIfNeeded: typeof loadLikesIfNeeded === 'function' ? loadLikesIfNeeded : function(){}
+    reloadTopRatings: () => window.RightPanel?.ratings?.reloadTopRatings?.(false),
+    loadLikesIfNeeded: () => window.RightPanel?.ratings?.loadLikesIfNeeded?.()
   },
   state: {
     processState: typeof processState === 'function' ? processState : function(){}

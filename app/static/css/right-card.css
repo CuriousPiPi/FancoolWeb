@@ -365,3 +365,20 @@
 
 /* 新增：列裁切工具类，供“接力式”位移动画期间使用 */
 .fc-col-clip { overflow: hidden !important; }
+
+
+/* ADD: Collapse 遮罩，背景结构与 .fc-row-animating 保持一致（双层：容器底色 + 深色随机渐变） */
+.fc-collapse-mask {
+  /* 顶层：容器本底色（保证覆盖子行本体） */
+  /* 底层：深色随机渐变（随视口对齐，与行动画保持一致） */
+  background-image:
+    linear-gradient(var(--bg-secondary), var(--bg-secondary)),
+    var(--dark-rand-gradient);
+  background-repeat: no-repeat, no-repeat;
+  background-size: 100% 100%, 100vw 100vh;
+  background-position:
+    0 0,
+    calc(var(--row-vp-left, 0px) * -1) calc(var(--row-vp-top, 0px) * -1);
+
+  pointer-events: none; /* 避免拦截交互 */
+}
