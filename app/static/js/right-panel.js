@@ -281,7 +281,7 @@
 
     // 接力式：仅位移，不渐隐
     if (opts.mode === 'relay') {
-      const dur = opts.duration || 240;
+      const dur = opts.duration || ANIM.rowMs;
       const ease = opts.easing || 'ease';
       // 动画期间给相关列加裁切，避免越界
       addClip(td6); addClip(tdLast);
@@ -296,7 +296,7 @@
         if (actionBtn && typeof opts.fromDyBtn === 'number') slideShowEl(actionBtn, opts.fromDyBtn, dur, ease);
       }
       // 延迟清理裁切（给动画收尾一点余量）
-      setTimeout(()=>{ removeClip(td6); removeClip(tdLast); }, (opts.duration||240) + ANIM.cleanupMs);
+      setTimeout(()=>{ removeClip(td6); removeClip(tdLast); }, (opts.duration||ANIM.rowMs) + ANIM.cleanupMs);
       return;
     }
 
@@ -483,8 +483,8 @@ async function expandRow(btn){
       const cr = cLabel.getBoundingClientRect();
       const pCenter = pr.top + pr.height/2;
       const cCenter = cr.top + cr.height/2;
-      dyLabel = Math.round((cCenter - pCenter) + 0);
-      const fromY = Math.round((pCenter - cCenter) + 0);
+      dyLabel = Math.round((cCenter - pCenter));
+      const fromY = Math.round((pCenter - cCenter));
       cLabel.style.transition = 'none';
       cLabel.style.transform = `translateY(${fromY}px)`;
       addClip(firstSub.querySelector('td[colspan]'));
@@ -499,15 +499,15 @@ async function expandRow(btn){
     }
   
     requestAnimationFrame(()=> {
-      if (cLabel){ cLabel.style.transition = `transform 240ms ease`; cLabel.style.transform = 'translateY(0)'; }
-      if (cBtn){   cBtn.style.transition   = `transform 240ms ease`; cBtn.style.transform   = 'translateY(0)'; }
+      if (cLabel){ cLabel.style.transition = `transform ${ANIM.rowMs}ms ${ANIM.rowEase}`; cLabel.style.transform = 'translateY(0)'; }
+      if (cBtn){   cBtn.style.transition   = `transform ${ANIM.rowMs}ms ${ANIM.rowEase}`; cBtn.style.transform   = 'translateY(0)'; }
     
       setTimeout(()=> {
         removeClip(firstSub.querySelector('td[colspan]'));
         removeClip(firstSub.querySelector('td:last-child'));
         if (cLabel){ cLabel.style.transition=''; cLabel.style.transform=''; }
         if (cBtn){   cBtn.style.transition='';   cBtn.style.transform=''; }
-      }, 240 + 120);
+      }, ANIM.rowMs + ANIM.cleanupMs);
     });
   }
 
@@ -517,13 +517,13 @@ async function expandRow(btn){
   // 父行工况/按钮接力位移
   toggleParentHotCondAndAction(tr, true, {
     mode:'relay',
-    duration: 240,
-    easing: 'ease',
+    duration: ANIM.rowMs,
+    easing: ANIM.rowEase,
     dyLabel,
     dyBtn
   });
 
-  // 新：展开滚动同步（你的新规则）
+  // 展开滚动同步（动态阈值）
   if (scroller) {
     const scRect = scroller.getBoundingClientRect();
     let freeSpacePx = 0;
@@ -548,13 +548,11 @@ async function expandRow(btn){
 
   // followers 位移动画
   markAnimating(followers, true);
-  startRowMaskTracking(followers);
-  
   if (!followers.length) {
     setTimeout(() => {
       stopRowMaskTracking();
       unlock();
-    }, 240 + 120);
+    }, ANIM.rowMs + ANIM.cleanupMs);
   } else {
     startRowMaskTracking(followers);
     followers.forEach(el => {
@@ -569,7 +567,7 @@ async function expandRow(btn){
     requestAnimationFrame(() => {
       followers.forEach(el => {
         if (!prevMap.has(el)) return;
-        el.style.transition = `transform 240ms ease`;
+        el.style.transition = `transform ${ANIM.rowMs}ms ${ANIM.rowEase}`;
         el.style.transform = 'translateY(0)';
       });
       const onEnd = (e) => {
@@ -591,7 +589,7 @@ async function expandRow(btn){
           stopRowMaskTracking();
           unlock();     
         }
-      }, 240 + 200);
+      }, ANIM.rowMs + ANIM.guardMs);
     });
   }
   btn.setAttribute('aria-expanded','true');
@@ -618,7 +616,7 @@ function collapseRow(btn){
     btn.setAttribute('aria-expanded','false'); btn.removeAttribute('title'); btn.classList.remove('is-open'); return;
   }
 
-  // 预先接力：父→子（保持原有）
+  // 预先接力：父→子
   const firstSub = subrows[0] || null;
   let fromDyLabel = null, fromDyBtn = null;
   if (firstSub) {
@@ -632,10 +630,10 @@ function collapseRow(btn){
       const cr = cLabel.getBoundingClientRect();
       const pCenter = pr.top + pr.height/2;
       const cCenter = cr.top + cr.height/2;
-      fromDyLabel = Math.round((cCenter - pCenter) + 0);
+      fromDyLabel = Math.round((cCenter - pCenter));
       addClip(firstSub.querySelector('td[colspan]'));
       cLabel.style.transition = `transform ${ANIM.rowMs}ms ${ANIM.rowEase}`;
-      cLabel.style.transform  = `translateY(${Math.round((pCenter - cCenter) + 0)}px)`;
+      cLabel.style.transform  = `translateY(${Math.round((pCenter - cCenter))}px)`;
     }
     if (pBtn && cBtn) {
       const prb = pBtn.getBoundingClientRect();
@@ -654,14 +652,14 @@ function collapseRow(btn){
     }, ANIM.rowMs + ANIM.cleanupMs);
   }
 
-  // 本次将减少的总高度（用于非最后一行 followers 动画）
+  // 将要减少的总高度
   let HExact = 0; for (const sr of subrows) HExact += sr.getBoundingClientRect().height;
   if (!isFinite(HExact) || HExact<=0) {
     const v = getComputedStyle(document.documentElement).getPropertyValue('--subrow-h').trim();
     const h = parseFloat(v) || 26; HExact = h * subrows.length;
   }
 
-  // 父行接力入场（保持原有）
+  // 父行接力入场
   toggleParentHotCondAndAction(tr, false, {
     mode:'relay',
     duration: ANIM.rowMs,
@@ -676,17 +674,16 @@ function collapseRow(btn){
   const isLastMainRow = followers.length === 0;
 
   if (isLastMainRow) {
-    // 融合 Version1 的正确过渡：容器在整个时长内按绝对量平滑上移，动画结束再移除子行，避免瞬跳
+    // 最后一行：绝对量平滑滚动，结束后再移除子行
     if (scroller) {
       collapseLastRowWithMask(tr, scroller, subrows, ANIM.rowMs, () => {
         unlock();
       });
     } else {
-      // 无滚动容器兜底
       setTimeout(() => { subrows.forEach(sr => sr.remove()); unlock(); }, ANIM.rowMs + ANIM.cleanupMs);
     }
   } else {
-    // 非最后一行：沿用你当前的“动态阈值”方案（以最后一条主行底边为基准）
+    // 非最后一行：动态阈值滚动 + followers 上移动画
     if (scroller) {
       const scRect = scroller.getBoundingClientRect();
       const lastMain = getLastMainRow(tr);
@@ -697,7 +694,6 @@ function collapseRow(btn){
       }
     }
 
-    // followers 上移动画（保持原有）
     followers.forEach(el => { 
       el.classList.add('fc-row-animating'); 
       el.style.transition='none'; 
@@ -753,50 +749,6 @@ function collapseRow(btn){
   });
 }
 
-// 工具：position:relative 兜底（保留，遮罩相关）
-function ensureRelPos(el){
-  if (!el) return false;
-  const cs = getComputedStyle(el);
-  if (cs.position === 'static' || !cs.position) {
-    el.dataset._posWasStatic = '1';
-    el.style.position = 'relative';
-    return true;
-  }
-  return false;
-}
-function restoreRelPos(el){
-  if (!el) return;
-  if (el.dataset._posWasStatic === '1') {
-    el.style.position = '';
-    delete el.dataset._posWasStatic;
-  }
-}
-
-function createCollapseMask(container, top, height){
-  const mask = document.createElement('div');
-  mask.className = 'fc-collapse-mask'; // 样式在 right-card.css 中
-  mask.style.position = 'absolute';
-  mask.style.left = '0';
-  mask.style.right = '0';
-  mask.style.top = `${Math.round(top)}px`;
-  mask.style.height = `${Math.round(height)}px`;
-  mask.style.transformOrigin = 'bottom';
-  mask.style.transform = 'scaleY(0)';
-  mask.style.transition = `transform ${ANIM.rowMs}ms ${ANIM.rowEase}`;
-  mask.style.zIndex = '7'; // 高于表体内容，低于表头 th 的 z-index:8/11
-
-  // 初始化用于深色渐变对齐的变量（与 .fc-row-animating 一致）
-  const r = mask.getBoundingClientRect();
-  mask.style.setProperty('--row-vp-left', Math.round(r.left) + 'px');
-  mask.style.setProperty('--row-vp-top',  Math.round(r.top)  + 'px');
-
-  container.appendChild(mask);
-
-  // 触发自下而上的覆盖
-  requestAnimationFrame(()=> { mask.style.transform = 'scaleY(1)'; });
-  return mask;
-}
-
   function addClip(el){ if(el){ el.classList.add('fc-col-clip'); el.style.position = el.style.position || 'relative'; } }
   function removeClip(el){ if(el){ el.classList.remove('fc-col-clip'); } }
 
@@ -844,103 +796,12 @@ function createCollapseMask(container, top, height){
 function getScroller(tr){
   return tr?.closest?.('.fc-rank-scroll') || null;
 }
-function isTopStuck(scroller, eps=1){
-  if (!scroller) return false;
-  return scroller.scrollTop <= eps;
-}
-function isBottomStuck(scroller, eps=1){
-  if (!scroller) return false;
-  const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
-  return scroller.scrollTop >= (maxScroll - eps);
-}
+
 function clampScrollTop(scroller, v){
   const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
   scroller.scrollTop = Math.max(0, Math.min(maxScroll, v));
 }
 
-// 子行单位高度解析（px）
-function getUnitSubrowHeight(){
-  try {
-    const v = getComputedStyle(document.documentElement).getPropertyValue('--subrow-h').trim();
-    const h = parseFloat(v);
-    if (h && isFinite(h)) return h;
-  } catch(_) {}
-  return 26; // fallback
-}
-
-// 子行高度动画（保持）
-function animateSubrowsHeight(subrows, expand=true, durationMs=240, onProgress, onDone){
-  const unitH = getUnitSubrowHeight();
-  const inners = [];
-  for (const sr of subrows) {
-    const inner = sr.querySelector('.fc-subrow__row');
-    if (!inner) continue;
-    inners.push(inner);
-  }
-  if (!inners.length) { if (typeof onDone==='function') onDone(); return; }
-
-  const startH = expand ? 0 : unitH;
-  const endH   = expand ? unitH : 0;
-
-  inners.forEach(el => {
-    el.style.overflow = 'hidden';
-    el.style.willChange = 'height';
-    el.style.transition = 'none';
-    el.style.height = startH + 'px';
-  });
-  void document.body.offsetWidth;
-
-  inners.forEach(el => {
-    el.style.transition = `height ${durationMs}ms ${ANIM.rowEase}`;
-  });
-  let finished = false;
-  let ended = 0;
-  const totalCount = inners.length;
-  function cleanup(){
-    if (finished) return;
-    finished = true;
-    inners.forEach(el => {
-      el.style.transition = '';
-      el.style.willChange = '';
-      el.style.overflow = '';
-      el.style.height = endH + 'px';
-    });
-    if (typeof onDone === 'function') onDone();
-  }
-  const onEnd = (e) => {
-    if (e.propertyName !== 'height') return;
-    e.currentTarget.removeEventListener('transitionend', onEnd);
-    if (++ended >= totalCount) cleanup();
-  };
-  inners.forEach(el => el.addEventListener('transitionend', onEnd));
-
-  let prevSum = startH * inners.length;
-  let startTs = 0, rafId = 0;
-  function frame(ts){
-    if (!startTs) startTs = ts;
-    let sum = 0;
-    for (const el of inners) {
-      const h = parseFloat(getComputedStyle(el).height) || 0;
-      sum += h;
-    }
-    const delta = sum - prevSum;
-    prevSum = sum;
-    if (typeof onProgress === 'function' && Math.abs(delta) > 0.1) onProgress(delta);
-
-    const t = (ts - startTs);
-    if (t < durationMs + ANIM.guardMs && !finished) {
-      rafId = requestAnimationFrame(frame);
-    } else {
-      cancelAnimationFrame(rafId);
-      cleanup();
-    }
-  }
-  requestAnimationFrame(frame);
-
-  requestAnimationFrame(()=> {
-    inners.forEach(el => { el.style.height = endH + 'px'; });
-  });
-}
 
 // REPLACE: 最后一行“收起”专用的绝对量平滑滚动（保持不变，确保存在）
 function startTrackScrollPinCollapseAbsolute(scroller, totalDelta, duration=ANIM.rowMs){

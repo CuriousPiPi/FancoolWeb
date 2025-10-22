@@ -349,7 +349,6 @@
   background-position:
     0 0,
     calc(var(--row-vp-left, 0px) * -1) calc(var(--row-vp-top, 0px) * -1);
-
   /* 关闭毛玻璃以防透色；可保留，也可去掉 isolation（看你实际是否需要） */
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
