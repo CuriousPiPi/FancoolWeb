@@ -5,7 +5,6 @@
   // 内部状态
   let root = null;
   let chart = null;
-  let echartsReady = !!window.echarts;
   let onXAxisChange = null;
 
   let lastPayload = null;
@@ -13,6 +12,16 @@
   let lastIsNarrow = null;
   let isFs = false;
 
+  function getCssTransitionMs(){
+    try {
+      const raw = getComputedStyle(document.documentElement).getPropertyValue('--transition-speed').trim();
+      if (!raw) return 300;
+      if (raw.endsWith('ms')) return Math.max(0, parseFloat(raw));
+      if (raw.endsWith('s'))  return Math.max(0, parseFloat(raw) * 1000);
+      const n = parseFloat(raw);
+      return Number.isFinite(n) ? n : 300;
+    } catch(_) { return 300; }
+  }
   // NEW: 追踪 root 的几何变化（位置/尺寸），用于在容器“移动但不改变尺寸”时重放置拟合气泡
   let __lastRootRect = { left:0, top:0, width:0, height:0 };
   let __posWatchRaf = null;
@@ -128,7 +137,7 @@
         try { placeFitUI(); } catch(_) {}
       });
     };
-    window.addEventListener('scroll', onAnyScroll, true);
+    window.addEventListener('scroll', onAnyScroll, { passive: true, capture: true });
 
     // NEW: 监听侧栏/主容器的过渡与属性变化，侧栏展开/收起/拖拽期间跟随图表容器移动
     (function hookLayoutMovers(){
@@ -512,10 +521,11 @@ function setTheme(theme) {
     const isNarrow = layoutIsNarrow();
     const exportBg = (payload && payload.chartBg) || getExportBg();
     const bgNormal = isFs ? exportBg : 'transparent';
+    const transitionMs = getCssTransitionMs();
 
     if (!sList.length || (!showRawCurves && !showFitCurves)) {
       toggleFitUI(false);
-      return {
+      return { 
         __empty:true,
         backgroundColor: bgNormal,
         title:{ text:'请 先 添 加 数 据', left:'center', top:'middle',
@@ -539,22 +549,21 @@ function setTheme(theme) {
     sList.forEach(s=>{
       const brand = s.brand || s.brand_name_zh || s.brand_name || '';
       const model = s.model || s.model_name || '';
-      const rt    = s.res_type || s.resistance_type_zh || s.resistance_type || s.rt || '';
-      const rl    = s.res_loc || s.resistance_location_zh || s.resistance_location || s.rl || '';
+      const condition = s.condition_name_zh || s.condition || '';  // NEW: 统一用工况字段
       const key   = s.name || [brand, model].filter(Boolean).join(' ') || String(s.key || '');
-      legendMeta[key] = { brand, model, rt, rl };
+      legendMeta[key] = { brand, model, condition };               // CHANGED
     });
     function desktopLegendFormatter(name){
       const m = legendMeta[name] || {};
       const line1 = [m.brand, m.model].filter(Boolean).join(' ');
-      const line2 = [m.rt, m.rl].filter(Boolean).join(' ');
+      const line2 = m.condition || '';                             // CHANGED: 第二行显示工况
       if (line2) return `{l1|${line1}}\n{l2|${line2}}`;
       return `{l1|${line1||name}}`;
     }
     function mobileLegendFormatter(name){
       const m = legendMeta[name] || {};
-      const left = [m.brand, m.model].filter(Boolean).join(' ');
-      const right = [m.rt, m.rl].filter(Boolean).join(' ');
+      const left  = [m.brand, m.model].filter(Boolean).join(' ');
+      const right = m.condition || '';                              // CHANGED: 右侧显示工况
       if (right) return `{m1|${left}} {m1|-} {m2|${right}}`;
       return `{m1|${left||name}}`;
     }
@@ -662,9 +671,12 @@ function setTheme(theme) {
       backgroundColor: bgNormal,
       color: sList.map(s=>s.color),
       textStyle:{ fontFamily:t.fontFamily },
-      stateAnimation: { duration: 220, easing: 'cubicOut' },
+      // 修改：使用 CSS 的 --transition-speed 作为动画/状态过渡时长
+      stateAnimation: { duration: transitionMs, easing: 'cubicOut' },
+      animationDurationUpdate: transitionMs,
+      animationEasingUpdate: 'cubicOut',
 
-      grid:{ left:40, right: (isN ? 20 : 260), top: gridTop, bottom: (isN ? Math.min(320, 50 + (sList.length || 1) * 22) : 40) },
+      grid:{ left:40, right: (isN ? 20 : 220), top: gridTop, bottom: (isN ? Math.min(320, 50 + (sList.length || 1) * 22) : 40) },
 
       title: { text: titleText, left: 'center', top: titleTop,
         textStyle: { color: t.axisLabel, fontSize: 20, fontWeight: 600, fontFamily: t.fontFamily } },
@@ -812,7 +824,7 @@ function setTheme(theme) {
     function pos(type, animate = true) {
       const toNoise = (type === 'noise_db' || type === 'noise');
       const x = toNoise ? maxX : 0;
-      xAxisSwitchSlider.style.transition = animate ? 'transform .25s ease' : 'none';
+      xAxisSwitchSlider.style.transition = animate ? 'transform .5s ease' : 'none';
       xAxisSwitchSlider.style.transform  = `translateX(${x}px)`;
       xAxisSwitchTrack.setAttribute('aria-checked', String(toNoise));
     }

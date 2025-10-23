@@ -23,7 +23,8 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/tailwind.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/chart-renderer.css', v=1) }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/fancool.css', v=6) }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/right-card.css', v=3) }}">
+  <!-- bumped v to 4 to refresh new styles (fc-subrow__scenario-extra) -->
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/right-card.css', v=4) }}">
 </head>
 <body class="bg-gray-50 min-h-screen">
   <div id="toastContainer"></div>
@@ -120,7 +121,7 @@
         <i class="fa-solid fa-moon" id="themeIcon"></i>
       </div>
 
-      <div id="main-panels" class="flex flex-col lg:flex-row gap-6 mb-8">
+      <div id="main-panels" class="flex flex-col lg:flex-row gap-6 mb-6">
         <!-- 左侧添加 / 搜索区域 -->
         <div class="bg-white rounded-xl shadow-md p-6 lg:w-1/3">
           <nav class="fc-tabs" data-tab-group="left-panel">
@@ -160,21 +161,16 @@
                   </div>
 
                   <div class="fc-form-row">
-                    <label class="block text-sm font-medium">风阻类型</label>
-                    <select id="resTypeSelect" class="fc-field w-full border-gray-300" disabled>
-                      <option value="">-- 选择风阻类型 --</option>
-                      <option value="全部">全部</option>
-                    </select>
-                    <div id="resTypeLoading" class="text-sm text-gray-500 mt-1 hidden">加载中...</div>
-                  </div>
-
-                  <div class="fc-form-row">
-                    <label class="block text-sm font-medium">风阻位置</label>
-                    <select id="resLocSelect" class="fc-field w-full border-gray-300" disabled>
-                      <option value="">-- 选择风阻位置 --</option>
-                      <option value="全部">全部</option>
-                    </select>
-                    <div id="resLocLoading" class="text-sm text-gray-500 mt-1 hidden">加载中...</div>
+                    <label class="block text-sm font-medium">测试工况</label>
+                    <!-- 多选容器：固定高度≈两行下拉，内部可滚动 -->
+                    <div id="conditionMulti"
+                      class="w-full border border-gray-300 rounded-md p-2 bg-white fc-condition-multi" >
+                      <!-- 级联占位提示（默认显示） -->
+                      <div id="condPlaceholder" class="text-sm text-gray-500">-- 请先选择品牌 --</div>
+                      <!-- 复选框列表（加载完成后显示） -->
+                      <div id="condList" class="space-y-1 hidden"></div>
+                    </div>
+                    <div id="conditionLoading" class="text-sm text-gray-500 mt-1 hidden">加载中...</div>
                   </div>
 
                   <div class="fc-form-row">
@@ -187,21 +183,11 @@
               <div class="fc-tab-pane" id="filter-by-scenario-pane">
                 <form id="searchForm" class="fc-form-grid">
                   <div class="fc-form-row">
-                    <label class="block text-sm font-medium">风阻类型</label>
-                    <select name="search_res_type" class="fc-field w-full border-gray-300">
-                      <option value="">-- 选择风阻类型 --</option>
-                      {% for type in all_res_types %}
-                        <option value="{{ type }}">{{ type }}</option>
-                      {% endfor %}
-                    </select>
-                  </div>
-
-                  <div class="fc-form-row">
-                    <label class="block text-sm font-medium">风阻位置</label>
-                    <select name="search_res_loc" class="fc-field w-full border-gray-300">
-                      <option value="">-- 选择风阻位置 --</option>
-                      {% for loc in all_res_locs %}
-                        <option value="{{ loc }}">{{ loc }}</option>
+                    <label class="block text-sm font-medium">测试工况</label>
+                    <select name="condition_name" id="conditionFilterSelect" class="fc-field w-full border-gray-300">
+                      <option value="">-- 选择测试工况 --</option>
+                      {% for cond in all_conditions %}
+                        <option value="{{ cond }}">{{ cond }}</option>
                       {% endfor %}
                     </select>
                   </div>
@@ -221,6 +207,29 @@
                       <input type="number" name="thickness_min" value="25" min="1" max="99" class="fc-field w-1/2 border-gray-300" required>
                       <span class="text-gray-600">-</span>
                       <input type="number" name="thickness_max" value="50" min="1" max="99" class="fc-field w-1/2 border-gray-300" required>
+                    </div>
+                  </div>
+                  
+                  <div class="fc-form-row">
+                    <label class="block text-sm font-medium">参考价格(元)</label>
+                    <div class="flex items-center gap-3">
+                      <input type="number"
+                             name="price_min"
+                             value="0"
+                             min="0"
+                             max="999"
+                             step="1"
+                             class="fc-field w-1/2 border-gray-300"
+                             required>
+                      <span class="text-gray-600">-</span>
+                      <input type="number"
+                             name="price_max"
+                             value="999"
+                             min="0"
+                             max="999"
+                             step="1"
+                             class="fc-field w-1/2 border-gray-300"
+                             required>
                     </div>
                   </div>
 
@@ -301,49 +310,67 @@
                           <th>品牌</th>
                           <th>型号</th>
                           <th>尺寸</th>
+                          <th>参考价</th>
                           <th>热门工况</th>
                           <th>查询次数</th>
                           <th class="add-header">添加</th>
                         </tr>
                         </thead>
                         <tbody>
-                        {% for query in top_queries %}
-                          <tr class="hover:bg-gray-50">
+                        {% for q in top_queries %}
+                          <tr class="hover:bg-gray-50 fc-qrow"
+                              data-model-id="{{ q.model_id }}"
+                              data-brand="{{ q.brand_name_zh }}"
+                              data-model="{{ q.model_name }}"
+                              data-conditions='{{ q.conditions|tojson }}'>
                             <td class="fc-rank-cell">
-                              {% if loop.index == 1 %}
+                              {% if q.model_rank == 1 %}
                                 <i class="fa-solid fa-medal gold text-2xl"></i>
-                              {% elif loop.index == 2 %}
+                              {% elif q.model_rank == 2 %}
                                 <i class="fa-solid fa-medal silver text-2xl"></i>
-                              {% elif loop.index == 3 %}
+                              {% elif q.model_rank == 3 %}
                                 <i class="fa-solid fa-medal bronze text-2xl"></i>
                               {% else %}
-                                <span class="font-medium">{{ loop.index }}</span>
+                                <span class="font-medium">{{ q.model_rank }}</span>
                               {% endif %}
                             </td>
-                            <td>{{ query.brand_name_zh }}</td>
-                            <td>{{ query.model_name }} ({{ query.max_speed }} RPM)</td>
-                            <td>{{ query.size }}x{{ query.thickness }}</td>
-                            <td>
-                              {% if query.resistance_location_zh %}
-                                {{ query.resistance_type_zh }}({{ query.resistance_location_zh }})
-                              {% else %}
-                                {{ query.resistance_type_zh }}
-                              {% endif %}
+                            <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">{{ q.brand_name_zh }}</span></td>
+                            <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">{{ q.model_name }} ({{ q.max_speed }} RPM)</span></td>
+                            <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">{{ q.size }}x{{ q.thickness }}</span></td>
+                            <td class="nowrap fc-marquee-cell">
+                              <span class="fc-marquee-inner">{{ q.reference_price if q.reference_price > 0 else '-' }}</span>
                             </td>
-                            <td class="text-blue-600 font-medium">{{ query.query_count }}</td>
+                            <td class="nowrap fc-marquee-cell">
+                              <button class="fc-row-expander fc-expand-toggle"
+                                      type="button"
+                                      aria-expanded="false"
+                                      data-tooltip="展开/收起该型号的所有工况">
+                                <i class="fa-solid fa-chevron-right"></i>
+                              </button>
+                              <!-- add data-role=top-cond to let JS hide/show this part on expand/collapse -->
+                              <span class="fc-marquee-inner" data-role="top-cond" style="margin-left:.25rem;">
+                                {{ q.top_condition.condition_name_zh if q.top_condition else '-' }}
+                              </span>
+                            </td>
+                            <td class="text-blue-600 font-medium">{{ q.total_count }}</td>
                             <td>
+                              {% if q.top_condition %}
                               <button class="fc-btn-icon-add js-ranking-add fc-tooltip-target"
-                                      title="添加到图表"
+                                      data-tooltip="添加到图表"
                                       data-add-type="ranking"
                                       data-log-source="top_query"
-                                      data-brand="{{ query.brand_name_zh }}"
-                                      data-model="{{ query.model_name }}"
-                                      data-res-type="{{ query.resistance_type_zh }}"
-                                      data-res-loc="{{ query.resistance_location_zh or '无' }}"
-                                      data-model-id="{{ query.model_id }}"
-                                      data-condition-id="{{ query.condition_id }}">
+                                      data-brand="{{ q.brand_name_zh }}"
+                                      data-model="{{ q.model_name }}"
+                                      data-condition="{{ q.top_condition.condition_name_zh }}"
+                                      data-model-id="{{ q.model_id }}"
+                                      data-condition-id="{{ q.top_condition.condition_id }}">
                                 <i class="fa-solid fa-plus"></i>
                               </button>
+                              {% else %}
+                              <button class="fc-btn-icon-add fc-tooltip-target" data-tooltip="无可添加工况" disabled>
+                                <i class="fa-solid fa-plus"></i>
+                              </button>
+                              {% endif %}
                             </td>
                           </tr>
                         {% endfor %}
@@ -361,13 +388,67 @@
                           <th>品牌</th>
                           <th>型号</th>
                           <th>尺寸</th>
+                          <th>参考价</th>
                           <th>热门工况</th>
                           <th>好评次数</th>
                           <th class="add-header">添加</th>
                         </tr>
-                        </thead>
+                      </thead>
                         <tbody id="ratingRankTbody">
-                          <tr><td colspan="7" class="text-center text-gray-500 py-6">首次点击“好评榜”加载...</td></tr>
+                          {% for r in top_ratings %}
+                            <tr class="hover:bg-gray-50 fc-like-row"
+                                data-model-id="{{ r.model_id }}"
+                                data-brand="{{ r.brand_name_zh }}"
+                                data-model="{{ r.model_name }}"
+                                data-conditions='{{ r.conditions|tojson }}'>
+                              <td class="fc-rank-cell">
+                                {% if r.model_rank == 1 %}
+                                  <i class="fa-solid fa-medal gold text-2xl"></i>
+                                {% elif r.model_rank == 2 %}
+                                  <i class="fa-solid fa-medal silver text-2xl"></i>
+                                {% elif r.model_rank == 3 %}
+                                  <i class="fa-solid fa-medal bronze text-2xl"></i>
+                                {% else %}
+                                  <span class="font-medium">{{ r.model_rank }}</span>
+                                {% endif %}
+                              </td>
+                              <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">{{ r.brand_name_zh }}</span></td>
+                              <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">{{ r.model_name }} ({{ r.max_speed }} RPM)</span></td>
+                              <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">{{ r.size }}x{{ r.thickness }}</span></td>
+                              <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">{{ r.reference_price if r.reference_price > 0 else '-' }}</span></td>
+                              <td class="nowrap fc-marquee-cell">
+                                <button class="fc-row-expander fc-expand-toggle"
+                                        type="button"
+                                        aria-expanded="false"
+                                        data-tooltip="展开/收起该型号的所有工况">
+                                  <i class="fa-solid fa-chevron-right"></i>
+                                </button>
+                                <span class="fc-marquee-inner" data-role="top-cond" style="margin-left:.25rem;">
+                                  {{ r.top_condition.condition_name_zh if r.top_condition else '-' }}
+                                </span>
+                              </td>
+                              <td class="text-blue-600 font-medium">{{ r.total_count }}</td>
+                              <td>
+                                {% if r.top_condition %}
+                                <button class="fc-btn-icon-add js-rating-add fc-tooltip-target"
+                                        data-tooltip="添加到图表"
+                                        data-add-type="rating"
+                                        data-log-source="top_rating"
+                                        data-brand="{{ r.brand_name_zh }}"
+                                        data-model="{{ r.model_name }}"
+                                        data-condition="{{ r.top_condition.condition_name_zh }}"
+                                        data-model-id="{{ r.model_id }}"
+                                        data-condition-id="{{ r.top_condition.condition_id }}">
+                                  <i class="fa-solid fa-plus"></i>
+                                </button>
+                                {% else %}
+                                <button class="fc-btn-icon-add fc-tooltip-target" data-tooltip="无可添加工况" disabled>
+                                  <i class="fa-solid fa-plus"></i>
+                                </button>
+                                {% endif %}
+                              </td>
+                            </tr>
+                          {% endfor %}
                         </tbody>
                       </table>
                     </div>
@@ -396,6 +477,7 @@
                           <th>品牌</th>
                           <th>型号</th>
                           <th>尺寸</th>
+                          <th>参考价</th>
                           <th>工况</th>
                           <th class="nowrap" id="searchXHeaderAir">转速</th>
                           <th>风量(CFM)</th>
@@ -404,7 +486,7 @@
                         </tr>
                         </thead>
                         <tbody id="searchAirflowTbody">
-                          <tr><td colspan="8" class="text-center text-gray-500 py-8" style="font-size: 16px;">使用按工况筛选进行搜索</td></tr>
+                          <tr><td colspan="9" class="text-center text-gray-500 py-8" style="font-size: 16px;">使用按工况筛选进行搜索</td></tr>
                         </tbody>
                       </table>
                     </div>
@@ -418,6 +500,7 @@
                           <th>品牌</th>
                           <th>型号</th>
                           <th>尺寸</th>
+                          <th>参考价</th>
                           <th>工况</th>
                           <th class="nowrap" id="searchXHeaderLikes">转速</th>
                           <th>风量(CFM)</th>
@@ -426,7 +509,7 @@
                         </tr>
                         </thead>
                         <tbody id="searchLikesTbody">
-                          <tr><td colspan="8" class="text-center text-gray-500 py-8">使用左侧条件进行搜索</td></tr>
+                          <tr><td colspan="9" class="text-center text-gray-500 py-8">使用左侧条件进行搜索</td></tr>
                         </tbody>
                       </table>
                     </div>
@@ -489,10 +572,12 @@
   <script src="{{ url_for('static', filename='js/theme-pref.js', v=1) }}"></script>
   <script src="{{ url_for('static', filename='js/color-manager.js', v=1) }}"></script>
   <script src="{{ url_for('static', filename='vendor/echarts/5.4.2/echarts.min.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/chart-renderer.js', v=3) }}"></script>
-  <script src="{{ url_for('static', filename='js/sidebar.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/recently-removed.js') }}"></script>
-  <script src="{{ url_for('static', filename='js/fancool.js', v=9) }}"></script>
+  <script src="{{ url_for('static', filename='js/chart-renderer.js', v=5) }}"></script>
+  <script src="{{ url_for('static', filename='js/sidebar.js', v=2) }}"></script>
+  <script src="{{ url_for('static', filename='js/recently-removed.js', v=1) }}"></script>
+  <script src="{{ url_for('static', filename='js/fancool.js', v=10) }}"></script>
+  <script src="{{ url_for('static', filename='js/right-panel.js', v=2) }}"></script>
+  <script src="{{ url_for('static', filename='js/fancool-search.js', v=1) }}"></script>
   <script src="{{ url_for('static', filename='js/analytics.js') }}"></script>
   
 </body>

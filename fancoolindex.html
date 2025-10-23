@@ -1,0 +1,62 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Fancool Index</title>
+    <style>
+        .expandable {
+            display: none;
+        }
+        .expandable-row {
+            cursor: pointer;
+            background-color: #f1f1f1;
+        }
+    </style>
+    <script>
+        function toggleExpandable(rowId) {
+            var row = document.getElementById(rowId);
+            if (row.style.display === "table-row") {
+                row.style.display = "none";
+            } else {
+                row.style.display = "table-row";
+            }
+        }
+    </script>
+</head>
+<body>
+    <h1>Query Rank Table</h1>
+    <table border="1">
+        <thead>
+            <tr>
+                <th>Rank</th>
+                <th>Query</th>
+                <th>Details</th>
+            </tr>
+        </thead>
+        <tbody>
+            <tr class="expandable-row" onclick="toggleExpandable('details1')">
+                <td>1</td>
+                <td>Example Query 1</td>
+                <td>Click for details</td>
+            </tr>
+            <tr id="details1" class="expandable">
+                <td colspan="3">
+                    <div>Details about Example Query 1...</div>
+                </td>
+            </tr>
+            <tr class="expandable-row" onclick="toggleExpandable('details2')">
+                <td>2</td>
+                <td>Example Query 2</td>
+                <td>Click for details</td>
+            </tr>
+            <tr id="details2" class="expandable">
+                <td colspan="3">
+                    <div>Details about Example Query 2...</div>
+                </td>
+            </tr>
+            <!-- Add more rows as needed -->
+        </tbody>
+    </table>
+</body>
+</html>

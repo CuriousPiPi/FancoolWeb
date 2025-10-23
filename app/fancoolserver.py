@@ -59,7 +59,7 @@ app.secret_key = os.getenv('APP_SECRET', 'replace-me-in-prod')
 app.config['SESSION_COOKIE_SECURE'] = os.getenv('SESSION_COOKIE_SECURE', '0') == '1'
 app.logger.setLevel('WARNING')
 
-#app.config['TEMPLATES_AUTO_RELOAD'] = True      #生产环境注释这行
+app.config['TEMPLATES_AUTO_RELOAD'] = True      #生产环境注释这行
 #app.jinja_env.auto_reload = True                #生产环境注释这行
 #app.config['SEND_FILE_MAX_AGE_DEFAULT'] = 0     #生产环境注释这行
 
@@ -106,10 +106,10 @@ engine = create_engine(
 )
 
 SIZE_OPTIONS = ["不限", "120"] #, "140"]
-TOP_QUERIES_LIMIT = 10
-RECENT_LIKES_LIMIT = 50
+TOP_QUERIES_LIMIT = 100
+RECENT_LIKES_LIMIT = 100
 CLICK_COOLDOWN_SECONDS = 0.5
-RECENT_UPDATES_LIMIT = 50
+RECENT_UPDATES_LIMIT = 100
 
 query_count_cache = 0
 
@@ -319,6 +319,15 @@ def _parse_device_basic(ua_string: str) -> dict:
     except Exception:
         return dict(os_name=None, device_type='other')
 
+# NEW: deprecated API call tracer
+def _deprecated_called(name: str):
+    try:
+        app.logger.warning("DEPRECATED API called: %s %s %s args=%s", name, request.method, request.path, dict(request.args))
+        print(f"[DEPRECATED] {name}: {request.method} {request.path} args={dict(request.args)}", flush=True)
+    except Exception:
+        # Avoid breaking response on logging errors
+        pass
+
 # =========================================
 # FNV Fingerprint for Likes (保持 c/x/s)
 # =========================================
@@ -338,7 +347,7 @@ def _fnv1a_64(s: str) -> int:
 def get_user_likes_full(user_identifier: str, limit: int | None = None) -> List[dict]:
     rows = fetch_all("""
         SELECT user_identifier, model_id, condition_id, brand_name_zh, model_name,
-               resistance_type_zh, resistance_location_zh, max_speed, size, thickness
+               condition_name_zh, resistance_type_zh, resistance_location_zh, max_speed, size, thickness
         FROM user_likes_view
         WHERE user_identifier=:u
     """, {'u': user_identifier})
@@ -362,25 +371,133 @@ def compute_like_fingerprint(user_id: str) -> dict:
 # =========================================
 # Query Helpers
 # =========================================
+def get_top_rankings(metric: str, limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
+    """
+    统一榜单数据获取：
+      metric: 'like' 或 'query'
+    统一输出字段（无旧别名）：
+      - 型号层：model_id, brand_name_zh, model_name, size, thickness, max_speed, reference_price
+      - model_rank: int
+      - total_count: int
+      - conditions: [ { condition_id, condition_name_zh, cond_rank, count,
+                        resistance_type_zh, resistance_location_zh }, ... ]
+      - top_condition: 同上，取 cond_rank 最小（再以 count 降序兜底）
+    排序：
+      - 型号：model_rank ASC，然后 total_count DESC 兜底
+      - 子行：cond_rank ASC，然后 count DESC 兜底
+    """
+    metric = (metric or '').strip().lower()
+    if metric not in ('like', 'query'):
+        raise ValueError("metric must be 'like' or 'query'")
+
+    pref = 'like' if metric == 'like' else 'query'
+    view = f"{pref}_rank_d30_view"
+    model_total_col = f"{pref}_by_model_d30"
+    model_rank_col  = f"{pref}_rank_by_m_d30"
+    cond_count_col  = f"{pref}_by_model_condition_d30"
+    cond_rank_col   = f"{pref}_rank_by_m_c_d30"
+
+    sql = f"""
+      SELECT
+        model_id, condition_id,
+        brand_name_zh, model_name, condition_name_zh,
+        resistance_type_zh, resistance_location_zh,
+        size, thickness, max_speed, reference_price,
+        {model_total_col} AS total_count,
+        {model_rank_col}  AS model_rank,
+        {cond_count_col}  AS cond_count,
+        {cond_rank_col}   AS cond_rank
+      FROM {view}
+      WHERE {pref}_rank_by_m_d30 <= 10
+      ORDER BY model_id, condition_id
+    """
+    rows = fetch_all(sql, {})
+
+    groups: dict[int, dict] = {}
+    for r in rows:
+        try:
+            mid = int(r['model_id'])
+            cid = int(r['condition_id'])
+        except Exception:
+            continue
+
+        g = groups.setdefault(mid, {
+            'model_id': mid,
+            'brand_name_zh': r['brand_name_zh'],
+            'model_name': r['model_name'],
+            'size': r['size'],
+            'thickness': r['thickness'],
+            'max_speed': r.get('max_speed'),
+            'reference_price': r.get('reference_price'),
+            'total_count': 0,
+            'model_rank': None,
+            'conditions': []
+        })
+
+        # 型号层（视图每行重复，同型号取最大总数/最小排名）
+        try:
+            tc = int(r.get('total_count') or 0)
+            g['total_count'] = max(int(g['total_count'] or 0), tc)
+        except Exception:
+            pass
+        try:
+            rk = int(r.get('model_rank') or 999999)
+            prev = g['model_rank']
+            g['model_rank'] = min(int(prev if prev is not None else rk), rk)
+        except Exception:
+            pass
+
+        # 子行
+        try:
+            cc = int(r.get('cond_count') or 0)
+        except Exception:
+            cc = 0
+        try:
+            cr = int(r.get('cond_rank') or 999999)
+        except Exception:
+            cr = 999999
+
+        g['conditions'].append({
+            'condition_id': cid,
+            'condition_name_zh': r['condition_name_zh'],
+            'count': cc,
+            'cond_rank': cr,
+            'resistance_type_zh': r.get('resistance_type_zh'),
+            'resistance_location_zh': r.get('resistance_location_zh')
+        })
+
+    items: List[dict] = []
+    for g in groups.values():
+        conds_sorted = sorted(
+            g['conditions'],
+            key=lambda c: (int(c.get('cond_rank') or 999999), -int(c.get('count') or 0))
+        )
+        top_c = conds_sorted[0] if conds_sorted else None
+
+        items.append({
+            'model_id': g['model_id'],
+            'brand_name_zh': g['brand_name_zh'],
+            'model_name': g['model_name'],
+            'size': g['size'],
+            'thickness': g['thickness'],
+            'max_speed': g['max_speed'],
+            'reference_price': g['reference_price'],
+            'total_count': g['total_count'],
+            'model_rank': g['model_rank'] or 999999,
+            'top_condition': top_c,
+            'conditions': conds_sorted
+        })
+
+    items.sort(key=lambda x: (int(x['model_rank'] or 999999), -int(x['total_count'] or 0)))
+    return items[:limit]
+
+
 def get_top_queries(limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
-    sql = """SELECT model_id, condition_id,
-                    brand_name_zh, model_name,
-                    resistance_type_zh, resistance_location_zh,
-                    query_count, size, thickness, max_speed
-             FROM total_query_rank_d30
-             ORDER BY query_count DESC
-             LIMIT :l"""
-    return fetch_all(sql, {'l': limit})
+    return get_top_rankings('query', limit)
 
 def get_top_ratings(limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
-    sql = """SELECT model_id, condition_id,
-                    brand_name_zh, model_name,
-                    resistance_type_zh, resistance_location_zh,
-                    like_count, size, thickness, max_speed
-             FROM total_like_d30
-             ORDER BY like_count DESC
-             LIMIT :l"""
-    return fetch_all(sql, {'l': limit})
+    return get_top_rankings('like', limit)
+
 
 def _effective_value_for_series(series_rows: list, model_id: int, condition_id: int,
                                 axis: str, limit_value: float | None):
@@ -454,58 +571,52 @@ def _effective_value_for_series(series_rows: list, model_id: int, condition_id: 
             'effective_rpm_at_point': None}
 
 
-def search_fans_by_condition_with_fit(res_type, res_loc, sort_by, sort_value,
-                                      size_filter=None, thickness_min=None, thickness_max=None,
-                                      limit=200) -> list[dict]:
-    """
-    统一按后端模型/原始值评估有效点，并按有效风量排序返回前 limit 条。
-    说明：
-      - 已合并原 search_fans_by_condition 的筛选功能
-      - 限制条件下若 limit < min_x 则舍弃该条目
-    """
-    where = ["resistance_type_zh=:rt"]
-    params = {'rt': res_type}
-    if res_type != '空载':
-        s = (res_loc or '').strip()
-        if s not in ('', '全部'):
-            where.append("resistance_location_zh=:rl")
-            params['rl'] = s
-        else:
-            if s == '' or s == '无':
-                where.append("COALESCE(NULLIF(TRIM(resistance_location_zh),''),'') = ''")
+def search_fans_by_condition_with_fit(condition_id=None, condition_name=None, sort_by='none', sort_value=None,
+                         size_filter=None, thickness_min=None, thickness_max=None,
+                         price_min=None, price_max=None,  # NEW
+                         limit=200) -> list[dict]:
+    where = []
+    params = {}
+
+    # 工况过滤
+    if condition_id is not None:
+        where.append("g.condition_id=:cid"); params['cid'] = int(condition_id)
+    elif (condition_name or '').strip() and condition_name != '全部':
+        where.append("g.condition_name_zh=:cn"); params['cn'] = condition_name.strip()
+
+    # 尺寸/厚度
     if size_filter and size_filter != '不限':
-        where.append("size=:sz"); params['sz'] = int(size_filter)
+        where.append("g.size=:sz"); params['sz'] = int(size_filter)
     if thickness_min is not None and thickness_max is not None:
-        where.append("thickness BETWEEN :tmin AND :tmax")
+        where.append("g.thickness BETWEEN :tmin AND :tmax")
         params.update(tmin=int(thickness_min), tmax=int(thickness_max))
 
+    # NEW: 参考价格（元），来自 fan_model.reference_price
+    if price_min is not None and price_max is not None:
+        where.append("reference_price BETWEEN :pmin AND :pmax")
+        params.update(pmin=int(price_min), pmax=int(price_max))
+
     sql = f"""
-      SELECT model_id, condition_id,
-             brand_name_zh, model_name,
-             resistance_type_zh, resistance_location_zh,
-             size, thickness,
-             rpm, noise_db, airflow_cfm AS airflow,
-             COALESCE(like_count,0) AS like_count
-      FROM general_view
-      WHERE {" AND ".join(where)}
-      ORDER BY model_id, condition_id, rpm
+      SELECT g.model_id, g.condition_id,
+             g.brand_name_zh, g.model_name, g.condition_name_zh,
+             g.size, g.thickness, g.rpm, g.noise_db, g.airflow_cfm AS airflow,
+             COALESCE(g.like_count,0) AS like_count,
+             reference_price
+      FROM general_view g
+      {"WHERE " + " AND ".join(where) if where else ""}
+      ORDER BY g.model_id, g.condition_id, g.rpm
     """
     rows = fetch_all(sql, params)
 
+    # 后续分组/拟合逻辑不变
     groups = {}
     for r in rows:
         mid = int(r['model_id']); cid = int(r['condition_id'])
         key = (mid, cid)
         g = groups.setdefault(key, {
-            'rows': [],
-            'brand': r['brand_name_zh'],
-            'model': r['model_name'],
-            'res_type': r['resistance_type_zh'],
-            'res_loc': r['resistance_location_zh'],
-            'size': r['size'],
-            'thickness': r['thickness'],
-            'like_count': 0,
-            'max_speed': None
+            'rows': [], 'brand': r['brand_name_zh'], 'model': r['model_name'],
+            'condition_name': r['condition_name_zh'], 'size': r['size'], 'thickness': r['thickness'],
+            'like_count': 0, 'max_speed': None, 'reference_price': r['reference_price']
         })
         g['rows'].append({'rpm': r['rpm'], 'noise_db': r['noise_db'], 'airflow': r['airflow']})
         try:
@@ -518,12 +629,8 @@ def search_fans_by_condition_with_fit(res_type, res_loc, sort_by, sort_value,
         except Exception:
             pass
 
-    if sort_by == 'rpm':
-        axis = 'rpm'; lv = float(sort_value)
-    elif sort_by == 'noise':
-        axis = 'noise_db'; lv = float(sort_value)
-    else:
-        axis = 'rpm'; lv = None
+    axis = 'rpm' if sort_by == 'rpm' or sort_by == 'none' else 'noise_db'
+    lv = None if sort_by == 'none' else float(sort_value)
 
     items = []
     for (mid, cid), g in groups.items():
@@ -532,18 +639,12 @@ def search_fans_by_condition_with_fit(res_type, res_loc, sort_by, sort_value,
             continue
         items.append({
             'model_id': mid, 'condition_id': cid,
-            'brand_name_zh': g['brand'],
-            'model_name': g['model'],
-            'resistance_type_zh': g['res_type'],
-            'resistance_location_zh': g['res_loc'],
-            'size': g['size'], 'thickness': g['thickness'],
-            'like_count': g['like_count'],
-            'effective_airflow': eff['effective_airflow'],
-            'effective_x': eff['effective_x'],
-            'effective_axis': eff['effective_axis'],
-            'effective_source': eff['effective_source'],
-            'max_airflow': eff['effective_airflow'],
-            'max_speed': g['max_speed']
+            'brand_name_zh': g['brand'], 'model_name': g['model'], 'condition_name_zh': g['condition_name'],
+            'size': g['size'], 'thickness': g['thickness'], 'like_count': g['like_count'],
+            'effective_airflow': eff['effective_airflow'], 'effective_x': eff['effective_x'],
+            'effective_axis': eff['effective_axis'], 'effective_source': eff['effective_source'],
+            'max_airflow': eff['effective_airflow'], 'max_speed': g['max_speed'],
+            'reference_price': g['reference_price'] 
         })
 
     items.sort(key=lambda r: (r['effective_airflow'] if r['effective_airflow'] is not None else -1e9), reverse=True)
@@ -552,19 +653,13 @@ def search_fans_by_condition_with_fit(res_type, res_loc, sort_by, sort_value,
 def get_recent_updates(limit: int = RECENT_UPDATES_LIMIT) -> List[dict]:
     """
     从视图 FANDB.update_notice_d30_view 获取近30天内的更新记录。
-    期望字段：
-      - model_id, condition_id
-      - brand_name_zh, model_name
-      - resistance_type_zh, resistance_location_zh
-      - size, thickness, max_speed
-      - update_date
-      - description
+    字段：model_id, condition_id, brand_name_zh, model_name, condition_name_zh, size, thickness, max_speed, update_date, description
     """
     sql = """
       SELECT
         model_id, condition_id,
         brand_name_zh, model_name,
-        resistance_type_zh, resistance_location_zh,
+        condition_name_zh,
         size, thickness, max_speed,
         description,
         CONCAT(
@@ -809,7 +904,7 @@ def get_curves_for_pairs(pairs: List[Tuple[int, int]]) -> Dict[str, dict]:
         params[f"c{i}"] = int(c)
     sql = f"""
       SELECT model_id, condition_id, brand_name_zh, model_name,
-             resistance_type_zh, resistance_location_zh,
+             condition_name_zh, resistance_type_zh, resistance_location_zh,
              rpm, airflow_cfm AS airflow, noise_db
       FROM general_view
       WHERE (model_id, condition_id) IN ({",".join(conds)})
@@ -824,11 +919,12 @@ def get_curves_for_pairs(pairs: List[Tuple[int, int]]) -> Dict[str, dict]:
             'info': {
                 'brand': r['brand_name_zh'],
                 'model': r['model_name'],
-                'res_type': r['resistance_type_zh'],
-                'res_loc': r['resistance_location_zh'],
+                'condition': r['condition_name_zh'],
+                'resistance_type': r['resistance_type_zh'],
+                'resistance_location': r['resistance_location_zh'],
                 'model_id': int(r['model_id']),
                 'condition_id': int(r['condition_id'])
-            }
+            }   
         })
         rpm = r.get('rpm')
         airflow = r.get('airflow')
@@ -955,11 +1051,12 @@ def api_curves():
 
             series.append(dict(
                 key=k,
-                name=f"{info['brand']} {info['model']} - {info['res_type']}({info['res_loc']})",
+                name=f"{info['brand']} {info['model']} - {info['condition']}",
                 brand=info['brand'], model=info['model'],
-                res_type=info['res_type'], res_loc=info['res_loc'],
+                condition=info['condition'],
                 model_id=info['model_id'], condition_id=info['condition_id'],
-                # 仅返回给前端的原始数组做占位；模型依然用清洗后的 xs/ys
+                resistance_type=info.get('resistance_type'),
+                resistance_location=info.get('resistance_location'),
                 rpm=_to_placeholder_array(b['rpm']),
                 noise_db=_to_placeholder_array(b['noise_db']),
                 airflow=b['airflow'],
@@ -1045,53 +1142,70 @@ def get_models(brand):
     return _maybe_raw_array([r['model_name'] for r in rows])
 
 
-@app.route('/get_resistance_types/<brand>/<model>')
-def get_resistance_types(brand, model):
-    rows = fetch_all(
-        "SELECT DISTINCT resistance_type_zh FROM general_view WHERE brand_name_zh=:b AND model_name=:m",
-        {'b': brand, 'm': model}
-    )
-    return _maybe_raw_array([r['resistance_type_zh'] for r in rows])
+@app.route('/get_conditions', defaults={'brand': None, 'model': None})
+@app.route('/get_conditions/<brand>/<model>')
+def get_conditions(brand=None, model=None):
+    if brand and model:
+        rows = fetch_all(
+            "SELECT DISTINCT condition_id, condition_name_zh, resistance_type_zh, resistance_location_zh "
+            "FROM general_view WHERE is_valid=1 AND brand_name_zh=:b AND model_name=:m "
+            "ORDER BY condition_name_zh",
+            {'b': brand, 'm': model}
+        )
+        # 返回 [{condition_id, condition_name_zh}, ...]
+        return _maybe_raw_array(rows)
+    else:
+        rows = fetch_all(
+            "SELECT condition_id, condition_name_zh, resistance_type_zh, resistance_location_zh "
+            "FROM working_condition WHERE is_valid=1 "
+            "ORDER BY condition_name_zh"
+        )
+        # 返回 [{condition_id, condition_name_zh}, ...]
+        return _maybe_raw_array(rows)
 
 
-@app.route('/get_resistance_locations/<brand>/<model>/<res_type>')
-def get_resistance_locations(brand, model, res_type):
-    rows = fetch_all("""SELECT DISTINCT resistance_location_zh
-                        FROM general_view
-                        WHERE brand_name_zh=:b AND model_name=:m AND resistance_type_zh=:rt""",
-                     {'b': brand, 'm': model, 'rt': res_type})
-    out = []
-    has_empty = False
-    for r in rows:
-        s = '' if r['resistance_location_zh'] is None else str(r['resistance_location_zh']).strip()
-        if s == '':
-            has_empty = True
-        else:
-            out.append(s)
-    if has_empty or res_type == '空载':
-        out.insert(0, '无')
-    return _maybe_raw_array(out)
+# NEW: 通过 (model_id, condition_id) 批量获取显示所需元信息（品牌名、型号名、工况名等）
+@app.post('/api/meta_by_ids')
+def api_meta_by_ids():
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        raw_pairs = data.get('pairs') or []
+        uniq, seen = [], set()
+        for p in raw_pairs:
+            try:
+                mid = int(p.get('model_id'))
+                cid = int(p.get('condition_id'))
+            except Exception:
+                continue
+            t = (mid, cid)
+            if t in seen:
+                continue
+            seen.add(t)
+            uniq.append(t)
+        if not uniq:
+            return resp_ok({'items': []})
 
+        conds, params = [], {}
+        for i, (m, c) in enumerate(uniq, start=1):
+            conds.append(f"(:m{i}, :c{i})")
+            params[f"m{i}"] = m
+            params[f"c{i}"] = c
 
-@app.route('/get_resistance_locations_by_type/<res_type>')
-def get_resistance_locations_by_type(res_type):
-    if not res_type:
-        return _maybe_raw_array([])
-    rows = fetch_all(
-        "SELECT DISTINCT resistance_location_zh FROM general_view WHERE resistance_type_zh=:rt",
-        {'rt': res_type}
-    )
-    out = []
-    has_empty = False
-    for r in rows:
-        s = '' if r['resistance_location_zh'] is None else str(r['resistance_location_zh']).strip()
-        if s == '':
-            has_empty = True
-        else:
-            out.append(s)
-    if res_type == '空载' or has_empty:
-        out.insert(0, '无')
-    return _maybe_raw_array(out)
+        sql = f"""
+          SELECT
+            model_id, condition_id,
+            brand_name_zh, model_name, condition_name_zh,
+            resistance_type_zh, resistance_location_zh,
+            size, thickness, max_speed
+          FROM meta_view
+          WHERE (model_id, condition_id) IN ({",".join(conds)})
+          ORDER BY model_id, condition_id
+        """
+        rows = fetch_all(sql, params)
+        return resp_ok({'items': rows})
+    except Exception as e:
+        app.logger.exception(e)
+        return resp_err('INTERNAL_ERROR', f'meta_by_ids 异常: {e}', 500)
 
 # =========================================
 # Search
@@ -1102,96 +1216,90 @@ def api_search_fans():
         data = request.get_json(force=True, silent=True) or {}
         mode = (data.get('mode') or 'filter').strip()
         if mode == 'expand':
-            # 原“expand”分支保持不变（略）
+            model_id = data.get('model_id')
+            condition_id = data.get('condition_id')
             brand = (data.get('brand') or '').strip()
             model = (data.get('model') or '').strip()
-            res_type = (data.get('res_type') or '').strip()
-            res_loc = data.get('res_loc')
-            if not brand or not model:
-                return resp_err('EXPAND_MISSING_BRAND_MODEL', '缺少品牌或型号')
-            where = ["brand_name_zh=:b", "model_name=:m"]
-            params = {'b': brand, 'm': model}
-            if res_type and res_type != '全部':
-                where.append("resistance_type_zh=:rt")
-                params['rt'] = res_type
-            if res_loc is not None and res_loc not in ('', '全部'):
-                if res_loc == '无':
-                    where.append("COALESCE(NULLIF(TRIM(resistance_location_zh),''),'') = ''")
-                else:
-                    where.append("resistance_location_zh=:rl")
-                    params['rl'] = res_loc
+            condition = (data.get('condition') or '').strip()
+
+            if model_id:
+                where = ["model_id=:m"]; params = {'m': int(model_id)}
+                if condition_id: where.append("condition_id=:c"); params['c'] = int(condition_id)
+            else:
+                if not brand or not model:
+                    return resp_err('EXPAND_MISSING_MODEL', '缺少 model_id 或（品牌+型号）')
+                where = ["brand_name_zh=:b", "model_name=:m"]; params = {'b': brand, 'm': model}
+                if condition and condition != '全部': where.append("condition_name_zh=:cn"); params['cn'] = condition
+
             sql = f"""
-              SELECT model_id, condition_id, brand_name_zh, model_name,
-                     resistance_type_zh, resistance_location_zh,
-                     size, thickness,
-                     MAX(rpm) AS max_speed,
-                     MAX(airflow_cfm) AS max_airflow,
+              SELECT model_id, condition_id, brand_name_zh, model_name, condition_name_zh,
+                     size, thickness, MAX(rpm) AS max_speed, MAX(airflow_cfm) AS max_airflow,
                      COALESCE(MAX(like_count),0) AS like_count
               FROM general_view
               WHERE {" AND ".join(where)}
-              GROUP BY model_id, condition_id, brand_name_zh, model_name,
-                       resistance_type_zh, resistance_location_zh, size, thickness
-              ORDER BY model_id, condition_id"""
+              GROUP BY model_id, condition_id, brand_name_zh, model_name, condition_name_zh, size, thickness
+              ORDER BY model_id, condition_id
+            """
             rows = fetch_all(sql, params)
             items = []
             for r in rows:
                 items.append({
-                    'model_id': int(r['model_id']),
-                    'condition_id': int(r['condition_id']),
-                    'brand_name_zh': r['brand_name_zh'],
-                    'model_name': r['model_name'],
-                    'resistance_type_zh': r['resistance_type_zh'],
-                    'resistance_location_zh': r['resistance_location_zh'],
-                    'size': r['size'],
-                    'thickness': r['thickness'],
+                    'model_id': int(r['model_id']), 'condition_id': int(r['condition_id']),
+                    'brand_name_zh': r['brand_name_zh'], 'model_name': r['model_name'],
+                    'condition_name_zh': r['condition_name_zh'],
+                    'size': r['size'], 'thickness': r['thickness'],
                     'max_speed': r['max_speed'],
                     'max_airflow': float(r['max_airflow']) if r['max_airflow'] is not None else None,
                     'like_count': r['like_count'],
-                    # 兼容前端渲染：未限制情况下，标记为原始 rpm 最大点
                     'effective_airflow': float(r['max_airflow']) if r['max_airflow'] is not None else None,
-                    'effective_axis': 'rpm',
-                    'effective_x': r['max_speed'],
-                    'effective_source': 'raw'
+                    'effective_axis': 'rpm', 'effective_x': r['max_speed'], 'effective_source': 'raw'
                 })
             return resp_ok({'mode': 'expand', 'items': items, 'count': len(items)})
 
-        # Filter mode
-        res_type = (data.get('search_res_type') or '').strip()
-        res_loc = (data.get('search_res_loc') or '').strip()
+        # Filter mode（优先 condition_id）
+        condition_id = data.get('condition_id')
+        condition = (data.get('condition') or '').strip()
         size_filter = (data.get('size_filter') or '').strip()
         thickness_min = (data.get('thickness_min') or '').strip()
         thickness_max = (data.get('thickness_max') or '').strip()
         sort_by = (data.get('sort_by') or 'none').strip()
         sort_value_raw = (data.get('sort_value') or '').strip()
 
-        if not res_type:
-            return resp_err('SEARCH_MISSING_TYPE', '请选择风阻类型')
-        if res_type != '空载' and not res_loc:
-            return resp_err('SEARCH_MISSING_LOCATION', '请选择风阻位置')
+        # NEW: 参考价格区间（默认 0-999），仅 0~999 的整数
+        price_min_raw = (data.get('price_min') or '0').strip()
+        price_max_raw = (data.get('price_max') or '999').strip()
+
+        if not condition_id and not condition:
+            return resp_err('SEARCH_MISSING_CONDITION', '请选择工况名称')
 
         try:
-            tmin = int(thickness_min)
-            tmax = int(thickness_max)
+            tmin = int(thickness_min); tmax = int(thickness_max)
         except ValueError:
             return resp_err('SEARCH_INVALID_THICKNESS_FORMAT', '厚度必须为整数')
-        if tmin < 1 or tmax < 1 or tmin > 99 or tmax > 99 or tmin > tmax:
+        if tmin < 1 or tmax < 1 or tmin > 99 or tmin > tmax:
             return resp_err('SEARCH_INVALID_THICKNESS_RANGE', '厚度区间不合法 (1~99 且最小不大于最大)')
 
+        # NEW: 验证价格
+        try:
+            pmin = int(price_min_raw); pmax = int(price_max_raw)
+        except ValueError:
+            return resp_err('SEARCH_INVALID_PRICE_FORMAT', '参考价格必须为整数')
+        if pmin < 0 or pmax < 0 or pmin > 999 or pmax > 999 or pmin > pmax:
+            return resp_err('SEARCH_INVALID_PRICE_RANGE', '参考价格区间不合法 (0~999 且最小不大于最大)')
+        
         sort_value = None
         if sort_by != 'none':
-            if not sort_value_raw:
-                return resp_err('SEARCH_MISSING_SORT_VALUE', '请输入限制值')
-            try:
-                sort_value = float(sort_value_raw)
-            except ValueError:
-                return resp_err('SEARCH_INVALID_SORT_VALUE', '限制值必须是数字')
+            if not sort_value_raw: return resp_err('SEARCH_MISSING_SORT_VALUE', '请输入限制值')
+            try: sort_value = float(sort_value_raw)
+            except ValueError: return resp_err('SEARCH_INVALID_SORT_VALUE', '限制值必须是数字')
 
-        res_loc_filter = '' if res_type == '空载' else res_loc
-
-        # 新：后端评估有效点并排序
         results = search_fans_by_condition_with_fit(
-            res_type, res_loc_filter, sort_by, sort_value,
-            size_filter, tmin, tmax, limit=200
+            condition_id= int(condition_id) if condition_id else None,
+            condition_name= condition if (not condition_id) else None,
+            sort_by=sort_by, sort_value=sort_value,
+            size_filter=size_filter, thickness_min=tmin, thickness_max=tmax, 
+            price_min=pmin, price_max=pmax, 
+            limit=200
         )
 
         if sort_by == 'rpm':
@@ -1206,13 +1314,41 @@ def api_search_fans():
         app.logger.exception(e)
         return resp_err('INTERNAL_ERROR', f'搜索异常: {e}', 500)
 
+@app.get('/api/brands')
+def api_brands():
+    try:
+        rows = fetch_all("SELECT brand_id, brand_name_zh FROM fan_brand WHERE is_valid=1 ORDER BY brand_name_zh")
+        return resp_ok({'items': rows})
+    except Exception as e:
+        app.logger.exception(e); return resp_err('INTERNAL_ERROR', str(e), 500)
+
+@app.get('/api/models_by_brand')
+def api_models_by_brand():
+    try:
+        bid = int(request.args.get('brand_id') or '0')
+        if not bid: return resp_err('BAD_REQUEST', 'brand_id 缺失或非法')
+        rows = fetch_all("SELECT model_id, model_name FROM fan_model WHERE is_valid=1 AND brand_id=:b ORDER BY model_name", {'b': bid})
+        return resp_ok({'items': rows})
+    except Exception as e:
+        app.logger.exception(e); return resp_err('INTERNAL_ERROR', str(e), 500)
+
+@app.get('/api/conditions_by_model')
+def api_conditions_by_model():
+    try:
+        mid = int(request.args.get('model_id') or '0')
+        if not mid: return resp_err('BAD_REQUEST', 'model_id 缺失或非法')
+        rows = fetch_all("SELECT DISTINCT condition_id, condition_name_zh, resistance_type_zh, resistance_location_zh FROM general_view WHERE model_id=:m ORDER BY condition_name_zh", {'m': mid})
+        return resp_ok({'items': rows})
+    except Exception as e:
+        app.logger.exception(e); return resp_err('INTERNAL_ERROR', str(e), 500)
+    
 # =========================================
 # Rankings
 # =========================================
 @app.route('/api/top_ratings', methods=['GET'])
 def api_top_ratings():
     try:
-        data = get_top_ratings(limit=10)
+        data = get_top_ratings(limit=TOP_QUERIES_LIMIT)
         return resp_ok({'items': data})
     except Exception as e:
         app.logger.exception(e)
@@ -1278,34 +1414,25 @@ def legal():
 def index():
     brands_rows = fetch_all("SELECT DISTINCT brand_name_zh FROM fan_brand WHERE is_valid=1")
     brands = [r['brand_name_zh'] for r in brands_rows]
-    res_types_rows = fetch_all("SELECT DISTINCT resistance_type_zh FROM working_condition WHERE is_valid=1")
-    res_locs_rows = fetch_all("SELECT DISTINCT resistance_location_zh FROM working_condition WHERE is_valid=1")
-
+    conditions_rows = fetch_all("SELECT DISTINCT condition_name_zh FROM working_condition WHERE is_valid=1")
+    
+    # NEW: Pass the full structured data from get_top_queries to the template
     top_queries = get_top_queries(limit=TOP_QUERIES_LIMIT)
     top_ratings = get_top_ratings(limit=TOP_QUERIES_LIMIT)
 
-    # 1. 先生成 HTML 内容（和原来的 render_template 逻辑一致）
     html_content = render_template(
         'fancoolindex.html',
         brands=brands,
-        all_res_types=[r['resistance_type_zh'] for r in res_types_rows],
-        all_res_locs=[r['resistance_location_zh'] for r in res_locs_rows],
+        all_conditions=[r['condition_name_zh'] for r in conditions_rows],
         top_queries=top_queries,
         top_ratings=top_ratings,
         size_options=SIZE_OPTIONS,
         current_year=datetime.now().year
     )
-
-    # 2. 用 make_response 包装成响应对象
     response = make_response(html_content)
-
-    # 3. 新增：添加防缓存响应头（核心修改）
-    # 告诉浏览器：不缓存此 HTML，每次都请求最新版本
     response.headers['Cache-Control'] = 'no-store, no-cache, must-revalidate, proxy-revalidate'
-    response.headers['Expires'] = '0'  # 立即过期，不缓存
-    response.headers['Pragma'] = 'no-cache'  # 兼容旧浏览器（可选，增加可靠性）
-
-    # 4. 返回响应对象（代替原来直接返回 html_content）
+    response.headers['Expires'] = '0'
+    response.headers['Pragma'] = 'no-cache'
     return response
 
 # 3) 新增：近期更新 API（懒加载页签调用）

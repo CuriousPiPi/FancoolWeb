@@ -116,29 +116,15 @@
       }
     }
 
-    function addBackdrop() {
-      if (document.querySelector('.sidebar-overlay-backdrop')) {
-        requestAnimationFrame(()=>document.querySelector('.sidebar-overlay-backdrop')?.classList.add('is-visible'));
-        return;
-      }
-      const bd = document.createElement('div');
-      bd.className = 'sidebar-overlay-backdrop';
-      bd.addEventListener('click', () => window.__APP.sidebar.close());
-      document.body.appendChild(bd);
-      requestAnimationFrame(()=>bd.classList.add('is-visible'));
-    }
-    function removeBackdrop() {
-      const bd = document.querySelector('.sidebar-overlay-backdrop');
-      if (!bd) return;
-      bd.classList.remove('is-visible');
-      setTimeout(()=>bd.remove(), 220);
-    }
+    // 改为 no-op：不再创建/移除遮罩层
+    function addBackdrop() { /* no-op */ }
+    function removeBackdrop() { /* no-op */ }
 
     function overlayOpenSidebar() {
       if (!isOverlayMode()) return;
       if (!sidebar) return;
       sidebar.classList.remove('collapsed');
-      addBackdrop();
+      addBackdrop();              // 现在为 no-op
       lockBodyScroll();
       ensureGestureZone();
       a11yFocusTrap.activate(sidebar);
@@ -149,7 +135,7 @@
       if (!sidebar) return;
       if (!sidebar.classList.contains('collapsed')) {
         sidebar.classList.add('collapsed');
-        removeBackdrop();
+        removeBackdrop();         // 现在为 no-op
         unlockBodyScroll();
         a11yFocusTrap.deactivate();
         const mc = document.getElementById('main-content');
@@ -667,7 +653,7 @@
     });
   })();
 
-  // 记录用户是否点击过侧栏按钮/自动展开
+  // 记录用户是否点击过侧栏按钮/自动展开（迁入侧栏，主 JS 删除同名定义）
   const LS_KEY_SIDEBAR_TOGGLE_CLICKED = 'sidebar_toggle_clicked';
   function markSidebarToggleClicked(){
     try { localStorage.setItem(LS_KEY_SIDEBAR_TOGGLE_CLICKED, '1'); } catch(_) {}
