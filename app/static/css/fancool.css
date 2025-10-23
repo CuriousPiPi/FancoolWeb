@@ -270,6 +270,15 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
   font-size:14px;
 }
 .fc-btn-icon-add i { font-size:18px; line-height:1; }
+/* 新增：图标旋转过渡（add=0deg / remove=45deg），使用 transform 不影响布局 */
+.fc-btn-icon-add i {
+  transition: transform .22s cubic-bezier(.22,.7,.26,1);
+  transform: rotate(0deg);
+}
+/* remove 态旋转 45°；颜色仍用既有的 data-mode 样式控制 */
+.fc-btn-icon-add[data-mode="remove"] i {
+  transform: rotate(45deg);
+}
 .fc-btn-icon-add:hover { transform:translateY(-1px); color:var(--fc-color-success-hover)!important; }
 .fc-btn-icon-add[data-mode="remove"] { color:var(--fc-color-danger)!important; }
 .fc-btn-icon-add[data-mode="remove"]:hover { color:var(--fc-color-danger-hover)!important; }
@@ -278,6 +287,10 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
 [data-theme="dark"] .fc-btn-icon-add:hover { color:var(--brand-green-dark-hover)!important; }
 [data-theme="dark"] .fc-btn-icon-add[data-mode="remove"] { color:var(--fc-color-danger)!important; }
 [data-theme="dark"] .fc-btn-icon-add[data-mode="remove"]:hover { color:#ef4444!important; }
+
+@media (prefers-reduced-motion: reduce) {
+  .fc-btn-icon-add i { transition: none !important; }
+}
 
 .fc-icon-restore { color:var(--fc-color-success)!important; }
 .fc-icon-restore:hover { color:var(--fc-color-success-hover)!important; }

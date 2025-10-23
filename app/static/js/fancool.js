@@ -1021,7 +1021,7 @@ function rebuildSelectedIndex(){
 rebuildSelectedIndex();
 rebuildSelectedPairIndex();
 
-// CHANGED: 快捷按钮 HTML 生成，优先用 (model_id, condition_id) 判断是否已存在
+// CHANGED: 快捷按钮 HTML 生成，始终输出“加号”图标，旋转由 CSS 决定
 function buildQuickBtnHTML(addType, brand, model, modelId, conditionId, condition, logSource){
   const mapKey = `${escapeHtml(brand)}||${escapeHtml(model)}||${escapeHtml(condition||'')}`;
   const hasIds = (modelId != null && conditionId != null && String(modelId) !== '' && String(conditionId) !== '');
@@ -1031,7 +1031,8 @@ function buildQuickBtnHTML(addType, brand, model, modelId, conditionId, conditio
 
   const mode = isDup ? 'remove' : 'add';
   const tipText = isDup ? '从图表移除' : '添加到图表';
-  const icon = isDup ? '<i class="fa-solid fa-xmark"></i>' : '<i class="fa-solid fa-plus"></i>';
+  // 始终用加号，视觉“X”通过旋转得到（见 CSS）
+  const icon = '<i class="fa-solid fa-plus"></i>';
   const defaultSourceMap = { likes:'liked', rating:'top_rating', ranking:'top_query', search:'search' };
   const sourceAttr = logSource || defaultSourceMap[addType] || 'unknown';
 
@@ -1057,14 +1058,22 @@ function buildQuickBtnHTML(addType, brand, model, modelId, conditionId, conditio
     </button>`;
 }
 
+// CHANGED: 状态切换不再改成 X；确保始终是 “+”，旋转交给 CSS
 function toRemoveState(btn){
   btn.dataset.mode='remove';
   btn.classList.remove('js-ranking-add','js-rating-add','js-search-add','js-likes-add');
   btn.classList.add('js-list-remove');
   btn.setAttribute('data-tooltip','从图表移除');
   btn.removeAttribute('title');
-  btn.innerHTML='<i class="fa-solid fa-xmark"></i>';
+  // 统一图标为 “+” ，旋转由 [data-mode="remove"] 控制
+  if (!btn.querySelector('i')) {
+    btn.innerHTML = '<i class="fa-solid fa-plus"></i>';
+  } else {
+    const ic = btn.querySelector('i');
+    ic.className = 'fa-solid fa-plus';
+  }
 }
+
 function toAddState(btn){
   const addType = btn.dataset.addType || (btn.classList.contains('js-rating-add')?'rating'
     : btn.classList.contains('js-ranking-add')?'ranking'
@@ -1076,8 +1085,15 @@ function toAddState(btn){
       : addType==='search'?'js-search-add':'js-likes-add');
   btn.setAttribute('data-tooltip','添加到图表');
   btn.removeAttribute('title');
-  btn.innerHTML='<i class="fa-solid fa-plus"></i>';
+  // 统一图标为 “+”
+  if (!btn.querySelector('i')) {
+    btn.innerHTML = '<i class="fa-solid fa-plus"></i>';
+  } else {
+    const ic = btn.querySelector('i');
+    ic.className = 'fa-solid fa-plus';
+  }
 }
+
 function mapKeyFromDataset(d){
   const b = unescapeHtml(d.brand||'');
   const m = unescapeHtml(d.model||'');
