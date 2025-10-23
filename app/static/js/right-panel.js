@@ -16,7 +16,7 @@
   let segSearchEl  = null;
   let __HOT_COL_LOCKED_W = null;
 
-  const ANIM = { rowMs: 240,
+  const ANIM = { rowMs: 500,
                 rowEase: 'ease',
                 fadeOutMs: 200,
                 fadeInMs: 220,
@@ -189,7 +189,7 @@ function computeAndLockHotColWidth(table){
   // 初始化并锁定所有相关表格的热门工况列宽（支持延迟渲染）
   function initAndLockHotColWidthsOnce(){
     const tables = Array.from(document.querySelectorAll('.fc-right-card .fc-rank-table'));
-  
+
     // 先用“可见”的表（通常是查询榜）计算一次
     const visibleTables = tables.filter(t => t.offsetParent !== null);
     let anyLocked = false;
@@ -200,7 +200,7 @@ function computeAndLockHotColWidth(table){
     if (anyLocked) {
       propagateHotColWidthToAllTables(); // 立即把查询榜的宽度复用到好评榜
     }
-  
+
     // 对尚未锁定的表，监听一次数据注入后锁定；若期间已有全局宽度，则直接传播并停止监听
     tables.forEach(table => {
       if (table.dataset.hotColLocked === '1') return;
@@ -323,7 +323,86 @@ function computeAndLockHotColWidth(table){
   }
 
   /* ===== 查询榜/好评榜：展开/收起 ===== */
+  // 新增：收起时耦合 transform 与 scrollTop 的单轨动画（避免“先超额上移后回弹”）
+  function animateCollapseFollowersPinned({
+    scroller,
+    followers,
+    totalDelta,     // HExact
+    freeSpacePx,    // 初始容器底部可用空间
+    duration = ANIM.rowMs,
+    onDone = () => {}
+  }) {
+    if (!followers || !followers.length || !isFinite(totalDelta) || totalDelta <= 0) {
+      onDone(); return;
+    }
+    const easeInOut = (t)=> t<.5 ? (2*t*t) : (1 - Math.pow(-2*t+2,2)/2);
 
+    // 预设样式
+    followers.forEach(el => {
+      el.classList.add('fc-row-animating');
+      el.style.transition = 'none';
+      el.style.transform  = 'translate3d(0,0,0)';
+      el.style.willChange = 'transform';
+    });
+
+    // 追踪遮罩（与现有展开逻辑一致）
+    startRowMaskTracking(followers);
+
+    const startTop = scroller ? scroller.scrollTop : 0;
+    const maxScrollable = startTop; // 可减少的最大 scrollTop
+    let startTs = 0;
+    let raf = 0;
+    let finished = false;
+
+    function applyFrame(progressDelta) {
+      // 进度（要上移的总量）
+      const current = Math.min(totalDelta, progressDelta);
+
+      // 未超过 freeSpace 时，不滚动，只用 transform
+      if (current <= freeSpacePx) {
+        const ty = -current;
+        followers.forEach(el => { el.style.transform = `translate3d(0, ${ty}px, 0)`; });
+        if (scroller) clampScrollTop(scroller, startTop);
+        return;
+      }
+
+      // 超过 freeSpace 后，优先用 scrollTop 承担 over，直到触顶
+      const over = current - freeSpacePx;
+      const appliedScroll = Math.min(over, maxScrollable); // 触顶前不断增加，触顶后固定
+      const ty = -(current - appliedScroll); // 触顶前恰为 -freeSpacePx，触顶后继续由 transform 承担剩余位移
+
+      followers.forEach(el => { el.style.transform = `translate3d(0, ${ty}px, 0)`; });
+      if (scroller) clampScrollTop(scroller, startTop - appliedScroll);
+    }
+
+    function frame(ts) {
+      if (!startTs) startTs = ts;
+      const k = Math.min(1, (ts - startTs) / Math.max(1, duration));
+      const e = easeInOut(k);
+      applyFrame(totalDelta * e);
+
+      if (k < 1) {
+        raf = requestAnimationFrame(frame);
+      } else {
+        if (finished) return;
+        finished = true;
+
+        // 结束：清理样式
+        followers.forEach(el => {
+          el.style.transition = 'none';
+          el.style.transform  = '';
+          el.style.willChange = '';
+          el.classList.remove('fc-row-animating');
+          // 下一帧再清空 transition，避免 reflow 卡顿
+          requestAnimationFrame(()=>{ el.style.transition=''; });
+        });
+        stopRowMaskTracking();
+        onDone();
+      }
+    }
+
+    raf = requestAnimationFrame(frame);
+  }
   // 计算父行第 6 列文本起点和第 7 列 padding-left，并写到表级 CSS 变量
   function setSubrowAnchorVar(parentTr){
     try {
@@ -817,7 +896,52 @@ async function expandRow(btn){
   if (typeof syncQuickActionButtons === 'function') syncQuickActionButtons();
 }
 
-// REPLACE: collapseRow —— 融合“最后一行收起：容器平滑移动后再移除子行”
+// 1) 严格钉底版 collapse 动画：全程 netY = -(current - appliedScroll)，不可能出现“向下走”
+function animateCollapseFollowersPinnedStrict({
+  scroller,
+  followers,
+  totalDelta,
+  freeSpacePx,
+  duration = ANIM.rowMs,
+  onDone = () => {}
+}) {
+  if (!followers || !followers.length || !isFinite(totalDelta) || totalDelta <= 0) { onDone(); return; }
+  const easeInOut = (t)=> t<.5 ? (2*t*t) : (1 - Math.pow(-2*t+2,2)/2);
+
+  followers.forEach(el => { el.classList.add('fc-row-animating'); el.style.transition='none'; el.style.transform='translate3d(0,0,0)'; el.style.willChange='transform'; });
+  startRowMaskTracking(followers);
+
+  const startTop = scroller ? scroller.scrollTop : 0;
+  const maxScrollable = startTop;
+  let startTs = 0;
+
+  function frame(ts){
+    if (!startTs) startTs = ts;
+    const k = Math.min(1, (ts - startTs) / Math.max(1, duration));
+    const current = totalDelta * easeInOut(k);
+
+    const over = Math.max(0, current - (freeSpacePx || 0));
+    const appliedScroll = scroller ? Math.min(over, maxScrollable) : 0;
+    if (scroller) clampScrollTop(scroller, startTop - appliedScroll);
+
+    // 关键：transform 总是 -current（不要减 appliedScroll）
+    const tyStr = `translate3d(0, ${-current}px, 0)`;
+    followers.forEach(el => { el.style.transform = tyStr; });
+
+    if (k < 1) requestAnimationFrame(frame);
+    else {
+      stopRowMaskTracking();
+      onDone();
+      followers.forEach(el => {
+        el.style.transition='none'; el.style.transform=''; el.style.willChange=''; el.classList.remove('fc-row-animating');
+        requestAnimationFrame(()=>{ el.style.transition=''; });
+      });
+    }
+  }
+  requestAnimationFrame(frame);
+}
+
+// 2) collapseRow 的“非最后一行”分支替换为严格钉底 + 收尾补偿
 function collapseRow(btn){
   const tr = safeClosest(btn, 'tr'); if (!tr) return;
   if (isRowAnimating(tr)) return;
@@ -831,10 +955,11 @@ function collapseRow(btn){
   if (!subrows.length) {
     toggleParentHotCondAndAction(tr, false);
     unlock();
-    btn.setAttribute('aria-expanded','false'); btn.removeAttribute('title'); btn.classList.remove('is-open'); return;
+    btn.setAttribute('aria-expanded','false'); btn.classList.remove('is-open'); btn.removeAttribute('title');
+    return;
   }
 
-  // 预先接力：父→子
+  // 预接力（修正这里两个选择器的笔误：去掉末尾的 ]）
   const firstSub = subrows[0] || null;
   let fromDyLabel = null, fromDyBtn = null;
   if (firstSub) {
@@ -846,12 +971,11 @@ function collapseRow(btn){
     if (pLabel && cLabel) {
       const pr = pLabel.getBoundingClientRect();
       const cr = cLabel.getBoundingClientRect();
-      const pCenter = pr.top + pr.height/2;
-      const cCenter = cr.top + cr.height/2;
-      fromDyLabel = Math.round((cCenter - pCenter));
+      fromDyLabel = Math.round((cr.top + cr.height/2) - (pr.top + pr.height/2));
       addClip(firstSub.querySelector('td[colspan]'));
       cLabel.style.transition = `transform ${ANIM.rowMs}ms ${ANIM.rowEase}`;
-      cLabel.style.transform  = `translateY(${Math.round((pCenter - cCenter))}px)`;
+      cLabel.style.transform  = `translateY(${Math.round((pr.top + pr.height/2) - (cr.top + cr.height/2))}px)`;
+      setTimeout(()=>{ removeClip(firstSub.querySelector('td[colspan]')); cLabel.style.transition=''; cLabel.style.transform=''; }, ANIM.rowMs + ANIM.cleanupMs);
     }
     if (pBtn && cBtn) {
       const prb = pBtn.getBoundingClientRect();
@@ -860,24 +984,18 @@ function collapseRow(btn){
       addClip(firstSub.querySelector('td:last-child'));
       cBtn.style.transition = `transform ${ANIM.rowMs}ms ${ANIM.rowEase}`;
       cBtn.style.transform  = `translateY(${Math.round(prb.top - crb.top)}px)`;
+      setTimeout(()=>{ removeClip(firstSub.querySelector('td:last-child')); cBtn.style.transition=''; cBtn.style.transform=''; }, ANIM.rowMs + ANIM.cleanupMs);
     }
-
-    setTimeout(()=> {
-      removeClip(firstSub.querySelector('td[colspan]'));
-      removeClip(firstSub.querySelector('td:last-child'));
-      if (cLabel){ cLabel.style.transition=''; cLabel.style.transform=''; }
-      if (cBtn){   cBtn.style.transition='';   cBtn.style.transform=''; }
-    }, ANIM.rowMs + ANIM.cleanupMs);
   }
 
-  // 将要减少的总高度
+  // 子行总高度
   let HExact = 0; for (const sr of subrows) HExact += sr.getBoundingClientRect().height;
   if (!isFinite(HExact) || HExact<=0) {
     const v = getComputedStyle(document.documentElement).getPropertyValue('--subrow-h').trim();
     const h = parseFloat(v) || 26; HExact = h * subrows.length;
   }
 
-  // 父行接力入场
+  // 父行接力（保持）
   toggleParentHotCondAndAction(tr, false, {
     mode:'relay',
     duration: ANIM.rowMs,
@@ -886,75 +1004,52 @@ function collapseRow(btn){
     fromDyBtn
   });
 
-  // 判断是否“最后一行”
+  // 是否“最后一行”的分支
   const lastSub = subrows[subrows.length - 1];
   const followers = collectFollowersAfter(lastSub);
   const isLastMainRow = followers.length === 0;
 
   if (isLastMainRow) {
-    // 最后一行：绝对量平滑滚动，结束后再移除子行
     if (scroller) {
-      collapseLastRowWithMask(tr, scroller, subrows, ANIM.rowMs, () => {
-        unlock();
-      });
+      collapseLastRowWithMask(tr, scroller, subrows, ANIM.rowMs, () => { unlock(); });
     } else {
       setTimeout(() => { subrows.forEach(sr => sr.remove()); unlock(); }, ANIM.rowMs + ANIM.cleanupMs);
     }
   } else {
-    // 非最后一行：动态阈值滚动 + followers 上移动画
+    // 计算初始 freeSpace（以“最后一条主行”底边为基准）
+    let freeSpacePx = 0;
     if (scroller) {
       const scRect = scroller.getBoundingClientRect();
       const lastMain = getLastMainRow(tr);
       if (lastMain) {
         const lmRect = lastMain.getBoundingClientRect();
-        const freeSpacePx = Math.max(0, Math.round(scRect.bottom - lmRect.bottom));
-        startTrackScrollPinDynamicCollapse(scroller, HExact, freeSpacePx);
+        // gap > 0: 最后一行在容器底部之下；gap < 0: 最后一行在容器内且“离底部的空隙”= -gap
+        const gap = Math.round(lmRect.bottom - scRect.bottom);
+        freeSpacePx = Math.abs(gap);
       }
     }
 
-    followers.forEach(el => { 
-      el.classList.add('fc-row-animating'); 
-      el.style.transition='none'; 
-      el.style.transform='translate3d(0,0,0)'; 
-      el.style.willChange='transform'; 
-    });
-    void document.body.offsetWidth;
-
-    startRowMaskTracking(followers);
-    requestAnimationFrame(() => {
-      followers.forEach(el => {
-        el.style.transition = `transform ${ANIM.rowMs}ms ${ANIM.rowEase}`;
-        el.style.transform = `translate3d(0, ${-HExact}px, 0)`;
-      });
-
-      let rest = followers.length, fired = false;
-      const done = () => {
-        if (fired) return; fired = true;
+    // 严格钉底推进；动画结束后移除子行并解锁；不要再改 scrollTop
+    animateCollapseFollowersPinnedStrict({
+      scroller,
+      followers,
+      totalDelta: HExact,
+      freeSpacePx,
+      duration: ANIM.rowMs,
+      onDone: () => {
         subrows.forEach(sr => sr.remove());
-        void document.body.offsetWidth;
         requestAnimationFrame(() => {
-          followers.forEach(el => {
-            el.style.transition = 'none'; el.style.transform = ''; el.style.willChange = '';
-            el.classList.remove('fc-row-animating');
-            requestAnimationFrame(() => { el.style.transition = ''; });
-          });
-          stopRowMaskTracking();
-          unlock();
+          followers.forEach(el => { el.style.transition = 'none'; el.style.transform = ''; el.style.willChange = ''; el.classList.remove('fc-row-animating'); });
+          requestAnimationFrame(() => { followers.forEach(el => { el.style.transition = ''; }); unlock(); });
         });
-      };
-      const onEnd = (e) => {
-        if (e.propertyName !== 'transform') return;
-        e.currentTarget.removeEventListener('transitionend', onEnd);
-        if (--rest === 0) done();
-      };
-      followers.forEach(el => el.addEventListener('transitionend', onEnd));
-      setTimeout(done, ANIM.rowMs + ANIM.guardMs);
+      }
     });
   }
 
   btn.setAttribute('aria-expanded','false');
-  btn.removeAttribute('title'); btn.classList.remove('is-open');
-  }
+  btn.classList.remove('is-open');
+  btn.removeAttribute('title');
+}
 
   document.addEventListener('click', (e)=>{
       const toggle = safeClosest(e.target, '.fc-expand-toggle');
