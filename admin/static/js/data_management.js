@@ -405,138 +405,223 @@ if(modelEditForm){
 
 /* ====================== 添加工况 ====================== */
 const condForm=$('#condForm'), condMsg=$('#condMsg'), condSubmitBtn=$('#condSubmitBtn');
+const condNameInp = $('#condName'), rtZhInp = $('#rtZh'), rtEnInp = $('#rtEn'), rtLocSel = $('#rtLoc');
+
+// 即时唯一性校验：工况名
+let nameChkTimer=null;
+function checkCondNameUnique(name, excludeId){
+  if(!name){ condMsg.textContent=''; return; }
+  const url = `/admin/api/data/condition/name-exist?name=${encodeURIComponent(name)}${excludeId?`&exclude_id=${excludeId}`:''}`;
+  return fetch(url).then(r=>r.json()).then(j=>{
+    if(j.success && j.data.exists){
+      condMsg.className='err';
+      condMsg.textContent='该工况名称已存在';
+      return false;
+    } else {
+      if(condMsg.textContent==='该工况名称已存在'){ condMsg.textContent=''; }
+      return true;
+    }
+  }).catch(()=>true);
+}
+if(condNameInp){
+  condNameInp.addEventListener('input', ()=>{
+    if(nameChkTimer) clearTimeout(nameChkTimer);
+    nameChkTimer = setTimeout(()=>{ checkCondNameUnique(condNameInp.value.trim()); }, 300);
+  });
+}
+
+// 即时唯一性校验：类型中文 + 位置 组合
+let combChkTimer=null;
+function checkCondCombUnique(tzh, lzh, excludeId){
+  if(!tzh || !lzh){ return Promise.resolve(true); }
+  const url = `/admin/api/data/condition/comb-exist?type_zh=${encodeURIComponent(tzh)}&location_zh=${encodeURIComponent(lzh)}${excludeId?`&exclude_id=${excludeId}`:''}`;
+  return fetch(url).then(r=>r.json()).then(j=>{
+    if(j.success && j.data.exists){
+      condMsg.className='err';
+      condMsg.textContent='已存在该组合';
+      return false;
+    } else {
+      if(condMsg.textContent==='已存在该组合'){ condMsg.textContent=''; }
+      return true;
+    }
+  }).catch(()=>true);
+}
+[rtZhInp, rtLocSel].forEach(el=>{
+  el && el.addEventListener('change', ()=>{ 
+    checkCondCombUnique(rtZhInp.value.trim(), rtLocSel.value.trim());
+  });
+});
+
 if(condForm){
   condForm.addEventListener('submit', async e=>{
     e.preventDefault(); condMsg.textContent=''; condMsg.className=''; condSubmitBtn.disabled=true;
-    const zh=$('#rtZh').value.trim(), en=$('#rtEn').value.trim();
+    const nameZh=condNameInp?.value.trim() || '';
+    const zh=rtZhInp.value.trim(), en=rtEnInp.value.trim(), loc=rtLocSel.value.trim();
     const condIsValid = parseInt($('#condIsValid')?.value || '0', 10);
-    if(!zh||!en){ condMsg.className='err'; condMsg.textContent='风阻类型中文与英文均为必填'; condSubmitBtn.disabled=false; return; }
+    if(!nameZh || !zh || !en || !loc){
+      condMsg.className='err'; condMsg.textContent='请完善必填项'; condSubmitBtn.disabled=false; return;
+    }
+    // 提交前再次校验唯一性
+    const okName = await checkCondNameUnique(nameZh);
+    const okComb = await checkCondCombUnique(zh, loc);
+    if(!okName || !okComb){ condSubmitBtn.disabled=false; return; }
+
     try{
       const r=await fetch('/admin/api/data/condition/add',{
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({resistance_type_zh:zh,resistance_type_en:en, is_valid: condIsValid})
+        body:JSON.stringify({
+          condition_name_zh:nameZh,
+          resistance_type_zh:zh,
+          resistance_type_en:en,
+          resistance_location_zh:loc,
+          is_valid: condIsValid
+        })
       });
       const j=await r.json();
-      if(j.success){ condMsg.className='ok'; condMsg.textContent=`添加成功，condition_id：${(j.data.condition_ids||[]).join(', ')}`; }
-      else { condMsg.className='err'; condMsg.textContent=j.error_message||'提交失败'; }
-    }catch{ condMsg.className='err'; condMsg.textContent='网络或服务器错误'; } finally{ condSubmitBtn.disabled=false; }
+      if(j.success){
+        condMsg.className='ok';
+        condMsg.textContent=`添加成功，condition_id：${j.data.condition_id}`;
+        // 可选：清空输入
+        // condForm.reset();
+      } else {
+        condMsg.className='err'; condMsg.textContent=j.error_message||'提交失败';
+      }
+    }catch{
+      condMsg.className='err'; condMsg.textContent='网络或服务器错误';
+    } finally{ condSubmitBtn.disabled=false; }
   });
 }
 
-/* ====================== 工况管理：编辑 ====================== */
+/* ====================== 工况管理：编辑（改为单条记录） ====================== */
 const cmAdd = $('#cmAdd'), cmEdit = $('#cmEdit');
 const condAddBox = $('#condAddBox'), condEditBox = $('#condEditBox');
 if(cmAdd && cmEdit){
   const updateBoxes=()=>{ const m = document.querySelector('input[name="condMgmtMode"]:checked')?.value || 'add'; if(m==='add'){ condAddBox.style.display=''; condEditBox.style.display='none'; } else { condAddBox.style.display='none'; condEditBox.style.display=''; initConditionEditList(); } };
   cmAdd.addEventListener('change',updateBoxes); cmEdit.addEventListener('change',updateBoxes); updateBoxes();
 }
+
 const condEditInput=$('#condEditInput'), condEditOptions=$('#condEditOptions'), condEditHint=$('#condEditHint');
-const condOutId=$('#condOutId'), condInId=$('#condInId'), rtZhEdit=$('#rtZhEdit'), rtEnEdit=$('#rtEnEdit'), condEditIsValidOut=$('#condEditIsValidOut'), condEditIsValidIn=$('#condEditIsValidIn');
-const condEditForm=$('#condEditForm'), condEditSubmitBtn=$('#condEditSubmitBtn'), condEditMsg=$('#condEditMsg');
+const condEditId=$('#condEditId'), condNameEdit=$('#condNameEdit'), rtZhEdit=$('#rtZhEdit'), rtEnEdit=$('#rtEnEdit'), rtLocEdit=$('#rtLocEdit');
+const condEditForm=$('#condEditForm'), condEditSubmitBtn=$('#condEditSubmitBtn'), condEditMsg=$('#condEditMsg'), condEditIsValid=$('#condEditIsValid');
 
 let condTypesCache=[];
 async function initConditionEditList(){
   try{
+    if(condEditInput){ condEditInput.style.minWidth = '680px'; } // 更宽以展示更长标签
     const r=await fetch('/admin/api/data/condition/types'); const j=await r.json();
-    if(j.success){ condTypesCache=j.data.items||[]; condEditOptions.innerHTML=''; condTypesCache.forEach(it=>{ const opt=document.createElement('option'); opt.value = it.label; opt.dataset.tzh = it.type_zh; opt.dataset.ten = it.type_en; condEditOptions.appendChild(opt); }); }
+    if(j.success){
+      condTypesCache=j.data.items||[];
+      condEditOptions.innerHTML='';
+      condTypesCache.forEach(it=>{
+        const opt=document.createElement('option');
+        opt.value = it.label;              // 形如：名称 - 类型中/英 - 位置中 - 位置英
+        opt.dataset.cid = it.condition_id; // 直接选定具体记录
+        condEditOptions.appendChild(opt);
+      });
+    }
   }catch{}
 }
 function setCondEditEnabled(en){
-  if(en){ condEditForm.classList.remove('disabled'); [...condEditForm.querySelectorAll('input,select,button')].forEach(el=>el.disabled=false);}
+  if(en){ condEditForm.classList.remove('disabled'); [...condEditForm.querySelectorAll('input,select,button')].forEach(el=>el.disabled=false); }
   else { condEditForm.classList.add('disabled'); [...condEditForm.querySelectorAll('input,select,button')].forEach(el=>{ if(el.id!=='condEditSubmitBtn'){ el.value=''; } el.disabled=true; }); condEditMsg.textContent=''; }
 }
 setCondEditEnabled(false);
+
+async function loadConditionDetail(cid){
+  try{
+    const r=await fetch(`/admin/api/data/condition/detail?condition_id=${cid}`);
+    const j=await r.json();
+    if(!j.success){ condEditMsg.className='err'; condEditMsg.textContent=j.error_message||'加载失败'; setCondEditEnabled(false); return; }
+    const d=j.data;
+    condEditId.value = String(d.condition_id);
+    condNameEdit.value = d.condition_name_zh || '';
+    rtZhEdit.value = d.resistance_type_zh || '';
+    rtEnEdit.value = d.resistance_type_en || '';
+    rtLocEdit.value = d.resistance_location_zh || '';
+    condEditIsValid.value = String(d.is_valid ?? 0);
+    setCondEditEnabled(true); condEditMsg.textContent='';
+  }catch{
+    condEditMsg.className='err'; condEditMsg.textContent='网络或服务器错误'; setCondEditEnabled(false);
+  }
+}
 function commitPickCondition(){
   const v = (condEditInput.value||'').trim();
   const opt = [...condEditOptions.children].find(o=>o.value===v);
-  if(!opt){ condOutId.value=''; condInId.value=''; setCondEditEnabled(false); condEditHint.textContent='未选择工况'; return false; }
-  loadConditionTypeDetail(opt.dataset.tzh, opt.dataset.ten);
+  if(!opt){ condEditId.value=''; setCondEditEnabled(false); condEditHint.textContent='未选择工况'; return false; }
+  const cid = parseInt(opt.dataset.cid, 10);
   condEditHint.textContent = `已选择：${v}`;
+  loadConditionDetail(cid);
   return true;
 }
 if(condEditInput){
   condEditInput.addEventListener('change', commitPickCondition);
   condEditInput.addEventListener('input', ()=>{ if(!condEditInput.value.trim()){ setCondEditEnabled(false); condEditHint.textContent='未选择工况'; }});
 }
-async function loadConditionTypeDetail(tzh, ten){
-  try{
-    const r=await fetch(`/admin/api/data/condition/type-detail?type_zh=${encodeURIComponent(tzh)}&type_en=${encodeURIComponent(ten)}`);
-    const j=await r.json();
-    if(!j.success){ condEditMsg.className='err'; condEditMsg.textContent=j.error_message||'加载失败'; setCondEditEnabled(false); return; }
-    const d=j.data;
-    // 名称
-    rtZhEdit.value = d.type_zh || '';
-    rtEnEdit.value = d.type_en || '';
 
-    // 单一模式开关（空载/No Load）
-    const single = (d.single === 1) || (!!d.single_condition && !d.outlet && !d.inlet);
-    // ids 与 is_valid
-    if(single){
-      // 使用“出风控件”作为单一 is_valid 控件，隐藏“进风控件”
-      const singleId = d.single_condition?.condition_id || d.outlet?.condition_id || d.inlet?.condition_id || '';
-      const singleValid = d.single_condition?.is_valid ?? d.outlet?.is_valid ?? d.inlet?.is_valid ?? 0;
-      condOutId.value = singleId ? String(singleId) : '';
-      condInId.value = ''; // 清空
-      condEditIsValidOut.value = String(singleValid ?? 0);
-
-      // 隐藏右侧“进风”块
-      const inWrap = condEditIsValidIn.closest('div');
-      if(inWrap) inWrap.style.display='none';
-      // 调整左侧标签
-      const outLabel = condEditIsValidOut.closest('div')?.querySelector('label');
-      if(outLabel) outLabel.textContent = 'is_valid';
-
-    }else{
-      // 常规双向
-      condOutId.value = d.outlet?.condition_id || '';
-      condInId.value  = d.inlet?.condition_id || '';
-      condEditIsValidOut.value = String(d.outlet?.is_valid ?? 0);
-      condEditIsValidIn.value  = String(d.inlet?.is_valid ?? 0);
-
-      // 还原显示与标签
-      const inWrap = condEditIsValidIn.closest('div');
-      if(inWrap) inWrap.style.display='';
-      const outLabel = condEditIsValidOut.closest('div')?.querySelector('label');
-      if(outLabel) outLabel.textContent = '出风 is_valid';
-    }
-
-    // 缓存模式标志
-    loadConditionTypeDetail._singleMode = !!single;
-
-    setCondEditEnabled(true); condEditMsg.textContent='';
-  }catch{ condEditMsg.className='err'; condEditMsg.textContent='网络或服务器错误'; setCondEditEnabled(false); }
+// 编辑页即时唯一性校验（与添加一致，但排除自身）
+let editNameChkTimer=null;
+if(condNameEdit){
+  condNameEdit.addEventListener('input', ()=>{
+    if(editNameChkTimer) clearTimeout(editNameChkTimer);
+    editNameChkTimer = setTimeout(()=>{
+      const eid = parseInt(condEditId.value||'0',10) || 0;
+      fetch(`/admin/api/data/condition/name-exist?name=${encodeURIComponent(condNameEdit.value.trim())}&exclude_id=${eid}`)
+        .then(r=>r.json()).then(j=>{
+          if(j.success && j.data.exists){ condEditMsg.className='err'; condEditMsg.textContent='该工况名称已存在'; }
+          else if(condEditMsg.textContent==='该工况名称已存在'){ condEditMsg.textContent=''; }
+        }).catch(()=>{});
+    }, 300);
+  });
 }
+[rtZhEdit, rtLocEdit].forEach(el=>{
+  el && el.addEventListener('change', ()=>{
+    const eid = parseInt(condEditId.value||'0',10) || 0;
+    const t = rtZhEdit.value.trim(), l = rtLocEdit.value.trim();
+    if(!t || !l) return;
+    fetch(`/admin/api/data/condition/comb-exist?type_zh=${encodeURIComponent(t)}&location_zh=${encodeURIComponent(l)}&exclude_id=${eid}`)
+      .then(r=>r.json()).then(j=>{
+        if(j.success && j.data.exists){ condEditMsg.className='err'; condEditMsg.textContent='已存在该组合'; }
+        else if(condEditMsg.textContent==='已存在该组合'){ condEditMsg.textContent=''; }
+      }).catch(()=>{});
+  });
+});
 
 if(condEditForm){
   condEditForm.addEventListener('submit', async e=>{
     e.preventDefault(); condEditMsg.textContent=''; condEditMsg.className=''; condEditSubmitBtn.disabled=true;
-    const singleMode = !!loadConditionTypeDetail._singleMode;
-    const outId=parseInt(condOutId.value||'0',10), inId=parseInt(condInId.value||'0',10);
-    const zh = rtZhEdit.value.trim(), en = rtEnEdit.value.trim();
-    const vOut = parseInt(condEditIsValidOut.value||'0',10), vIn = parseInt(condEditIsValidIn.value||'0',10);
+    const cid=parseInt(condEditId.value||'0',10);
+    const nameZh = condNameEdit.value.trim();
+    const zh = rtZhEdit.value.trim(), en = rtEnEdit.value.trim(), loc = rtLocEdit.value.trim();
+    const v = parseInt(condEditIsValid.value||'0',10);
 
-    if(singleMode){
-      if(outId<=0){ condEditMsg.className='err'; condEditMsg.textContent='未正确加载记录'; condEditSubmitBtn.disabled=false; return; }
-      if(!zh || !en){ condEditMsg.className='err'; condEditMsg.textContent='请填写完整的中英文名称'; condEditSubmitBtn.disabled=false; return; }
-      if(!confirm(`确认将工况更新为：\n「${zh} / ${en}」\n状态：${vOut===1?'公开':'未公开'}？`)){ condEditSubmitBtn.disabled=false; return; }
-      try{
-        const r=await fetch('/admin/api/data/condition/type-update',{ method:'POST', headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({ resistance_type_zh: zh, resistance_type_en: en, outlet:{ condition_id: outId, is_valid: vOut } /* inlet 省略 */ }) });
-        const j=await r.json();
-        if(j.success){ condEditMsg.className='ok'; condEditMsg.textContent='更新成功'; initConditionEditList(); }
-        else { condEditMsg.className='err'; condEditMsg.textContent=j.error_message||'提交失败'; }
-      }catch{ condEditMsg.className='err'; condEditMsg.textContent='网络或服务器错误'; } finally{ condEditSubmitBtn.disabled=false; }
-      return;
-    }
+    if(cid<=0){ condEditMsg.className='err'; condEditMsg.textContent='未正确加载记录'; condEditSubmitBtn.disabled=false; return; }
+    if(!nameZh || !zh || !en || !loc){ condEditMsg.className='err'; condEditMsg.textContent='请完善必填项'; condEditSubmitBtn.disabled=false; return; }
 
-    // 非单一模式：原逻辑
-    if(outId<=0 || inId<=0){ condEditMsg.className='err'; condEditMsg.textContent='未正确加载出风/进风记录'; condEditSubmitBtn.disabled=false; return; }
-    if(!zh || !en){ condEditMsg.className='err'; condEditMsg.textContent='请填写完整的中英文名称'; condEditSubmitBtn.disabled=false; return; }
-    if(!confirm(`确认将工况更新为：\n「${zh} / ${en}」\n出风：${vOut===1?'公开':'未公开'}；进风：${vIn===1?'公开':'未公开'}？`)){ condEditSubmitBtn.disabled=false; return; }
+    // 提交前二次唯一性校验
     try{
-      const r=await fetch('/admin/api/data/condition/type-update',{ method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({ resistance_type_zh: zh, resistance_type_en: en, outlet:{ condition_id: outId, is_valid: vOut }, inlet:{ condition_id: inId, is_valid: vIn } }) });
+      const [nameChk, combChk] = await Promise.all([
+        fetch(`/admin/api/data/condition/name-exist?name=${encodeURIComponent(nameZh)}&exclude_id=${cid}`).then(r=>r.json()),
+        fetch(`/admin/api/data/condition/comb-exist?type_zh=${encodeURIComponent(zh)}&location_zh=${encodeURIComponent(loc)}&exclude_id=${cid}`).then(r=>r.json())
+      ]);
+      if(nameChk.success && nameChk.data.exists){ condEditMsg.className='err'; condEditMsg.textContent='该工况名称已存在'; condEditSubmitBtn.disabled=false; return; }
+      if(combChk.success && combChk.data.exists){ condEditMsg.className='err'; condEditMsg.textContent='已存在该组合'; condEditSubmitBtn.disabled=false; return; }
+    }catch{}
+
+    if(!confirm(`确认将工况更新为：\n「${nameZh} - ${zh} / ${en} - ${loc}」\n状态：${v===1?'公开':'未公开'}？`)){ condEditSubmitBtn.disabled=false; return; }
+
+    try{
+      const r=await fetch('/admin/api/data/condition/update',{
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          condition_id: cid,
+          condition_name_zh: nameZh,
+          resistance_type_zh: zh,
+          resistance_type_en: en,
+          resistance_location_zh: loc,
+          is_valid: v
+        })
+      });
       const j=await r.json();
       if(j.success){ condEditMsg.className='ok'; condEditMsg.textContent='更新成功'; initConditionEditList(); }
       else { condEditMsg.className='err'; condEditMsg.textContent=j.error_message||'提交失败'; }
@@ -1174,6 +1259,379 @@ function bindDraftAutoSave(){
   new MutationObserver(()=>saveDraft()).observe(perfTable, { childList:true, subtree:true, attributes:false });
 }
 
+// 新增：批量管理 UI 与逻辑（在“上传测试数据”下增加子页签并动态渲染批量管理区）
+async function initBatchManageSection(){
+  const panel = document.querySelector('#panel-upload');
+  if(!panel) return;
+
+  // 将现有上传区包裹为一个容器，便于切换
+  let uploadBox = document.querySelector('#uploadEditorBox');
+  if(!uploadBox){
+    uploadBox = document.createElement('div');
+    uploadBox.id = 'uploadEditorBox';
+    // 把 h3 之后的现有节点移入 uploadBox（保持原有结构）
+    const nodes = [];
+    let cur = panel.firstElementChild;
+    // 跳过标题 h3
+    while(cur && cur.tagName !== 'H3'){ cur = cur.nextElementSibling; }
+    if(cur){ cur = cur.nextElementSibling; }
+    while(cur){
+      nodes.push(cur);
+      cur = cur.nextElementSibling;
+    }
+    nodes.forEach(n => uploadBox.appendChild(n));
+    panel.appendChild(uploadBox);
+  }
+
+  // 顶部子分段控件
+  const segWrap = document.createElement('div');
+  segWrap.className = 'seg'; segWrap.style.marginBottom = '10px';
+  segWrap.innerHTML = `
+    <input type="radio" id="umUpload" name="uploadMode" value="upload" checked />
+    <label for="umUpload">上传/编辑数据</label>
+    <input type="radio" id="umBatch" name="uploadMode" value="batch" />
+    <label for="umBatch">批量管理数据</label>
+  `;
+  panel.insertBefore(segWrap, uploadBox);
+
+  // 批量管理容器
+  const batchBox = document.createElement('div');
+  batchBox.id = 'batchManageBox';
+  batchBox.style.display = 'none';
+  batchBox.innerHTML = `
+    <div class="row">
+      <div>
+        <label>品牌（多选）</label>
+        <input id="bmBrandInput" type="search" placeholder="输入关键字或下拉全量" list="bmBrandOptions" autocomplete="off" />
+        <datalist id="bmBrandOptions"></datalist>
+        <div id="bmBrandChips" class="hint" style="margin-top:6px;"></div>
+      </div>
+      <div>
+        <label>型号（多选）</label>
+        <input id="bmModelInput" type="search" placeholder="可按品牌过滤；未选品牌默认全量" list="bmModelOptions" autocomplete="off" />
+        <datalist id="bmModelOptions"></datalist>
+        <div id="bmModelChips" class="hint" style="margin-top:6px;"></div>
+      </div>
+      <div>
+        <label>工况 - 类型 - 位置（多选）</label>
+        <input id="bmCondInput" type="search" placeholder="输入关键字或下拉全量" list="bmCondOptions" autocomplete="off" />
+        <datalist id="bmCondOptions"></datalist>
+        <div id="bmCondChips" class="hint" style="margin-top:6px;"></div>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>创建时间（起）</label>
+        <input id="bmDateFrom" type="datetime-local" />
+      </div>
+      <div>
+        <label>创建时间（止）</label>
+        <input id="bmDateTo" type="datetime-local" />
+      </div>
+      <div>
+        <label>is_valid</label>
+        <div style="display:flex; gap:10px; align-items:center; height:44px;">
+          <label style="font-weight:400;"><input type="checkbox" id="bmIv0" checked /> 0</label>
+          <label style="font-weight:400;"><input type="checkbox" id="bmIv1" checked /> 1</label>
+        </div>
+      </div>
+      <div class="align-end">
+        <button id="bmSearchBtn" type="button">搜索</button>
+      </div>
+    </div>
+    <div class="table-wrap" style="margin-top:10px;">
+      <div class="table-scroll">
+        <table id="bmResultTable">
+          <thead>
+            <tr>
+              <th><input type="checkbox" id="bmCheckAll" /></th>
+              <th>品牌</th>
+              <th>型号</th>
+              <th>工况</th>
+              <th>is_valid</th>
+              <th>条数</th>
+              <th>创建时间</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+    <div class="row align-bottom actions" style="margin-top:12px;">
+      <div>
+        <label for="bmTargetIv">设置 is_valid</label>
+        <select id="bmTargetIv">
+          <option value="0">0（不公开）</option>
+          <option value="1">1（公开）</option>
+        </select>
+      </div>
+      <div style="flex:1 1 320px;">
+        <label for="bmDesc">更新描述（必填）</label>
+        <input id="bmDesc" type="text" placeholder="请填写本次批量更新说明" />
+      </div>
+      <div class="align-end">
+        <button id="bmApplyBtn" type="button">批量提交</button>
+        <span id="bmMsg" class="hint" style="margin-left:10px;"></span>
+      </div>
+    </div>
+  `;
+  panel.appendChild(batchBox);
+
+  // 子页签切换
+  const umUpload = document.querySelector('#umUpload');
+  const umBatch = document.querySelector('#umBatch');
+  const switchView = ()=>{
+    const mode = document.querySelector('input[name="uploadMode"]:checked')?.value || 'upload';
+    uploadBox.style.display = (mode==='upload' ? '' : 'none');
+    batchBox.style.display = (mode==='batch' ? '' : 'none');
+  };
+  umUpload.addEventListener('change', switchView);
+  umBatch.addEventListener('change', switchView);
+  switchView();
+
+  // 初始化选项与行为
+  initBatchFilters();
+}
+
+let bmSelectedBrands = [];      // {id, label}
+let bmSelectedModels = [];      // {id, label}
+let bmSelectedConds = [];       // {id, label}
+
+function chipHTML(label, id, type){
+  return `<span class="badge" data-type="${type}" data-id="${id}" style="margin-right:6px; margin-bottom:6px; display:inline-flex; gap:6px; align-items:center;">
+    ${label}<button type="button" data-role="rm" style="height:20px; padding:0 6px;" class="btn-ghost">×</button>
+  </span>`;
+}
+
+async function initBatchFilters(){
+  // 默认时间近7天
+  try{
+    const now = new Date();
+    const end = new Date(now.getTime() + 8*3600*1000); // 兼容服务端时区，放宽到北京时间可按需调整
+    const start = new Date(end.getTime() - 7*24*3600*1000);
+    const fmt = (d)=> d.toISOString().slice(0,16);
+    $('#bmDateFrom').value = fmt(start);
+    $('#bmDateTo').value = fmt(end);
+  }catch{}
+
+  // 预加载品牌与工况全量
+  try{
+    const r1 = await fetch('/admin/api/data/brand/all'); const j1 = await r1.json();
+    if(j1.success){
+      const dl = $('#bmBrandOptions'); dl.innerHTML='';
+      (j1.data.items||[]).forEach(b=>{
+        const opt=document.createElement('option');
+        opt.value = b.label;
+        opt.dataset.bid = b.brand_id;
+        dl.appendChild(opt);
+      });
+    }
+  }catch{}
+  try{
+    const r2 = await fetch('/admin/api/data/conditions/all'); const j2 = await r2.json();
+    if(j2.success){
+      const dl = $('#bmCondOptions'); dl.innerHTML='';
+      (j2.data.items||[]).forEach(c=>{
+        const opt=document.createElement('option');
+        opt.value = c.label;
+        opt.dataset.cid = c.condition_id;
+        dl.appendChild(opt);
+      });
+    }
+  }catch{}
+
+  // 绑定 chips 选择逻辑（品牌）
+  $('#bmBrandInput').addEventListener('change', ()=>{
+    const v = $('#bmBrandInput').value.trim();
+    if(!v) return;
+    const opt = [...$('#bmBrandOptions').children].find(o=>o.value===v);
+    if(!opt) return;
+    const id = parseInt(opt.dataset.bid,10);
+    if(!bmSelectedBrands.some(x=>x.id===id)){
+      bmSelectedBrands.push({id, label:v});
+      renderChips('#bmBrandChips', bmSelectedBrands, 'brand');
+    }
+    $('#bmBrandInput').value = '';
+  });
+  // 绑定 chips 选择逻辑（工况）
+  $('#bmCondInput').addEventListener('change', ()=>{
+    const v = $('#bmCondInput').value.trim();
+    if(!v) return;
+    const opt = [...$('#bmCondOptions').children].find(o=>o.value===v);
+    if(!opt) return;
+    const id = parseInt(opt.dataset.cid,10);
+    if(!bmSelectedConds.some(x=>x.id===id)){
+      bmSelectedConds.push({id, label:v});
+      renderChips('#bmCondChips', bmSelectedConds, 'cond');
+    }
+    $('#bmCondInput').value = '';
+  });
+  // 绑定型号搜索/选择（可按品牌过滤，也可全量/关键字）
+  $('#bmModelInput').addEventListener('input', debounce(async ()=>{
+    const q = $('#bmModelInput').value.trim();
+    const params = new URLSearchParams();
+    if(q) params.set('q', q);
+    // 多品牌过滤
+    if(bmSelectedBrands.length){
+      params.set('brand_ids', bmSelectedBrands.map(x=>x.id).join(','));
+    }
+    params.set('limit','200');
+    try{
+      const r = await fetch(`/admin/api/data/batch/models?${params.toString()}`);
+      const j = await r.json();
+      if(j.success){
+        const dl = $('#bmModelOptions'); dl.innerHTML='';
+        (j.data.items||[]).forEach(m=>{
+          const opt=document.createElement('option');
+          opt.value = `${m.model_name}（${m.brand_label}）`;
+          opt.dataset.mid = m.model_id;
+          dl.appendChild(opt);
+        });
+      }
+    }catch{}
+  }, 250));
+  $('#bmModelInput').addEventListener('change', ()=>{
+    const v = $('#bmModelInput').value.trim();
+    if(!v) return;
+    const opt = [...$('#bmModelOptions').children].find(o=>o.value===v);
+    if(!opt) return;
+    const id = parseInt(opt.dataset.mid,10);
+    if(!bmSelectedModels.some(x=>x.id===id)){
+      bmSelectedModels.push({id, label:v});
+      renderChips('#bmModelChips', bmSelectedModels, 'model');
+    }
+    $('#bmModelInput').value='';
+  });
+
+  // 搜索按钮
+  $('#bmSearchBtn').addEventListener('click', doBatchSearch);
+  // 批量提交
+  $('#bmApplyBtn').addEventListener('click', applyBatchUpdate);
+}
+
+function renderChips(containerSel, list, type){
+  const box = document.querySelector(containerSel);
+  box.innerHTML = list.map(x=> chipHTML(x.label, x.id, type)).join('');
+  box.querySelectorAll('button[data-role="rm"]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const id = parseInt(btn.parentElement.getAttribute('data-id'),10);
+      const arr = (type==='brand') ? bmSelectedBrands : (type==='model'? bmSelectedModels : bmSelectedConds);
+      const idx = arr.findIndex(x=>x.id===id);
+      if(idx>-1){ arr.splice(idx,1); renderChips(containerSel, arr, type); }
+    });
+  });
+}
+
+function debounce(fn, wait){ let t=null; return function(){ const ctx=this, args=arguments; clearTimeout(t); t=setTimeout(()=>fn.apply(ctx,args), wait); }; }
+
+async function doBatchSearch(){
+  const bmMsg = $('#bmMsg'); bmMsg.textContent='';
+  const payload = {
+    brand_ids: bmSelectedBrands.map(x=>x.id),
+    model_ids: bmSelectedModels.map(x=>x.id),
+    condition_ids: bmSelectedConds.map(x=>x.id),
+    is_valid: [ $('#bmIv0').checked ? 0 : null, $('#bmIv1').checked ? 1 : null ].filter(v=>v!=null),
+    date_from: $('#bmDateFrom').value ? $('#bmDateFrom').value.replace('T',' ') + ':00' : '',
+    date_to:   $('#bmDateTo').value ? $('#bmDateTo').value.replace('T',' ') + ':59' : '',
+    page: 1,
+    page_size: 100
+  };
+  try{
+    const r = await fetch('/admin/api/data/batch/search', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    const j = await r.json();
+    if(!j.success){ bmMsg.className='err'; bmMsg.textContent=j.error_message||'搜索失败'; return; }
+    renderBatchResults(j.data.items||[]);
+    bmMsg.className='hint'; bmMsg.textContent = `共 ${j.data.total||0} 条，显示前 ${ (j.data.items||[]).length } 条`;
+  }catch{
+    bmMsg.className='err'; bmMsg.textContent='网络或服务器错误';
+  }
+}
+
+function renderBatchResults(items){
+  const tb = document.querySelector('#bmResultTable tbody');
+  tb.innerHTML='';
+  items.forEach(it=>{
+    const tr=document.createElement('tr');
+    tr.dataset.batchId = it.batch_id;
+    tr.innerHTML = `
+      <td><input type="checkbox" class="bmRowChk" /></td>
+      <td>${escapeHtml(it.brand_name||'')}</td>
+      <td>${escapeHtml(it.model_name||'')}</td>
+      <td>${escapeHtml(it.condition_name||'')}</td>
+      <td class="bmIv">${it.is_valid}</td>
+      <td>${it.data_count ?? ''}</td>
+      <td class="bmDate">${it.create_date ?? ''}</td>
+    `;
+    tb.appendChild(tr);
+  });
+  // 全选
+  const all = document.querySelector('#bmCheckAll');
+  all.checked = false;
+  all.addEventListener('change', ()=>{
+    document.querySelectorAll('.bmRowChk').forEach(cb=> cb.checked = all.checked);
+  });
+}
+
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m] )); }
+
+async function applyBatchUpdate(){
+  const bmMsg = $('#bmMsg'); bmMsg.textContent=''; bmMsg.className='hint';
+  const target = parseInt($('#bmTargetIv').value||'0',10);
+  const desc = ($('#bmDesc').value||'').trim();
+  const batchIds = [...document.querySelectorAll('#bmResultTable tbody tr')].filter(tr=> tr.querySelector('.bmRowChk')?.checked).map(tr=> tr.dataset.batchId);
+  if(batchIds.length===0){ bmMsg.className='err'; bmMsg.textContent='请至少勾选一条'; return; }
+  if(!desc){ bmMsg.className='err'; bmMsg.textContent='请填写更新描述'; return; }
+  try{
+    $('#bmApplyBtn').disabled = true;
+    const r = await fetch('/admin/api/data/batch/update-state', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ batch_ids: batchIds, target_is_valid: target, description: desc })
+    });
+    const j = await r.json();
+    if(!j.success){
+      bmMsg.className='err'; bmMsg.textContent=j.error_message||'更新失败';
+    }else{
+      // 标记失败项
+      const failedSet = new Set((j.data.updated_failed||[]).map(x=>x.batch_id));
+      const unchangedSet = new Set((j.data.unchanged||[]));
+      // 刷新状态
+      await refreshBatchStatuses(batchIds);
+      // 高亮失败
+      document.querySelectorAll('#bmResultTable tbody tr').forEach(tr=>{
+        tr.style.background = '';
+        const bid = tr.dataset.batchId;
+        if(failedSet.has(bid)){ tr.style.background = 'color-mix(in oklab, var(--err), transparent 85%)'; }
+      });
+      const hasFail = failedSet.size>0;
+      const hasChange = (j.data.updated_success||[]).length>0;
+      bmMsg.className = hasFail ? 'warn' : (hasChange ? 'ok' : 'hint');
+      bmMsg.textContent = hasFail ? '部分条目更新状态失败' : (hasChange ? '批量更新完成' : '未发生变化');
+    }
+  }catch{
+    bmMsg.className='err'; bmMsg.textContent='网络或服务器错误';
+  }finally{
+    $('#bmApplyBtn').disabled = false;
+  }
+}
+
+async function refreshBatchStatuses(batchIds){
+  try{
+    const r = await fetch('/admin/api/data/batch/status', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ batch_ids: batchIds }) });
+    const j = await r.json();
+    if(!j.success) return;
+    const map = new Map();
+    (j.data.items||[]).forEach(it=> map.set(it.batch_id, it));
+    document.querySelectorAll('#bmResultTable tbody tr').forEach(tr=>{
+      const info = map.get(tr.dataset.batchId);
+      if(info){
+        tr.querySelector('.bmIv').textContent = String(info.is_valid);
+        tr.querySelector('.bmDate').textContent = info.create_date || '';
+      }
+    });
+  }catch{}
+}
+
+
 (async function init(){
   suspendDraft = true;
   resetUploadState();
@@ -1187,7 +1645,7 @@ function bindDraftAutoSave(){
   }catch(e){}
   // 型号编辑“两级下拉”初始化（若元素不存在将安全跳过）
   try{ initModelEditTwoDropdowns(); }catch(e){}
-
+  try{ initBatchManageSection(); }catch(e){}
   // 修复点：初始化结束后允许自动保存草稿
   suspendDraft = false;
 })();

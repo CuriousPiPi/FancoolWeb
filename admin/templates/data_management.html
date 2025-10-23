@@ -622,12 +622,24 @@
         <form id="condForm">
           <div class="row">
             <div>
+              <label for="condName">工况名称（必填）</label>
+              <input id="condName" required />
+            </div>
+            <div>
               <label for="rtZh">风阻类型中文（必填）</label>
               <input id="rtZh" required />
             </div>
             <div>
               <label for="rtEn">风阻类型英文（必填）</label>
               <input id="rtEn" required />
+            </div>
+            <div>
+              <label for="rtLoc">风阻位置（必选）</label>
+              <select id="rtLoc" required>
+                <option value="">请选择</option>
+                <option value="出风">出风</option>
+                <option value="进风">进风</option>
+              </select>
             </div>
           </div>
           <div class="row align-bottom actions" style="margin-top:12px;">
@@ -642,20 +654,23 @@
             <span id="condMsg" class="hint"></span>
           </div>
         </form>
-        <p class="hint">说明：提交后自动插入出风/进风两条记录。</p>
+        <p class="hint">说明：提交后仅插入一条记录（按所选风阻位置）。</p>
       </div>
 
-      <!-- 编辑工况 -->
+      <!-- 编辑工况：新增隐藏ID、风阻位置选择控件；移除“出风/进风 is_valid”双控件，改为单个 is_valid -->
       <div id="condEditBox" style="display:none; margin-top:12px;">
-        <label for="condEditInput">选择工况类型</label>
-        <input id="condEditInput" type="search" placeholder="输入类型关键字或展开全部" list="condEditOptions" autocomplete="off" />
+        <label for="condEditInput">选择工况</label>
+        <input id="condEditInput" type="search" placeholder="按 工况名/类型/位置 关键字或展开全部" list="condEditOptions" autocomplete="off" />
         <datalist id="condEditOptions"></datalist>
-        <input type="hidden" id="condOutId" />
-        <input type="hidden" id="condInId" />
+        <input type="hidden" id="condEditId" />
         <div class="hint" id="condEditHint" style="margin-top:4px;">未选择工况</div>
-
+      
         <form id="condEditForm" class="disabled" style="margin-top:10px;">
           <div class="row">
+            <div>
+              <label for="condNameEdit">工况名称（必填）</label>
+              <input id="condNameEdit" required />
+            </div>
             <div>
               <label for="rtZhEdit">风阻类型中文</label>
               <input id="rtZhEdit" />
@@ -664,30 +679,28 @@
               <label for="rtEnEdit">风阻类型英文</label>
               <input id="rtEnEdit" />
             </div>
-          </div>
-          <div class="row">
             <div>
-              <label for="condEditIsValidOut">出风 is_valid</label>
-              <select id="condEditIsValidOut">
-                <option value="0">0（不公开）</option>
-                <option value="1">1（公开）</option>
-              </select>
-            </div>
-            <div>
-              <label for="condEditIsValidIn">进风 is_valid</label>
-              <select id="condEditIsValidIn">
-                <option value="0">0（不公开）</option>
-                <option value="1">1（公开）</option>
+              <label for="rtLocEdit">风阻位置（必选）</label>
+              <select id="rtLocEdit" required>
+                <option value="">请选择</option>
+                <option value="出风">出风</option>
+                <option value="进风">进风</option>
               </select>
             </div>
           </div>
           <div class="row align-bottom actions" style="margin-top:12px;">
+            <div>
+              <label for="condEditIsValid">是否有效 (is_valid)</label>
+              <select id="condEditIsValid">
+                <option value="0">0（不公开）</option>
+                <option value="1">1（公开）</option>
+              </select>
+            </div>
             <button type="submit" id="condEditSubmitBtn">提交修改</button>
             <span id="condEditMsg" class="hint"></span>
           </div>
         </form>
       </div>
-    </div>
 
   <script defer src="/static/js/data_management.js?v=4"></script>
 </div>

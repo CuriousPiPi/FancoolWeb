@@ -386,147 +386,204 @@ def api_add_model():
 
     return resp_ok({'model_id': mid}, message=f'添加成功，model_id：{mid}')
 
-# ========== 工况相关 ==========
+# 修改：添加工况 —— 不再插入 resistance_location_en，由数据库根据中文位置自动生成
 @data_mgmt_bp.post('/admin/api/data/condition/add')
 def api_add_condition():
     if not session.get('is_admin'):
         return resp_err('UNAUTHORIZED', '请先登录', 401)
     data = request.get_json(force=True, silent=True) or {}
+    name_zh = (data.get('condition_name_zh') or '').strip()
     rt_zh = (data.get('resistance_type_zh') or '').strip()
     rt_en = (data.get('resistance_type_en') or '').strip()
+    loc_zh = (data.get('resistance_location_zh') or '').strip()  # '出风' | '进风'
     try:
         is_valid = int(data.get('is_valid') if data.get('is_valid') in (0, 1, '0', '1') else 0)
     except Exception:
         is_valid = 0
-    if not rt_zh or not rt_en:
-        return resp_err('INVALID_INPUT', '风阻类型中文与英文均为必填')
 
-    existed = _fetch_all("""
+    if not name_zh or not rt_zh or not rt_en or not loc_zh:
+        return resp_err('INVALID_INPUT', '工况名称、风阻类型中文/英文与风阻位置均为必填')
+
+    # 工况名称唯一
+    existed_name = _fetch_all("""
+        SELECT condition_id FROM working_condition WHERE condition_name_zh = :n LIMIT 1
+    """, {'n': name_zh})
+    if existed_name:
+        return resp_err('CONDITION_NAME_EXISTS', '该工况名称已存在')
+
+    # 组合唯一：风阻类型中文 + 风阻位置
+    existed_comb = _fetch_all("""
         SELECT condition_id FROM working_condition
-        WHERE resistance_type_zh = :zh OR resistance_type_en = :en
+        WHERE resistance_type_zh = :tzh AND resistance_location_zh = :lzh
         LIMIT 1
-    """, {'zh': rt_zh, 'en': rt_en})
-    if existed:
-        return resp_err('CONDITION_EXISTS', '该风阻类型已存在')
+    """, {'tzh': rt_zh, 'lzh': loc_zh})
+    if existed_comb:
+        return resp_err('CONDITION_COMB_EXISTS', '已存在该组合')
+
+    # 位置取值校验
+    if loc_zh not in ('出风', '进风'):
+        return resp_err('INVALID_INPUT', '风阻位置仅支持 出风/进风')
 
     try:
         with _engine().begin() as conn:
-            r1 = conn.execute(text("""
+            r = conn.execute(text("""
                 INSERT INTO working_condition
-                (resistance_type_zh,resistance_type_en,resistance_location_zh,resistance_location_en,is_valid)
-                VALUES (:tzh,:ten,'出风','Outlet',:v)
-            """), {'tzh': rt_zh, 'ten': rt_en, 'v': is_valid})
-            id_out = r1.lastrowid
-            r2 = conn.execute(text("""
-                INSERT INTO working_condition
-                (resistance_type_zh,resistance_type_en,resistance_location_zh,resistance_location_en,is_valid)
-                VALUES (:tzh,:ten,'进风','Inlet',:v)
-            """), {'tzh': rt_zh, 'ten': rt_en, 'v': is_valid})
-            id_in = r2.lastrowid
+                (condition_name_zh, resistance_type_zh, resistance_type_en,
+                 resistance_location_zh, is_valid)
+                VALUES (:name, :tzh, :ten, :lzh, :v)
+            """), {'name': name_zh, 'tzh': rt_zh, 'ten': rt_en, 'lzh': loc_zh, 'v': is_valid})
+            cid = r.lastrowid
     except Exception as e:
         return resp_err('DB_WRITE_FAIL', f'写入失败: {e}', 500)
 
-    return resp_ok({'condition_ids': [id_out, id_in]}, message=f'添加成功，condition_id：{id_out}, {id_in}')
+    return resp_ok({'condition_id': cid}, message=f'添加成功，condition_id：{cid}')
 
-@data_mgmt_bp.get('/admin/api/data/conditions/all')
-def api_conditions_all():
-    if not session.get('is_admin'):
-        return resp_err('UNAUTHORIZED', '请先登录', 401)
-    rows = _fetch_all("""
-        SELECT condition_id, resistance_type_zh, resistance_location_zh
-        FROM working_condition
-        ORDER BY resistance_type_zh, resistance_location_zh
-    """)
-    items = [{'condition_id': int(r['condition_id']), 'label': f"{r['resistance_type_zh']} - {r['resistance_location_zh']}"} for r in rows]
-    return resp_ok({'items': items})
-
+# 修改：编辑页下拉 —— 不再查询/显示 resistance_location_en
 @data_mgmt_bp.get('/admin/api/data/condition/types')
 def api_condition_types():
     if not session.get('is_admin'):
         return resp_err('UNAUTHORIZED', '请先登录', 401)
     rows = _fetch_all("""
-        SELECT resistance_type_zh, resistance_type_en
+        SELECT condition_id, condition_name_zh, resistance_type_zh, resistance_type_en,
+               resistance_location_zh
         FROM working_condition
-        GROUP BY resistance_type_zh, resistance_type_en
-        ORDER BY resistance_type_zh, resistance_type_en
+        ORDER BY condition_name_zh, resistance_type_zh, resistance_location_zh
+        LIMIT 500
     """)
     items = [{
+        'condition_id': int(r['condition_id']),
+        'name_zh': r['condition_name_zh'],
         'type_zh': r['resistance_type_zh'],
         'type_en': r['resistance_type_en'],
-        'label': f"{(r['resistance_type_zh'] or '').strip()} / {(r['resistance_type_en'] or '').strip()}".strip(' /')
+        'loc_zh': r['resistance_location_zh'],
+        # 标签：工况名称 - 类型中/英 - 位置（中文）
+        'label': " - ".join([
+            (r['condition_name_zh'] or '').strip(),
+            f"{(r['resistance_type_zh'] or '').strip()} / {(r['resistance_type_en'] or '').strip()}".strip(' /'),
+            (r['resistance_location_zh'] or '').strip()
+        ]).strip(' -')
     } for r in rows]
     return resp_ok({'items': items})
 
-@data_mgmt_bp.get('/admin/api/data/condition/type-detail')
-def api_condition_type_detail():
+# 新增：获取单条工况详情（按 condition_id）
+@data_mgmt_bp.get('/admin/api/data/condition/detail')
+def api_condition_detail():
     if not session.get('is_admin'):
         return resp_err('UNAUTHORIZED', '请先登录', 401)
-    tzh = (request.args.get('type_zh') or '').strip()
-    ten = (request.args.get('type_en') or '').strip()
-    if not tzh or not ten:
-        return resp_err('INVALID_INPUT', '缺少风阻类型（中/英）')
+    try:
+        cid = int(request.args.get('condition_id') or 0)
+    except Exception:
+        cid = 0
+    if cid <= 0:
+        return resp_err('INVALID_INPUT', '缺少 condition_id')
+
     rows = _fetch_all("""
-        SELECT condition_id, resistance_type_zh, resistance_type_en,
+        SELECT condition_id, condition_name_zh, resistance_type_zh, resistance_type_en,
                resistance_location_zh, resistance_location_en, COALESCE(is_valid,0) AS is_valid
         FROM working_condition
-        WHERE resistance_type_zh = :tzh AND resistance_type_en = :ten
-        ORDER BY resistance_location_zh
-        LIMIT 2
-    """, {'tzh': tzh, 'ten': ten})
+        WHERE condition_id = :cid
+        LIMIT 1
+    """, {'cid': cid})
     if not rows:
-        return resp_err('NOT_FOUND', '未找到该风阻类型', 404)
+        return resp_err('NOT_FOUND', '未找到该工况', 404)
+    r = rows[0]
+    return resp_ok({
+        'condition_id': int(r['condition_id']),
+        'condition_name_zh': r['condition_name_zh'],
+        'resistance_type_zh': r['resistance_type_zh'],
+        'resistance_type_en': r['resistance_type_en'],
+        'resistance_location_zh': r['resistance_location_zh'],
+        'resistance_location_en': r['resistance_location_en'],
+        'is_valid': int(r['is_valid'] or 0)
+    })
 
-    # 判定是否为“空载/No Load”等不区分进/出风的特殊类型：
-    # 条件：仅有1条记录，或位置字段为空/NULL
-    single_mode = False
-    single_row = None
-    if len(rows) == 1:
-        single_mode = True
-        single_row = rows[0]
-    else:
-        # 若两条均无位置或任一条位置为空也视为单条（向后兼容）
-        cand = next((r for r in rows if not (r.get('resistance_location_zh') or '').strip()), None)
-        if cand:
-            single_mode = True
-            single_row = cand
+# 修改：上传测试数据页的工况下拉项标签为“名称 - 类型中文 - 位置中文”
+@data_mgmt_bp.get('/admin/api/data/conditions/all')
+def api_conditions_all():
+    if not session.get('is_admin'):
+        return resp_err('UNAUTHORIZED', '请先登录', 401)
+    rows = _fetch_all("""
+        SELECT condition_id, condition_name_zh, resistance_type_zh, resistance_location_zh
+        FROM working_condition
+        ORDER BY condition_name_zh, resistance_type_zh, resistance_location_zh
+    """)
+    items = [{
+        'condition_id': int(r['condition_id']),
+        'label': " - ".join([
+            (r.get('condition_name_zh') or '').strip(),
+            (r.get('resistance_type_zh') or '').strip(),
+            (r.get('resistance_location_zh') or '').strip()
+        ]).strip(' -')
+    } for r in rows]
+    return resp_ok({'items': items})
 
-    # 正常识别出风/进风
-    out = next((r for r in rows if r.get('resistance_location_zh') == '出风'), None)
-    inm = next((r for r in rows if r.get('resistance_location_zh') == '进风'), None)
+# 修改：更新工况 —— 不再更新 resistance_location_en，由数据库自动生成
+@data_mgmt_bp.post('/admin/api/data/condition/update')
+def api_condition_update():
+    if not session.get('is_admin'):
+        return resp_err('UNAUTHORIZED', '请先登录', 401)
+    payload = request.get_json(force=True, silent=True) or {}
+    try:
+        cid = int(payload.get('condition_id') or 0)
+    except Exception:
+        cid = 0
+    name_zh = (payload.get('condition_name_zh') or '').strip()
+    tzh = (payload.get('resistance_type_zh') or '').strip()
+    ten = (payload.get('resistance_type_en') or '').strip()
+    loc_zh = (payload.get('resistance_location_zh') or '').strip()
+    try:
+        is_valid = int(payload.get('is_valid') if payload.get('is_valid') in (0,1,'0','1') else 0)
+    except Exception:
+        is_valid = 0
 
-    data = {
-        'type_zh': tzh,
-        'type_en': ten,
-        'outlet': out and {
-            'condition_id': int(out['condition_id']),
-            'is_valid': int(out['is_valid'] or 0),
-            'location_zh': out['resistance_location_zh'],
-            'location_en': out['resistance_location_en']
-        },
-        'inlet': inm and {
-            'condition_id': int(inm['condition_id']),
-            'is_valid': int(inm['is_valid'] or 0),
-            'location_zh': inm['resistance_location_zh'],
-            'location_en': inm['resistance_location_en']
-        },
-        'single': 1 if single_mode else 0
-    }
-    if single_mode and single_row:
-        data['single_condition'] = {
-            'condition_id': int(single_row['condition_id']),
-            'is_valid': int(single_row['is_valid'] or 0)
-        }
-        # 明确置空 outlet/inlet，避免前端误判
-        data['outlet'] = None
-        data['inlet'] = None
+    if cid <= 0:
+        return resp_err('INVALID_INPUT', '缺少 condition_id')
+    if not name_zh or not tzh or not ten or not loc_zh:
+        return resp_err('INVALID_INPUT', '工况名称、风阻类型中文/英文与风阻位置均为必填')
 
-    return resp_ok(data)
+    # 名称唯一（排除自身）
+    existed_name = _fetch_all("""
+        SELECT condition_id FROM working_condition
+        WHERE condition_name_zh = :n AND condition_id <> :cid
+        LIMIT 1
+    """, {'n': name_zh, 'cid': cid})
+    if existed_name:
+        return resp_err('CONDITION_NAME_EXISTS', '该工况名称已存在')
+
+    # 组合唯一：类型中文 + 位置（排除自身）
+    existed_comb = _fetch_all("""
+        SELECT condition_id FROM working_condition
+        WHERE resistance_type_zh = :tzh AND resistance_location_zh = :lzh AND condition_id <> :cid
+        LIMIT 1
+    """, {'tzh': tzh, 'lzh': loc_zh, 'cid': cid})
+    if existed_comb:
+        return resp_err('CONDITION_COMB_EXISTS', '已存在该组合')
+
+    if loc_zh not in ('出风', '进风'):
+        return resp_err('INVALID_INPUT', '风阻位置仅支持 出风/进风')
+
+    try:
+        with _engine().begin() as conn:
+            conn.execute(text("""
+                UPDATE working_condition
+                SET condition_name_zh=:name,
+                    resistance_type_zh=:tzh,
+                    resistance_type_en=:ten,
+                    resistance_location_zh=:lzh,
+                    is_valid=:v
+                WHERE condition_id=:cid
+            """), {'name': name_zh, 'tzh': tzh, 'ten': ten, 'lzh': loc_zh, 'v': is_valid, 'cid': cid})
+    except Exception as e:
+        return resp_err('DB_WRITE_FAIL', f'写入失败: {e}', 500)
+
+    return resp_ok({'condition_id': cid}, message='更新成功')
 
 @data_mgmt_bp.post('/admin/api/data/condition/type-update')
 def api_condition_type_update():
     if not session.get('is_admin'):
         return resp_err('UNAUTHORIZED', '请先登录', 401)
     payload = request.get_json(force=True, silent=True) or {}
+    new_name = (payload.get('condition_name_zh') or '').strip()
     new_zh = (payload.get('resistance_type_zh') or '').strip()
     new_en = (payload.get('resistance_type_en') or '').strip()
     outlet = payload.get('outlet') or {}
@@ -541,30 +598,32 @@ def api_condition_type_update():
 
     if out_id <= 0 and in_id <= 0:
         return resp_err('INVALID_INPUT', '缺少可更新的记录ID')
-    if not new_zh or not new_en:
-        return resp_err('INVALID_INPUT', '风阻类型中文与英文均为必填')
+    if not new_name or not new_zh or not new_en:
+        return resp_err('INVALID_INPUT', '工况名称、风阻类型中文与英文均为必填')
 
-    # 重名检查（排除自身已提供的ID）
+    # 重名检查：工况名称或类型中/英任一重名即冲突（排除被更新的自身 ID）
     existed = _fetch_all("""
         SELECT condition_id FROM working_condition
-        WHERE resistance_type_zh = :zh OR resistance_type_en = :en
-    """, {'zh': new_zh, 'en': new_en})
+        WHERE condition_name_zh = :name OR resistance_type_zh = :zh OR resistance_type_en = :en
+    """, {'name': new_name, 'zh': new_zh, 'en': new_en})
     provided_ids = set([i for i in (out_id, in_id) if i > 0])
     conflict = any(int(r['condition_id']) not in provided_ids for r in existed)
     if conflict:
-        return resp_err('CONDITION_EXISTS', '已存在同名风阻类型（中文或英文）')
+        return resp_err('CONDITION_EXISTS', '已存在同名工况或风阻类型（中文或英文）')
 
     try:
         with _engine().begin() as conn:
             ids_to_update = [i for i in (out_id, in_id) if i > 0]
-            # 名称更新：仅更新实际提交的那几条
-            conn.execute(text(f"""
-                UPDATE working_condition
-                SET resistance_type_zh = :zh, resistance_type_en = :en
-                WHERE condition_id IN ({','.join([':id'+str(i) for i in range(len(ids_to_update))])})
-            """), {'zh': new_zh, 'en': new_en, **{('id'+str(i)): ids_to_update[i] for i in range(len(ids_to_update))}})
+            if ids_to_update:
+                # 同步更新名称与类型字段
+                placeholders = ','.join([':id'+str(i) for i in range(len(ids_to_update))])
+                params = {'name': new_name, 'zh': new_zh, 'en': new_en, **{('id'+str(i)): ids_to_update[i] for i in range(len(ids_to_update))}}
+                conn.execute(text(f"""
+                    UPDATE working_condition
+                    SET condition_name_zh = :name, resistance_type_zh = :zh, resistance_type_en = :en
+                    WHERE condition_id IN ({placeholders})
+                """), params)
 
-            # 分别更新 is_valid（存在才更新）
             if out_id > 0:
                 conn.execute(text("""UPDATE working_condition SET is_valid=:v WHERE condition_id=:id"""),
                              {'v': out_valid, 'id': out_id})
@@ -681,6 +740,307 @@ def api_perf_group_rows():
         'group_key': batch_id,
         'group_is_valid': 1 if active else 0
     })
+
+@data_mgmt_bp.get('/admin/api/data/condition/name-exist')
+def api_condition_name_exist():
+    if not session.get('is_admin'):
+        return resp_err('UNAUTHORIZED', '请先登录', 401)
+    name = (request.args.get('name') or '').strip()
+    try:
+        exclude_id = int(request.args.get('exclude_id') or 0)
+    except Exception:
+        exclude_id = 0
+    if not name:
+        return resp_ok({'exists': False})
+    rows = _fetch_all("""
+        SELECT condition_id FROM working_condition
+        WHERE condition_name_zh = :n {exclude}
+        LIMIT 1
+    """.format(exclude="AND condition_id <> :eid" if exclude_id > 0 else ""),
+        {'n': name, 'eid': exclude_id} if exclude_id > 0 else {'n': name}
+    )
+    return resp_ok({'exists': bool(rows)})
+
+# 新增：风阻类型中文 + 风阻位置 组合唯一性校验
+@data_mgmt_bp.get('/admin/api/data/condition/comb-exist')
+def api_condition_comb_exist():
+    if not session.get('is_admin'):
+        return resp_err('UNAUTHORIZED', '请先登录', 401)
+    tzh = (request.args.get('type_zh') or '').strip()
+    loc_zh = (request.args.get('location_zh') or '').strip()
+    try:
+        exclude_id = int(request.args.get('exclude_id') or 0)
+    except Exception:
+        exclude_id = 0
+    if not tzh or not loc_zh:
+        return resp_ok({'exists': False})
+    rows = _fetch_all("""
+        SELECT condition_id FROM working_condition
+        WHERE resistance_type_zh = :tzh AND resistance_location_zh = :lzh {exclude}
+        LIMIT 1
+    """.format(exclude="AND condition_id <> :eid" if exclude_id > 0 else ""),
+        {'tzh': tzh, 'lzh': loc_zh, 'eid': exclude_id} if exclude_id > 0 else {'tzh': tzh, 'lzh': loc_zh}
+    )
+    return resp_ok({'exists': bool(rows)})
+
+# 新增：批量管理 - 型号候选（支持多品牌过滤与关键字，默认限制返回200条）
+@data_mgmt_bp.get('/admin/api/data/batch/models')
+def api_batch_models():
+    if not session.get('is_admin'):
+        return resp_err('UNAUTHORIZED', '请先登录', 401)
+    q = (request.args.get('q') or '').strip()
+    # 支持 brand_ids=1,2 或 brand_ids[]=1&brand_ids[]=2 两种形式
+    raw_ids = request.args.getlist('brand_ids') or request.args.getlist('brand_ids[]')
+    if not raw_ids:
+        one = request.args.get('brand_ids')
+        if one:
+            raw_ids = one.split(',')
+    brand_ids = []
+    for x in raw_ids or []:
+        try:
+            brand_ids.append(int(str(x).strip()))
+        except Exception:
+            pass
+    try:
+        limit = int(request.args.get('limit') or 200)
+    except Exception:
+        limit = 200
+    if limit <= 0 or limit > 500:
+        limit = 200
+
+    where = []
+    params = {}
+    if q:
+        where.append("m.model_name LIKE :q")
+        params['q'] = f"%{q}%"
+    if brand_ids:
+        marks = ','.join([f":b{i}" for i in range(len(brand_ids))])
+        where.append(f"m.brand_id IN ({marks})")
+        for i, bid in enumerate(brand_ids):
+            params[f"b{i}"] = bid
+
+    sql = f"""
+        SELECT m.model_id, m.model_name, m.brand_id, COALESCE(m.is_valid,0) AS is_valid,
+               b.brand_name_zh, b.brand_name_en
+        FROM fan_model m
+        LEFT JOIN fan_brand b ON b.brand_id = m.brand_id
+        {"WHERE " + " AND ".join(where) if where else ""}
+        ORDER BY m.model_name
+        LIMIT :lim
+    """
+    params['lim'] = limit
+    rows = _fetch_all(sql, params)
+    items = [{
+        'model_id': int(r['model_id']),
+        'model_name': r['model_name'],
+        'brand_id': int(r['brand_id']),
+        'brand_label': f"{(r.get('brand_name_zh') or '').strip()} / {(r.get('brand_name_en') or '').strip()}".strip(' /'),
+        'is_valid': int(r.get('is_valid') or 0)
+    } for r in rows]
+    return resp_ok({'items': items})
+
+# 新增：批量管理 - 批次搜索（默认按 create_date 倒序分页）
+@data_mgmt_bp.post('/admin/api/data/batch/search')
+def api_batch_search():
+    if not session.get('is_admin'):
+        return resp_err('UNAUTHORIZED', '请先登录', 401)
+    payload = request.get_json(force=True, silent=True) or {}
+
+    def _ints(lst):
+        out = []
+        for x in lst or []:
+            try:
+                out.append(int(x))
+            except Exception:
+                try:
+                    out.append(int(str(x).strip()))
+                except Exception:
+                    pass
+        return out
+
+    brand_ids = _ints(payload.get('brand_ids') or [])
+    model_ids = _ints(payload.get('model_ids') or [])
+    condition_ids = _ints(payload.get('condition_ids') or [])
+    is_valid_list = payload.get('is_valid')
+    if is_valid_list is None:
+        is_valid_list = [0, 1]
+    is_valid_list = [int(v) for v in is_valid_list if str(v) in ('0', '1', 0, 1)]
+
+    date_from = (payload.get('date_from') or '').strip()
+    date_to = (payload.get('date_to') or '').strip()
+    # 若前端未传，默认近7天
+    if not date_from or not date_to:
+        rows = _fetch_all("SELECT DATE_FORMAT(DATE_SUB(NOW(), INTERVAL 7 DAY), '%Y-%m-%d 00:00:00') AS df, DATE_FORMAT(NOW(), '%Y-%m-%d 23:59:59') AS dt")
+        date_from = rows[0]['df']; date_to = rows[0]['dt']
+
+    try:
+        page = int(payload.get('page') or 1)
+        size = int(payload.get('page_size') or 50)
+    except Exception:
+        page, size = 1, 50
+    page = max(1, page); size = max(1, min(200, size))
+    offset = (page - 1) * size
+
+    # 构建 SQL（当存在品牌筛选时，显式 join fan_model 以使用 brand_id）
+    base_from = " FROM data_by_batch_view v "
+    where = ["v.create_date BETWEEN :df AND :dt"]
+    params = {'df': date_from, 'dt': date_to}
+
+    if model_ids:
+        marks = ','.join([f":m{i}" for i in range(len(model_ids))])
+        where.append(f"v.model_id IN ({marks})")
+        for i, mid in enumerate(model_ids):
+            params[f"m{i}"] = mid
+    if condition_ids:
+        marks = ','.join([f":c{i}" for i in range(len(condition_ids))])
+        where.append(f"v.condition_id IN ({marks})")
+        for i, cid in enumerate(condition_ids):
+            params[f"c{i}"] = cid
+    if is_valid_list and len(is_valid_list) in (1, 2) and len(is_valid_list) != 2:
+        where.append("v.is_valid = :iv")
+        params['iv'] = int(is_valid_list[0])
+
+    if brand_ids:
+        base_from += " JOIN fan_model m ON m.model_id = v.model_id "
+        marks = ','.join([f":b{i}" for i in range(len(brand_ids))])
+        where.append(f"m.brand_id IN ({marks})")
+        for i, bid in enumerate(brand_ids):
+            params[f"b{i}"] = bid
+
+    where_sql = " WHERE " + " AND ".join(where) if where else ""
+
+    # 统计总数
+    total_row = _fetch_all(f"SELECT COUNT(1) AS cnt {base_from} {where_sql}", params)
+    total = int(total_row[0]['cnt'] if total_row else 0)
+
+    # 拉取数据
+    rows = _fetch_all(f"""
+        SELECT
+          v.batch_id, v.model_id, v.condition_id, COALESCE(v.is_valid,0) AS is_valid,
+          v.brand_name_zh, v.model_name, v.condition_name_zh,
+          v.data_count, v.create_date
+        {base_from}
+        {where_sql}
+        ORDER BY v.create_date DESC
+        LIMIT :lim OFFSET :off
+    """, {**params, 'lim': size, 'off': offset})
+
+    items = []
+    for r in rows:
+        items.append({
+            'batch_id': r['batch_id'],
+            'model_id': int(r['model_id']),
+            'condition_id': int(r['condition_id']),
+            'is_valid': int(r.get('is_valid') or 0),
+            'brand_name': r.get('brand_name_zh') or '',
+            'model_name': r.get('model_name') or '',
+            'condition_name': r.get('condition_name_zh') or '',
+            'data_count': int(r.get('data_count') or 0),
+            'create_date': r.get('create_date')
+        })
+    return resp_ok({'items': items, 'page': page, 'page_size': size, 'total': total})
+
+# 新增：批量管理 - 批量更新 is_valid（逐批事务，失败跳过并返回原因）
+@data_mgmt_bp.post('/admin/api/data/batch/update-state')
+def api_batch_update_state():
+    if not session.get('is_admin'):
+        return resp_err('UNAUTHORIZED', '请先登录', 401)
+    payload = request.get_json(force=True, silent=True) or {}
+    batch_ids = payload.get('batch_ids') or []
+    try:
+        target = int(payload.get('target_is_valid') if payload.get('target_is_valid') in (0, 1, '0', '1') else 0)
+    except Exception:
+        return resp_err('INVALID_INPUT', 'target_is_valid 非法')
+    desc = (payload.get('description') or '').strip()
+
+    if not batch_ids or not isinstance(batch_ids, list):
+        return resp_err('INVALID_INPUT', '缺少 batch_ids')
+    if desc == '':
+        return resp_err('INVALID_INPUT', '更新描述必填')
+
+    updated_success = []
+    unchanged = []
+    updated_failed = []  # {batch_id, reason}
+
+    for bid in batch_ids:
+        bid_s = str(bid).strip()
+        if not bid_s:
+            continue
+        try:
+            # 每个批次单独事务，保证“部分成功、部分失败”
+            with _engine().begin() as conn:
+                # 获取该批次的 model_id/condition_id 以及当前是否有对外行
+                meta = conn.execute(text("""
+                    SELECT model_id, condition_id,
+                           SUM(CASE WHEN is_valid=1 THEN 1 ELSE 0 END) AS active_rows
+                    FROM fan_performance_data
+                    WHERE batch_id=:bid
+                    GROUP BY model_id, condition_id
+                    LIMIT 1
+                """), {'bid': bid_s}).fetchone()
+                if not meta:
+                    unchanged.append(bid_s)
+                    continue
+                model_id = int(meta._mapping['model_id'])
+                condition_id = int(meta._mapping['condition_id'])
+
+                # 仅在状态发生变化时更新
+                res = conn.execute(text("""
+                    UPDATE fan_performance_data
+                    SET is_valid=:v, update_date=NOW()
+                    WHERE batch_id=:bid AND is_valid<>:v
+                """), {'v': target, 'bid': bid_s})
+
+                if (res.rowcount or 0) > 0:
+                    action = 'batch_activate' if target == 1 else 'batch_close'
+                    conn.execute(text("""
+                        INSERT INTO data_update_log (model_id, condition_id, affected_batch, is_valid, action, description)
+                        VALUES (:m, :c, :bid, :v, :act, :desc)
+                    """), {'m': model_id, 'c': condition_id, 'bid': bid_s, 'v': target, 'act': action, 'desc': desc})
+                    updated_success.append(bid_s)
+                else:
+                    # 没有实际变化（可能本就同状态）
+                    unchanged.append(bid_s)
+        except Exception as e:
+            updated_failed.append({'batch_id': bid_s, 'reason': str(e)})
+
+    return resp_ok({
+        'updated_success': updated_success,
+        'unchanged': unchanged,
+        'updated_failed': updated_failed
+    }, message=('部分条目更新状态失败' if updated_failed else '批量更新完成'))
+
+# 新增：批量管理 - 批次状态确认（按 batch_id 列表返回 is_valid 与 create_date）
+@data_mgmt_bp.post('/admin/api/data/batch/status')
+def api_batch_status():
+    if not session.get('is_admin'):
+        return resp_err('UNAUTHORIZED', '请先登录', 401)
+    payload = request.get_json(force=True, silent=True) or {}
+    batch_ids = payload.get('batch_ids') or []
+    if not batch_ids or not isinstance(batch_ids, list):
+        return resp_err('INVALID_INPUT', '缺少 batch_ids')
+
+    # 动态 IN 占位
+    bset = []
+    params = {}
+    for i, bid in enumerate(batch_ids):
+        key = f"b{i}"
+        bset.append(f":{key}")
+        params[key] = str(bid).strip()
+    if not bset:
+        return resp_ok({'items': []})
+
+    rows = _fetch_all(f"""
+        SELECT batch_id, COALESCE(is_valid,0) AS is_valid, create_date
+        FROM data_by_batch_view
+        WHERE batch_id IN ({",".join(bset)})
+    """, params)
+    items = [{
+        'batch_id': r['batch_id'],
+        'is_valid': int(r.get('is_valid') or 0),
+        'create_date': r.get('create_date')
+    } for r in rows]
+    return resp_ok({'items': items})
 
 @data_mgmt_bp.post('/admin/api/data/perf/group-edit')
 def api_perf_group_edit():
