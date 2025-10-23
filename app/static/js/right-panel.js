@@ -16,7 +16,7 @@
   let segSearchEl  = null;
   let __HOT_COL_LOCKED_W = null;
 
-  const ANIM = { rowMs: 500,
+  const ANIM = { rowMs: 320,
                 rowEase: 'ease',
                 fadeOutMs: 200,
                 fadeInMs: 220,
