@@ -1972,19 +1972,6 @@ window.addEventListener('resize', () => {
   __titleMaskRaf = requestAnimationFrame(applyRecentLikesTitleMask);
 });
 
-/* 记录用户是否点击过侧栏按钮 */
-const LS_KEY_SIDEBAR_TOGGLE_CLICKED = 'sidebar_toggle_clicked';
-function markSidebarToggleClicked(){
-  try { localStorage.setItem(LS_KEY_SIDEBAR_TOGGLE_CLICKED, '1'); } catch(_) {}
-}
-function userHasClickedSidebarToggle(){
-  try { return localStorage.getItem(LS_KEY_SIDEBAR_TOGGLE_CLICKED) === '1'; } catch(_) { return false; }
-}
-function maybeAutoOpenSidebarOnAdd(){
-  if (userHasClickedSidebarToggle()) return;
-  expandSidebarIfCollapsed();
-}
-
 /* visit_start */
 (function initVisitStartMinimal(){
   try { if (sessionStorage.getItem('visit_started') === '1') return; } catch(_) {}
