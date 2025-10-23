@@ -18,7 +18,7 @@
   const topPanel     = document.getElementById('top-panel');
   const bottomPanel  = document.getElementById('bottom-panel');
 
-   // A11y focus trap (used by overlay open/close)
+  // A11y focus trap (used by overlay open/close)
   const a11yFocusTrap = (function(){
     let container = null;
     let lastFocused = null;
@@ -92,7 +92,7 @@
   }
 
   // Overlay (mobile) 初始化
- (function initSidebarOverlayModeOnce() {
+  (function initSidebarOverlayModeOnce() {
     const vw = window.innerWidth;
     if (vw >= 600) return;
     const root = document.documentElement;
@@ -653,7 +653,7 @@
     });
   })();
 
-  // 记录用户是否点击过侧栏按钮/自动展开
+  // 记录用户是否点击过侧栏按钮/自动展开（迁入侧栏，主 JS 删除同名定义）
   const LS_KEY_SIDEBAR_TOGGLE_CLICKED = 'sidebar_toggle_clicked';
   function markSidebarToggleClicked(){
     try { localStorage.setItem(LS_KEY_SIDEBAR_TOGGLE_CLICKED, '1'); } catch(_) {}

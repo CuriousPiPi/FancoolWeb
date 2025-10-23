@@ -11,6 +11,10 @@
   height: clamp(480px, 62vh, 600px);
   min-height: 0;
   min-width: 0;
+
+  /* 新增：热门工况列最小宽度（JS 会动态写入），默认 0 */
+  --hot-col-min-w: 0px;
+  --hot-col-max-frac: 0.38;
 }
 
 @media (max-width: 600px) {
@@ -107,14 +111,17 @@
   min-height: 0;
 }
 
-/* 4) 滚动层 */
+/* 4) 滚动层：仅右侧预留，避免显隐时错觉性右移 */
 .fc-right-card .fc-rank-scroll {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
   max-height: none !important;
   -webkit-overflow-scrolling: touch;
-  scrollbar-gutter: stable both-edges;
+  scrollbar-gutter: stable; /* 仅右侧预留 */
+}
+@supports not (scrollbar-gutter: stable) {
+  .fc-right-card .fc-rank-scroll { padding-right: var(--sbw); }
 }
 
 .fc-right-card .fc-rank-scroll::-webkit-scrollbar { width: 8px; }
@@ -134,6 +141,18 @@
   background: var(--bg-secondary);
   box-shadow: 0 2px 3px -1px rgba(0,0,0,.08);
 }
+
+/* 新增：右侧面板所有列表表头字体 15px（覆盖通用 14px） */
+.fc-right-card .fc-rank-table thead th {
+  font-size: 15px;
+}
+
+/* 通过 colgroup 控制第 6 列宽度（仍保留上限，作为兜底） */
+.fc-right-card .fc-rank-table colgroup col:nth-child(6) {
+  width: min(var(--hot-col-min-w, 0px), calc(var(--hot-col-max-frac, 0.38) * 100vw));
+  min-width: min(var(--hot-col-min-w, 0px), calc(var(--hot-col-max-frac, 0.38) * 100vw));
+}
+
 [data-theme="dark"] .fc-right-card .fc-rank-table thead th {
   box-shadow: 0 2px 3px -1px rgba(0,0,0,.45);
   backdrop-filter:saturate(120%) blur(8px);
@@ -155,6 +174,12 @@
 .fc-right-card .fc-rank-table td:last-child {
   padding: 8px;
   background: linear-gradient(to left, transparent 30px, rgba(0,0,0,0) 50px);
+}
+
+/* 新增：热门工况（第 6 列）最小宽度，受 --hot-col-min-w 约束，设置上限避免狭窄屏过宽 */
+.fc-right-card .fc-rank-table th:nth-child(6),
+.fc-right-card .fc-rank-table td:nth-child(6) {
+  min-width: min(var(--hot-col-min-w, 0px), 52vw);
 }
 
 .fc-right-card .fc-rank-box { position: relative; }
@@ -193,7 +218,6 @@
   .fc-right-card > nav.fc-tabs { margin-bottom:4px; }
   .fc-right-card .fc-rank-box { padding-top:0; }
 
-  /* ≤600px 时，继续确保三大页签不被拆到两行（仅对 right-panel 生效） */
   .fc-tabs[data-tab-group="right-panel"] .fc-tabs__primary-group {
     flex: 1 1 100%;
     width: 100%;
@@ -216,7 +240,6 @@
   overscroll-behavior-y: auto;
   scrollbar-width: none;
   touch-action: pan-x pan-y;
-  /* 让内部 sticky 元素以内部滚动容器为参照，不影响内部纵向滚动容器 */
 }
 #right-panel-container::-webkit-scrollbar { display: none; }
 
@@ -232,4 +255,151 @@
   width: 100%;
   scroll-snap-align: start;
   scroll-snap-stop: always;
+}
+
+/* ===== 查询榜展开 UI 与子行样式（保留展开按钮样式） ===== */
+.fc-row-expander {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px; height: 22px;
+  border-radius: 4px;
+  border: 1px solid var(--border-color);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  margin-right: 6px;
+  transition: background .15s ease, color .15s ease, border-color .15s ease;
+}
+.fc-row-expander:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+.fc-row-expander i { transition: transform .18s ease; }
+.fc-row-expander.is-open i,
+.fc-row-expander[aria-expanded="true"] i { transform: rotate(90deg); }
+
+/* 子行公共变量 */
+:root {
+  --subrow-h: 26px;
+  /* 旧结构回退用的视觉缩进（兜底） */
+  --subrow-indent: clamp(240px, 32vw, 480px);
+}
+
+/* 子行基础：固定行高由 .fc-subrow__row 控制 */
+.fc-subrow {
+  position: relative;     /* 参与堆叠 */
+  z-index: 1;             /* 子行在下层 */
+}
+.fc-subrow td {
+  background: none;
+  padding: 0;             /* 统一移除 padding，内部容器自控 */
+}
+.fc-subrow .fc-subrow__row {
+  height: var(--subrow-h);
+  display: flex; align-items: center; gap: 8px;
+  padding: 0; box-sizing: border-box;
+}
+
+/* 使用 colspan=6 的单元格作为锚点容器 */
+.fc-subrow td[colspan] .fc-subrow__row {
+  position: relative;
+  padding: 0; /* 关键：去掉这里的左 padding，避免与 anchor 重复偏移 */
+}
+/* 锚点：优先使用运行时测得的 --subrow-anchor-x，失败则退回 --subrow-indent */
+.fc-subrow td[colspan] .fc-subrow__indent {
+  position: absolute;
+  left: var(--subrow-anchor-x, var(--subrow-indent));
+  top: 0;
+  bottom: 0;
+  display: inline-flex;
+  align-items: center;
+  /* 不需要 gap，由小圆点改为绝对定位 */
+  gap: 0;
+}
+
+/* 风阻文案：仍然贴在锚点左侧，右对齐，超长向左延展 */
+.fc-subrow td[colspan] .fc-subrow__extra-left {
+  position: absolute;
+  right: 100%;
+  margin-right: 8px;
+  color: var(--text-secondary);
+  font-size: 14px;
+  line-height: 1;
+  opacity: .85;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* 小圆点放到锚点左侧，不参与排版，避免把工况文字右推 */
+.fc-subrow td[colspan] .fc-subrow__dot {
+  position: absolute;
+  left: -14px;            /* 6px 点 + 8px 间距 */
+  top: 50%;
+  transform: translateY(-50%);
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background-color: var(--text-secondary);
+  opacity: .6;
+  box-shadow: 0 0 0 0.5px rgba(0,0,0,.12);
+}
+
+/* 倒数第二列（查询次数）左对齐，并补齐与父行相同的左内边距（JS 注入） */
+.fc-subrow td:nth-last-child(2) { text-align: left; }
+.fc-subrow td:nth-last-child(2) .fc-subrow__row {
+  justify-content: flex-start;
+  padding-left: var(--subrow-count-pl, .75rem);
+}
+/* 最后一列（操作列）居中 */
+.fc-subrow td:last-child .fc-subrow__row { justify-content: center; }
+
+/* 父行小过渡通用类：不指定初始 transform/opacity，由 JS 控制 */
+.fc-fade-slide {
+  transition: transform .2s ease, opacity .2s ease;
+  will-change: transform, opacity;
+}
+
+/* 动画中的“下方条目”抬高层级并用表格背景遮盖子行 */
+.fc-row-animating {
+  position: relative;
+  z-index: 3;
+
+  /* 顶层：容器半透明层（需用 image 层保证在最上） */
+  /* 中层：网页渐变（视口尺寸 + 运行时坐标对齐“对应那一块”） */
+  background-image:
+    linear-gradient(var(--bg-secondary), var(--bg-secondary)),
+    var(--dark-rand-gradient);
+  background-repeat: no-repeat, no-repeat;
+  background-size: 100% 100%, 100vw 100vh;
+  background-position:
+    0 0,
+    calc(var(--row-vp-left, 0px) * -1) calc(var(--row-vp-top, 0px) * -1);
+  /* 关闭毛玻璃以防透色；可保留，也可去掉 isolation（看你实际是否需要） */
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  isolation: isolate;
+}
+
+/* 行内容在遮罩之上正常显示 */
+.fc-row-animating > td,
+.fc-row-animating > th {
+  position: relative;
+  z-index: 1;
+}
+
+/* 新增：列裁切工具类，供“接力式”位移动画期间使用 */
+.fc-col-clip { overflow: hidden !important; }
+
+
+/* ADD: Collapse 遮罩，背景结构与 .fc-row-animating 保持一致（双层：容器底色 + 深色随机渐变） */
+.fc-collapse-mask {
+  /* 顶层：容器本底色（保证覆盖子行本体） */
+  /* 底层：深色随机渐变（随视口对齐，与行动画保持一致） */
+  background-image:
+    linear-gradient(var(--bg-secondary), var(--bg-secondary)),
+    var(--dark-rand-gradient);
+  background-repeat: no-repeat, no-repeat;
+  background-size: 100% 100%, 100vw 100vh;
+  background-position:
+    0 0,
+    calc(var(--row-vp-left, 0px) * -1) calc(var(--row-vp-top, 0px) * -1);
+
+  pointer-events: none; /* 避免拦截交互 */
 }

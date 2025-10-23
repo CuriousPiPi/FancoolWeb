@@ -586,19 +586,6 @@ function resizeChart(){
 }
 
 /* =========================================================
-   子段 UI
-   ========================================================= */
-const rightSubsegContainer = $('#rightSubsegContainer');
-const segQueriesOrig = document.querySelector('#top-queries-pane .fc-seg');
-const segSearchOrig  = document.querySelector('#search-results-pane .fc-seg');
-if (segQueriesOrig && rightSubsegContainer){ segQueriesOrig.dataset.paneId='top-queries-pane'; rightSubsegContainer.appendChild(segQueriesOrig); }
-if (segSearchOrig && rightSubsegContainer){ segSearchOrig.dataset.paneId='search-results-pane'; rightSubsegContainer.appendChild(segSearchOrig); }
-function updateRightSubseg(activeTab){
-  if (segQueriesOrig) segQueriesOrig.style.display = (activeTab==='top-queries')?'inline-flex':'none';
-  if (segSearchOrig)  segSearchOrig.style.display  = (activeTab==='search-results')?'inline-flex':'none';
-}
-
-/* =========================================================
    最近点赞懒加载
    ========================================================= */
 let recentLikesLoaded = false;
@@ -683,7 +670,8 @@ function rebuildRecentLikes(list){
         <div class="flex items-center justify-between scenario-row">
           <div class="scenario-text text-sm text-gray-700">${scenText}</div>
           <div class="actions">
-            <button class="like-button recent-like-button" title="取消点赞"
+            <button class="like-button recent-like-button"
+                    data-tooltip="取消点赞"
                     data-model-id="${escapeHtml(s.mid||'')}"
                     data-condition-id="${escapeHtml(s.cid||'')}">
               <i class="fa-solid fa-thumbs-up text-red-500"></i>
@@ -801,41 +789,6 @@ function loadRecentLikesIfNeeded(){
 /* =========================================================
    顶部 / 左 / 右三个 Tab 管理
    ========================================================= */
-(function initRightPanelSnapTabs(){
-  function run(){
-    const card = document.querySelector('.fc-right-card');
-    if (!card) return;
-    const container = card.querySelector('.fc-tab-container');
-    const wrapper   = card.querySelector('.fc-tab-wrapper');
-    if (!container || !wrapper) return;
-
-    // 确保有 id（与下方其它调用保持一致）
-    if (!container.id) container.id = 'right-panel-container';
-    if (!wrapper.id)   wrapper.id   = 'right-panel-wrapper';
-
-    // 标记：右侧页签已启用 Scroll Snap，供 activateTab 等逻辑识别
-    window.__RIGHT_PANEL_SNAP_ON = true;
-
-    // 初始化（不保存状态），默认激活“近期热门”
-    initSnapTabScrolling({
-      containerId: container.id,
-      group: 'right-panel',
-      persistKey: null,
-      defaultTab: 'top-queries',
-      onActiveChange: (tab) => {
-        // 保持既有副作用：子页签显隐 + 懒加载
-        if (typeof updateRightSubseg === 'function') updateRightSubseg(tab);
-        if (tab === 'recent-updates' && typeof loadRecentUpdatesIfNeeded === 'function') {
-          loadRecentUpdatesIfNeeded();
-        }
-      },
-      clickScrollBehavior: 'smooth'
-    });
-  }
-  if (document.readyState !== 'loading') run();
-  else document.addEventListener('DOMContentLoaded', run, { once:true });
-})();
-
 function activateTab(group, tabName, animate = false) {
   // 右侧主容器启用 snap 后，交由 initSnapTabScrolling 接管
   if (group === 'sidebar-top' || group === 'left-panel' || (group === 'right-panel' && window.__RIGHT_PANEL_SNAP_ON)) return;
@@ -861,9 +814,12 @@ function activateTab(group, tabName, animate = false) {
     localStorage.setItem('activeTab_' + group, tabName);
   }
   if (group === 'right-panel') {
-    updateRightSubseg(tabName);
+    // 原：updateRightSubseg(tabName)
+    // 现：通过 RightPanel 暴露的 API 调用，避免直接依赖内部函数
+    window.RightPanel?.updateSubseg?.(tabName);
     if (tabName === 'recent-updates') {
-      loadRecentUpdatesIfNeeded();
+      // 通过 right-panel 内聚 API 触发懒加载
+      window.RightPanel?.recentUpdates?.loadIfNeeded?.();
     }
   }
 }
@@ -1065,7 +1021,7 @@ function rebuildSelectedIndex(){
 rebuildSelectedIndex();
 rebuildSelectedPairIndex();
 
-// CHANGED: 快捷按钮 HTML 生成，优先用 (model_id, condition_id) 判断是否已存在
+// CHANGED: 快捷按钮 HTML 生成，始终输出“加号”图标，旋转由 CSS 决定
 function buildQuickBtnHTML(addType, brand, model, modelId, conditionId, condition, logSource){
   const mapKey = `${escapeHtml(brand)}||${escapeHtml(model)}||${escapeHtml(condition||'')}`;
   const hasIds = (modelId != null && conditionId != null && String(modelId) !== '' && String(conditionId) !== '');
@@ -1074,8 +1030,9 @@ function buildQuickBtnHTML(addType, brand, model, modelId, conditionId, conditio
     : selectedMapSet.has(mapKey);
 
   const mode = isDup ? 'remove' : 'add';
-  const title = isDup ? '从图表移除' : '添加到图表';
-  const icon = isDup ? '<i class="fa-solid fa-xmark"></i>' : '<i class="fa-solid fa-plus"></i>';
+  const tipText = isDup ? '从图表移除' : '添加到图表';
+  // 始终用加号，视觉“X”通过旋转得到（见 CSS）
+  const icon = '<i class="fa-solid fa-plus"></i>';
   const defaultSourceMap = { likes:'liked', rating:'top_rating', ranking:'top_query', search:'search' };
   const sourceAttr = logSource || defaultSourceMap[addType] || 'unknown';
 
@@ -1088,7 +1045,7 @@ function buildQuickBtnHTML(addType, brand, model, modelId, conditionId, conditio
 
   return `
     <button class="fc-btn-icon-add ${cls} fc-tooltip-target"
-            title="${title}"
+            data-tooltip="${tipText}"
             data-mode="${mode}"
             data-add-type="${addType}"
             data-log-source="${escapeHtml(sourceAttr)}"
@@ -1101,13 +1058,22 @@ function buildQuickBtnHTML(addType, brand, model, modelId, conditionId, conditio
     </button>`;
 }
 
+// CHANGED: 状态切换不再改成 X；确保始终是 “+”，旋转交给 CSS
 function toRemoveState(btn){
   btn.dataset.mode='remove';
   btn.classList.remove('js-ranking-add','js-rating-add','js-search-add','js-likes-add');
   btn.classList.add('js-list-remove');
-  btn.title='从图表移除';
-  btn.innerHTML='<i class="fa-solid fa-xmark"></i>';
+  btn.setAttribute('data-tooltip','从图表移除');
+  btn.removeAttribute('title');
+  // 统一图标为 “+” ，旋转由 [data-mode="remove"] 控制
+  if (!btn.querySelector('i')) {
+    btn.innerHTML = '<i class="fa-solid fa-plus"></i>';
+  } else {
+    const ic = btn.querySelector('i');
+    ic.className = 'fa-solid fa-plus';
+  }
 }
+
 function toAddState(btn){
   const addType = btn.dataset.addType || (btn.classList.contains('js-rating-add')?'rating'
     : btn.classList.contains('js-ranking-add')?'ranking'
@@ -1117,9 +1083,17 @@ function toAddState(btn){
   btn.classList.add(addType==='rating'?'js-rating-add'
     : addType==='ranking'?'js-ranking-add'
       : addType==='search'?'js-search-add':'js-likes-add');
-  btn.title='添加到图表';
-  btn.innerHTML='<i class="fa-solid fa-plus"></i>';
+  btn.setAttribute('data-tooltip','添加到图表');
+  btn.removeAttribute('title');
+  // 统一图标为 “+”
+  if (!btn.querySelector('i')) {
+    btn.innerHTML = '<i class="fa-solid fa-plus"></i>';
+  } else {
+    const ic = btn.querySelector('i');
+    ic.className = 'fa-solid fa-plus';
+  }
 }
+
 function mapKeyFromDataset(d){
   const b = unescapeHtml(d.brand||'');
   const m = unescapeHtml(d.model||'');
@@ -1195,7 +1169,7 @@ function rebuildSelectedFans(fans){
         <button class="like-button mr-3" data-fan-key="${f.key}" data-model-id="${f.model_id}" data-condition-id="${f.condition_id}">
           <i class="fa-solid fa-thumbs-up ${isLiked?'text-red-500':'text-gray-400'}"></i>
         </button>
-        <button class="fc-icon-remove text-lg js-remove-fan" data-fan-key="${f.key}" title="移除">
+        <button class="fc-icon-remove text-lg js-remove-fan" data-fan-key="${f.key}" data-tooltip="移除">
           <i class="fa-solid fa-xmark"></i>
         </button>
       </div>`;
@@ -1277,221 +1251,6 @@ async function apiPost(url, payload){
   });
   if (!resp.ok) throw new Error('HTTP '+resp.status);
   return resp.json();
-}
-
-/* =========================================================
-   点赞排行
-   ========================================================= */
-let likesTabLoaded = false;
-let likesTabLastLoad = 0;
-const LIKES_TTL = 120000;
-
-let updatesTabLoaded = false;
-let updatesTabLastLoad = 0;
-const UPDATES_TTL = 600000; // 10 分钟
-let _updatesPending = false, _updatesDebounce = null;
-
-function needReloadLikes(){
-  if (!likesTabLoaded) return true;
-  return (Date.now() - likesTabLastLoad) > LIKES_TTL;
-}
-let _rtPending = false, _rtDebounce = null;
-
-/* reloadTopRatings：保持结构但移除旧兼容缓存结构中 root.data/items 多层拆解 */
-function reloadTopRatings(debounce=true){
-  if (debounce){
-    if (_rtDebounce) clearTimeout(_rtDebounce);
-    return new Promise(resolve=>{
-      _rtDebounce = setTimeout(()=>resolve(reloadTopRatings(false)), 220);
-    });
-  }
-  if (_rtPending) return Promise.resolve();
-  _rtPending = true;
-  const cacheNS = 'top_ratings';
-  const payload = {};
-  const cached = window.__APP.cache.get(cacheNS, payload);
-  if (cached && !needReloadLikes()){
-    applyRatingTable(cached.data);  // 缓存中直接存标准结构
-    _rtPending = false;
-    return Promise.resolve();
-  }
-  const tbody = document.getElementById('ratingRankTbody');
-  if (tbody && !likesTabLoaded){
-    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-gray-500 py-6">加载中...</td></tr>';
-  }
-  return fetch('/api/top_ratings')
-    .then(r=>r.json())
-    .then(j=>{
-      const n = normalizeApiResponse(j);
-      if (!n.ok){
-        showError(n.error_message || '获取失败');
-        return;
-      }
-      const data = n.data; // { items:[...] }
-      window.__APP.cache.set(cacheNS, payload, { data }, LIKES_TTL);
-      applyRatingTable(data);
-    })
-    .catch(err=>showError('获取点赞排行异常: '+err.message))
-    .finally(()=>{ _rtPending=false; });
-}
-
-// CHANGED: 顶部“好评榜”渲染，使用 condition_name_zh，并传入新签名
-function applyRatingTable(resp){
-  const tbody = document.getElementById('ratingRankTbody');
-  if (!tbody) return;
-
-  const list = (resp && resp.items) ||
-               (resp && resp.data && resp.data.items) ||
-               (resp && resp.data && Array.isArray(resp.data.items) ? resp.data.items : []);
-
-  if (!Array.isArray(list)) {
-    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-red-500 py-6">数据格式异常</td></tr>';
-    return;
-  }
-  if (list.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-gray-500 py-6">暂无点赞排行数据</td></tr>';
-    return;
-  }
-
-  let html = '';
-  list.forEach((r, idx)=>{
-    const rank = idx + 1;
-    const medal = rank===1?'gold':rank===2?'silver':rank===3?'bronze':'';
-    const rankCell = medal
-      ? `<i class="fa-solid fa-medal ${medal} text-2xl"></i>`
-      : `<span class="font-medium">${rank}</span>`;
-
-    const scen = escapeHtml(r.condition_name_zh || '');
-    const priceText = (r.reference_price > 0) ? escapeHtml(String(r.reference_price)) : '-';
-
-    html += `
-      <tr class="hover:bg-gray-50">
-        <td class="fc-rank-cell">${rankCell}</td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(r.brand_name_zh)}</span></td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(r.model_name)} (${r.max_speed} RPM)</span></td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(r.size)}x${escapeHtml(r.thickness)}</span></td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${priceText}</span></td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${scen}</span></td>
-        <td class="text-blue-600 font-medium">${escapeHtml(r.like_count)}</td>
-        <td>
-          ${buildQuickBtnHTML('rating', r.brand_name_zh, r.model_name, r.model_id, r.condition_id, r.condition_name_zh, 'top_rating')}
-        </td>
-      </tr>`;
-  });
-  tbody.innerHTML = html;
-  likesTabLoaded = true;
-  likesTabLastLoad = Date.now();
-  syncQuickActionButtons();
-}
-
-function loadLikesIfNeeded(){
-  if (!needReloadLikes()) return;
-  showLoading('rating-refresh','加载好评榜...');
-  reloadTopRatings(false).finally(()=>hideLoading('rating-refresh'));
-}
-document.addEventListener('DOMContentLoaded', () => {
-  reloadTopRatings(false).catch(()=>{});
-});
-
-// 3) 近期更新：加载函数（仿照 reloadTopRatings）
-function reloadRecentUpdates(debounce = true) {
-  if (debounce) {
-    if (_updatesDebounce) clearTimeout(_updatesDebounce);
-    return new Promise(resolve => {
-      _updatesDebounce = setTimeout(() => resolve(reloadRecentUpdates(false)), 220);
-    });
-  }
-  if (_updatesPending) return Promise.resolve();
-  _updatesPending = true;
-
-  const cacheNS = 'recent_updates';
-  const payload = {};
-  const cached = window.__APP.cache.get(cacheNS, payload);
-  if (cached && !needReloadUpdates()) {
-    applyRecentUpdatesTable(cached.data);
-    _updatesPending = false;
-    return Promise.resolve();
-  }
-
-  const tbody = document.getElementById('recentUpdatesTbody');
-  if (tbody && !updatesTabLoaded) {
-    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-gray-500 py-6">加载中...</td></tr>';
-  }
-
-  return fetch('/api/recent_updates')
-    .then(r => r.json())
-    .then(j => {
-      const n = normalizeApiResponse(j);
-      if (!n.ok) {
-        showError(n.error_message || '获取近期更新失败');
-        return;
-      }
-      const data = n.data; // { items:[...] }
-      window.__APP.cache.set(cacheNS, payload, { data }, UPDATES_TTL);
-      applyRecentUpdatesTable(data);
-    })
-    .catch(err => showError('获取近期更新异常: ' + err.message))
-    .finally(() => { _updatesPending = false; });
-}
-
-function needReloadUpdates() {
-  if (!updatesTabLoaded) return true;
-  return (Date.now() - updatesTabLastLoad) > UPDATES_TTL;
-}
-
-// CHANGED: 近期更新渲染，使用新签名
-function applyRecentUpdatesTable(resp) {
-  const tbody = document.getElementById('recentUpdatesTbody');
-  if (!tbody) return;
-
-  const list = (resp && resp.items) ||
-               (resp && resp.data && Array.isArray(resp.data.items) ? resp.data.items : []);
-
-  if (!Array.isArray(list)) {
-    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-red-500 py-6">数据格式异常</td></tr>';
-    return;
-  }
-  if (list.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="7" class="text-center text-gray-500 py-6">暂无近期更新数据</td></tr>';
-    return;
-  }
-
-  let html = '';
-  list.forEach(r => {
-    const brand = r.brand_name_zh || '';
-    const model = r.model_name || '';
-    const maxSpeed = (r.max_speed != null) ? ` (${r.max_speed} RPM)` : '';
-    const sizeText = `${escapeHtml(r.size)}x${escapeHtml(r.thickness)}`;
-    const scen = escapeHtml(r.condition_name_zh || '');
-    const updateText = escapeHtml(r.update_date);
-    const descRaw = (r.description != null && String(r.description).trim() !== '') ? String(r.description) : '-';
-    const desc = escapeHtml(descRaw);
-
-    html += `
-      <tr class="hover:bg-gray-50">
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(brand)}</span></td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${escapeHtml(model)}${maxSpeed}</span></td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${sizeText}</span></td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${scen}</span></td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${updateText}</span></td>
-        <td class="nowrap fc-marquee-cell"><span class="fc-marquee-inner">${desc}</span></td>
-        <td>
-          ${buildQuickBtnHTML('ranking', brand, model, r.model_id, r.condition_id, r.condition_name_zh, 'update_notice')}
-        </td>
-      </tr>`;
-  });
-
-  tbody.innerHTML = html;
-  updatesTabLoaded = true;
-  updatesTabLastLoad = Date.now();
-  syncQuickActionButtons();
-}
-
-// 5) 近期更新：触发装载（供 activateTab 调用）
-function loadRecentUpdatesIfNeeded() {
-  if (!needReloadUpdates()) return;
-  showLoading('updates-refresh', '加载近期更新...');
-  reloadRecentUpdates(false).finally(() => hideLoading('updates-refresh'));
 }
 
 /* =========================================================
@@ -1592,10 +1351,6 @@ const scheduleRecentLikesRefresh = (function(){
   const debounced = createDelayed(()=>{ if (recentLikesLoaded) reloadRecentLikes(); }, RECENT_LIKES_REFRESH_DELAY);
   return function(){ debounced(); };
 })();
-const scheduleTopRatingsRefresh = (function(){
-  const debounced = createDelayed(()=>{ if (likesTabLoaded) reloadTopRatings(false); }, TOP_RATINGS_REFRESH_DELAY);
-  return function(){ debounced(); };
-})();
 
 document.addEventListener('click', async e=>{
   const likeBtn = safeClosest(e.target, '.like-button');
@@ -1636,7 +1391,6 @@ document.addEventListener('click', async e=>{
           fetchAllLikeKeys();
         }
         scheduleRecentLikesRefresh();
-        scheduleTopRatingsRefresh();
         showSuccess(prevLiked ? '已取消点赞' : '已点赞');
       })
       .catch(err=>{
@@ -1886,119 +1640,6 @@ document.addEventListener('mouseleave', (e)=>{
   stopRecentLikesMarquee(row);
 }, true);
 
-/* =========================================================
-   Segment 切换
-   ========================================================= */
-document.addEventListener('click',(e)=>{
-  const btn = safeClosest(e.target,'.fc-seg__btn');
-  if (!btn) return;
-  const seg = btn.closest('.fc-seg'); if (!seg) return;
-  const targetId = btn.dataset.target;
-  seg.querySelectorAll('.fc-seg__btn').forEach(b=>b.classList.toggle('is-active', b===btn));
-  seg.setAttribute('data-active', targetId);
-  const paneId = seg.dataset.paneId;
-  const pane = paneId ? document.getElementById(paneId):null;
-  if (pane) pane.querySelectorAll('.fc-rank-panel').forEach(p=>p.classList.toggle('active', p.id===targetId));
-  if (targetId === 'likes-panel') loadLikesIfNeeded();
-});
-
-/* 拖动式小子段切换（保留） */
-(function initRightSegSwitchLikeXAxis() {
-  const segs = document.querySelectorAll('#rightSubsegContainer .fc-seg');
-  if (!segs.length) return;
-  segs.forEach(seg => {
-    const thumb = seg.querySelector('.fc-seg__thumb');
-    const btns = seg.querySelectorAll('.fc-seg__btn');
-    if (!thumb || btns.length !== 2) return;
-    let dragging = false;
-    let startX = 0;
-    let basePercent = 0;
-    let lastPercent = 0;
-    function activeIsRight() {
-      const act = seg.getAttribute('data-active') || '';
-      return act.endsWith('likes-panel');
-    }
-    function pointInThumb(clientX, clientY) {
-      const r = thumb.getBoundingClientRect();
-      return clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom;
-    }
-    function start(e) {
-      const cx = (e.touches ? e.touches[0].clientX : e.clientX) || 0;
-      const cy = (e.touches ? e.touches[0].clientY : e.clientY) || 0;
-      if (!pointInThumb(cx, cy)) return;
-      dragging = true;
-      startX = cx;
-      basePercent = activeIsRight() ? 100 : 0;
-      lastPercent = basePercent;
-      thumb.style.transition = 'none';
-      if (e.cancelable) e.preventDefault();
-    }
-    function move(e) {
-      if (!dragging) return;
-      const cx = (e.touches ? e.touches[0].clientX : e.clientX) || 0;
-      const dx = cx - startX;
-      const w = thumb.getBoundingClientRect().width || 1;
-      let percent = basePercent + (dx / w) * 100;
-      percent = Math.max(0, Math.min(100, percent));
-      lastPercent = percent;
-      thumb.style.transform = `translateX(${percent}%)`;
-      if (e.cancelable) e.preventDefault();
-    }
-    function end() {
-      if (!dragging) return;
-      dragging = false;
-      const goRight = lastPercent >= 50;
-      const targetBtn = goRight ? btns[1] : btns[0];
-      thumb.style.transition = '';
-      thumb.style.transform = '';
-      targetBtn.click();
-    }
-    seg.addEventListener('mousedown', start);
-    document.addEventListener('mousemove', move, { passive: false });
-    document.addEventListener('mouseup', end);
-    seg.addEventListener('touchstart', start, { passive: false });
-    document.addEventListener('touchmove', move, { passive: false });
-    document.addEventListener('touchend', end);
-  });
-})();
-
-/* 主容器响应式 */
-(function initRightPanelResponsiveWrap(){
-  const card = document.querySelector('.fc-right-card');
-  if (!card || !('ResizeObserver' in window)) return;
-  const APPLY_W = 520;
-  const ro = new ResizeObserver(entries=>{
-    for (const entry of entries){
-      const w = entry.contentRect.width;
-      if (w < APPLY_W) {
-        card.classList.add('rp-narrow');
-      } else {
-        card.classList.remove('rp-narrow');
-      }
-    }
-  });
-  ro.observe(card);
-})();
-(function initMainPanelsAdaptiveStack(){
-  if (!('ResizeObserver' in window)) return;
-  const container = document.getElementById('main-panels');
-  if (!container) return;
-  const THRESHOLD = 980;
-  function apply(width){
-    if (width < THRESHOLD) {
-      container.classList.add('fc-force-col');
-    } else {
-      container.classList.remove('fc-force-col');
-    }
-  }
-  apply(container.getBoundingClientRect().width);
-  const ro = new ResizeObserver(entries=>{
-    for (const entry of entries){
-      apply(entry.contentRect.width);
-    }
-  });
-  ro.observe(container);
-})();
 
 /* =========================================================
    scheduleAdjust
@@ -2164,9 +1805,6 @@ async function primeSelectedLikeStatus(){
 
 }
 
-/* 初始右侧子段显示状态 */
-updateRightSubseg('top-queries');
-
 /* 分享模式自动滚动 */
 (function autoScrollToChartOnShare(){
   try {
@@ -2212,20 +1850,6 @@ initSnapTabScrolling({
   persistKey: 'activeTab_left-panel'
 });
 
-// 新增：右侧主页签 Scroll Snap（不保存状态，默认“近期热门”）
-initSnapTabScrolling({
-  containerId: 'right-panel-container',
-  group: 'right-panel',
-  persistKey: null,             // 不保存状态
-  defaultTab: 'top-queries',    // 默认激活“近期热门”
-  onActiveChange: (tab) => {
-    updateRightSubseg && updateRightSubseg(tab);
-    if (tab === 'recent-updates') {
-      loadRecentUpdatesIfNeeded && loadRecentUpdatesIfNeeded();
-    }
-  }
-});
-
 /* 模块注册 */
 window.__APP.modules = {
   overlay: {
@@ -2245,8 +1869,8 @@ window.__APP.modules = {
     cache: window.__APP.cache
   },
   rankings: {
-    reloadTopRatings: typeof reloadTopRatings === 'function' ? reloadTopRatings : function(){},
-    loadLikesIfNeeded: typeof loadLikesIfNeeded === 'function' ? loadLikesIfNeeded : function(){}
+    reloadTopRatings: () => window.RightPanel?.ratings?.reloadTopRatings?.(false),
+    loadLikesIfNeeded: () => window.RightPanel?.ratings?.loadLikesIfNeeded?.()
   },
   state: {
     processState: typeof processState === 'function' ? processState : function(){}
@@ -2348,19 +1972,6 @@ window.addEventListener('resize', () => {
   __titleMaskRaf = requestAnimationFrame(applyRecentLikesTitleMask);
 });
 
-/* 记录用户是否点击过侧栏按钮 */
-const LS_KEY_SIDEBAR_TOGGLE_CLICKED = 'sidebar_toggle_clicked';
-function markSidebarToggleClicked(){
-  try { localStorage.setItem(LS_KEY_SIDEBAR_TOGGLE_CLICKED, '1'); } catch(_) {}
-}
-function userHasClickedSidebarToggle(){
-  try { return localStorage.getItem(LS_KEY_SIDEBAR_TOGGLE_CLICKED) === '1'; } catch(_) { return false; }
-}
-function maybeAutoOpenSidebarOnAdd(){
-  if (userHasClickedSidebarToggle()) return;
-  expandSidebarIfCollapsed();
-}
-
 /* visit_start */
 (function initVisitStartMinimal(){
   try { if (sessionStorage.getItem('visit_started') === '1') return; } catch(_) {}
@@ -2381,20 +1992,48 @@ function maybeAutoOpenSidebarOnAdd(){
   });
 })();
 
-/* 全局 Tooltip */
 (function initGlobalTooltip(){
   const MARGIN = 8;
-  let tip = null, currAnchor = null, hideTimer = null;
+
+  // 托管范围：带 data-tooltip + 展开/收起 + 快捷按钮/操作
+  const EXPAND_TOGGLE_SELECTOR = '.fc-expand-toggle';
+  const TOOLTIP_ANCHOR_SELECTOR = [
+    '[data-tooltip]',
+    EXPAND_TOGGLE_SELECTOR,
+    '.fc-tooltip-target',
+    '.fc-btn-icon-add',
+    '.like-button',
+    '.js-remove-fan',
+    '.js-restore-fan',
+    '#sidebar-toggle',   // 侧栏开关
+    '#themeToggle',      // 主题切换
+    '.fc-info-btn'       // 数据来源与说明
+  ].join(', ');
+
+  function isTopControl(el){
+    return !!(el && (el.matches('#sidebar-toggle') || el.matches('#themeToggle') || el.matches('.fc-info-btn')));
+  }
+
+  // 延迟
+  const EXPAND_TOGGLE_TIP_KEY = 'suppress_expand_toggle_tooltip';
+  const EXPAND_TOGGLE_DELAY = 700; // 展开/收起延迟
+  const QUICK_ACTION_DELAY = 700;  // 快捷按钮：轻微延迟
+  const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0);
+
+  let tip = null, currAnchor = null;
+  let hideTimer = null, autoHideTimer = null, showTimer = null;
+
   function ensureTip(){
     if (tip) return tip;
     tip = document.createElement('div');
     tip.id = 'appTooltip';
+    // 防换行：几个字不再折 3 行
+    tip.style.whiteSpace = 'nowrap';
+    tip.style.maxWidth = 'none';
     document.body.appendChild(tip);
     return tip;
   }
-  function setText(html){
-    ensureTip().innerHTML = html;
-  }
+  function setText(html){ ensureTip().innerHTML = html; }
   function placeAround(anchor, preferred='top'){
     const t = ensureTip();
     const rect = anchor.getBoundingClientRect();
@@ -2404,72 +2043,183 @@ function maybeAutoOpenSidebarOnAdd(){
     t.style.left = '-9999px';
     t.style.top  = '-9999px';
     const tw = t.offsetWidth, th = t.offsetHeight;
+
     let placement = preferred;
     const topSpace = rect.top;
     const bottomSpace = vh - rect.bottom;
     if (preferred === 'top' && topSpace < th + 12) placement = 'bottom';
     if (preferred === 'bottom' && bottomSpace < th + 12) placement = 'top';
+
     let cx = rect.left + rect.width / 2;
     cx = Math.max(MARGIN + tw/2, Math.min(vw - MARGIN - tw/2, cx));
-    let top;
-    if (placement === 'top') top = rect.top - th - 10; else top = rect.bottom + 10;
+    const top = placement === 'top' ? (rect.top - th - 10) : (rect.bottom + 10);
+
     t.dataset.placement = placement;
     t.style.left = `${Math.round(cx)}px`;
     t.style.top  = `${Math.round(top)}px`;
     t.style.visibility = '';
   }
+
+  // 立刻托管原生 title
+  function hoistNativeTitle(el){
+    if (!el) return;
+    if (el.hasAttribute('title')) {
+      el.setAttribute('data-title', el.getAttribute('title') || '');
+      el.removeAttribute('title');
+    }
+  }
+
+  // 分类与抑制
+  const isExpandToggle = (el) => !!(el && el.matches(EXPAND_TOGGLE_SELECTOR));
+  const isQuickAction  = (el) => !!(el && el.matches('.fc-btn-icon-add, .like-button, .js-remove-fan, .js-restore-fan'));
+  function isSuppressed(el){
+    if (!isExpandToggle(el)) return false;
+    try { return sessionStorage.getItem(EXPAND_TOGGLE_TIP_KEY) === '1'; } catch(_) { return false; }
+  }
+  function suppressExpandToggleTip(){ try { sessionStorage.setItem(EXPAND_TOGGLE_TIP_KEY, '1'); } catch(_) {} }
+
+  // 点击后静默：直到 mouseleave/focusout 清除
+  function markSilent(el){
+    if (!el) return;
+    el.setAttribute('data-tip-silence', '1');
+  }
+  function clearSilent(el){
+    if (!el) return;
+    el.removeAttribute('data-tip-silence');
+  }
+  function isSilent(el){ return !!(el && el.getAttribute('data-tip-silence') === '1'); }
+
+  // 动态文案
+  function getExpandToggleText(el){
+    const expanded = el.getAttribute('aria-expanded') === 'true';
+    return expanded ? '收起该型号的所有工况' : '展开该型号的所有工况';
+  }
+  function getQuickActionText(el){
+    if (!el) return '';
+    if (el.matches('.fc-btn-icon-add')) {
+      const mode = el.dataset.mode || '';
+      return mode === 'remove' ? '从图表移除' : '添加到图表';
+    }
+    if (el.matches('.like-button')) {
+      const icon = el.querySelector('i');
+      const liked = !!(icon && icon.classList.contains('text-red-500'));
+      return liked ? '取消点赞' : '点赞';
+    }
+    if (el.matches('.js-remove-fan'))  return '移除';
+    if (el.matches('.js-restore-fan')) return '恢复';
+    return '';
+  }
+  function getTooltipText(el){
+    if (isExpandToggle(el)) return getExpandToggleText(el);
+    if (isQuickAction(el))  return getQuickActionText(el);
+    const fromData = el.getAttribute('data-tooltip');
+    if (fromData && fromData.trim() !== '') return fromData;
+    if (el.hasAttribute('title')) return el.getAttribute('title') || '';
+    return el.getAttribute('data-title') || '';
+  }
+
+  function cancelShow(){ if (showTimer){ clearTimeout(showTimer); showTimer = null; } }
   function show(anchor){
+    cancelShow();
     clearTimeout(hideTimer);
+    clearTimeout(autoHideTimer);
+    if (isSilent(anchor)) return; // 静默中不显示
     currAnchor = anchor;
-    const txt = anchor.getAttribute('data-tooltip') || anchor.getAttribute('title') || '';
-    if (anchor.hasAttribute('title')) anchor.setAttribute('data-title', anchor.getAttribute('title')), anchor.removeAttribute('title');
+
+    const txt = getTooltipText(anchor);
+    if (!txt) return;
+
     setText(txt);
     placeAround(anchor, anchor.getAttribute('data-tooltip-placement') || 'top');
     ensureTip().dataset.show = '1';
+
+    if (isTouch) {
+      autoHideTimer = setTimeout(() => hide(true), 1200);
+    }
+  }
+  function scheduleShow(anchor){
+    cancelShow();
+    if (isSilent(anchor)) return;
+    const delay =
+      (anchor && (anchor.matches(EXPAND_TOGGLE_SELECTOR) || isTopControl(anchor)))
+        ? EXPAND_TOGGLE_DELAY
+        : (anchor && anchor.matches('.fc-btn-icon-add, .like-button, .js-remove-fan, .js-restore-fan'))
+          ? QUICK_ACTION_DELAY
+          : 0;
+    if (delay <= 0) { show(anchor); return; }
+    showTimer = setTimeout(() => show(anchor), delay);
   }
   function hide(immediate=false){
     const t = ensureTip();
     const doHide = () => { t.dataset.show = '0'; currAnchor = null; };
-    if (immediate) return doHide();
+    if (immediate){ cancelShow(); return doHide(); }
     hideTimer = setTimeout(doHide, 60);
   }
+
+  // Hover/focus：进入即托管 title，再调度显示
   document.addEventListener('mouseenter', (e) => {
-    let node = e.target;
-    if (node && node.nodeType !== 1) node = node.parentElement;
-    if (!node) return;
-    let el = null;
-    if (node && typeof node.closest === 'function') {
-      try { el = node.closest('[data-tooltip]'); } catch(_) {}
-    }
-    if (!el) el = safeClosest(node, '[data-tooltip]');
+    if (isTouch) return;
+    const el = safeClosest(e.target, TOOLTIP_ANCHOR_SELECTOR);
     if (!el) return;
-    show(el);
+    if (isExpandToggle(el) && isSuppressed(el)) return;
+    hoistNativeTitle(el);
+    scheduleShow(el);
   }, true);
-  document.addEventListener('mouseleave', (e) => {
-    let node = e.target;
-    if (node && node.nodeType !== 1) node = node.parentElement;
-    if (!node) return;
-    let el = null;
-    if (node && typeof node.closest === 'function') {
-      try { el = node.closest('[data-tooltip]'); } catch(_) {}
-    }
-    if (!el) el = safeClosest(node, '[data-tooltip]');
+
+  document.addEventListener('mouseout', (e) => {
+    if (isTouch) return;
+    const el = safeClosest(e.target, TOOLTIP_ANCHOR_SELECTOR);
     if (!el) return;
+    const to = e.relatedTarget;
+    // 如果仍在同一锚点内移动，不算真正离开
+    if (to && (to === el || el.contains(to))) return;
+    cancelShow();
     hide(false);
+    clearSilent(el); // 真正离开才解除“本次抑制”
   }, true);
+
   document.addEventListener('focusin', (e)=>{
-    const el = safeClosest(e.target, '[data-tooltip]');
+    if (isTouch) return;
+    const el = safeClosest(e.target, TOOLTIP_ANCHOR_SELECTOR);
     if (!el) return;
-    show(el);
+    if (isExpandToggle(el) && isSuppressed(el)) return;
+    hoistNativeTitle(el);
+    scheduleShow(el);
   });
   document.addEventListener('focusout', (e)=>{
-    const el = safeClosest(e.target, '[data-tooltip]');
+    if (isTouch) return;
+    const el = safeClosest(e.target, TOOLTIP_ANCHOR_SELECTOR);
     if (!el) return;
+    cancelShow();
     hide(false);
+    clearSilent(el); // 失焦后解除静默
   });
+
+  // 触屏：tap 显示 + 自动隐藏
+  document.addEventListener('touchstart', (e) => {
+    const el = safeClosest(e.target, TOOLTIP_ANCHOR_SELECTOR);
+    if (!el) return;
+    if (isExpandToggle(el) && isSuppressed(el)) return;
+    hoistNativeTitle(el);
+    show(el);
+  }, { passive: true, capture: true });
+
+  // 点击后：立即托管 title + 本会话抑制（仅展开按钮）+ 至离开前静默该锚点
+  document.addEventListener('click', (e) => {
+    const el = safeClosest(e.target, TOOLTIP_ANCHOR_SELECTOR);
+    if (!el) return;
+    hoistNativeTitle(el);
+    markSilent(el);   // 到 mouseout/focusout 为止不再显示
+    cancelShow();
+    hide(true);
+  }, true);
+
+  // 布局变化时重新定位
   const onRelayout = ()=>{ if (currAnchor && document.body.contains(currAnchor)) placeAround(currAnchor, currAnchor.getAttribute('data-tooltip-placement') || 'top'); };
   window.addEventListener('resize', onRelayout);
   window.addEventListener('scroll', onRelayout, { passive: true, capture: true });
+
+  // 页面卸载前恢复 title（可选）
   window.addEventListener('beforeunload', ()=>{
     document.querySelectorAll('[data-title]').forEach(el=>{
       el.setAttribute('title', el.getAttribute('data-title') || '');
