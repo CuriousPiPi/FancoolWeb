@@ -408,7 +408,7 @@ def get_top_rankings(metric: str, limit: int = TOP_QUERIES_LIMIT) -> List[dict]:
         {cond_count_col}  AS cond_count,
         {cond_rank_col}   AS cond_rank
       FROM {view}
-      WHERE {pref}_rank_by_m_d30 <= 5
+      WHERE {pref}_rank_by_m_d30 <= 10
       ORDER BY model_id, condition_id
     """
     rows = fetch_all(sql, {})
