@@ -16,13 +16,14 @@
   let segSearchEl  = null;
   let __HOT_COL_LOCKED_W = null;
 
-  const ANIM = { rowMs: 320,
+  const ANIM = { rowMs: 180,
                 rowEase: 'ease',
                 fadeOutMs: 200,
                 fadeInMs: 220,
                 cleanupMs: 120,
                 guardMs: 200,
-                relayNudgeLabelY: 0
+                relayNudgeLabelY: 0,
+                unlockDelayMs: 80   // 新增：解锁延迟
                 };
 
   function init() {
@@ -40,10 +41,19 @@
 
   // 行级动画锁
   function isRowAnimating(tr){ return !!(tr && tr.dataset && tr.dataset._relay_anim === '1'); }
-  function setRowAnimating(tr, on, btn){
+  function setRowAnimating(tr, on, btn, delayMs = 0){
     if (!tr) return;
-    if (on) { tr.dataset._relay_anim = '1'; if (btn) btn.style.pointerEvents = 'none'; }
-    else    { delete tr.dataset._relay_anim; if (btn) btn.style.pointerEvents = ''; }
+    if (on) {
+      tr.dataset._relay_anim = '1';
+      if (btn) btn.style.pointerEvents = 'none';
+    } else {
+      const doUnlock = () => {
+        delete tr.dataset._relay_anim;
+        if (btn) btn.style.pointerEvents = '';
+      };
+      if (delayMs > 0) setTimeout(doUnlock, delayMs);
+      else doUnlock();
+    }
   }
 
   function mountRightSubseg(){
@@ -729,7 +739,7 @@ async function expandRow(btn){
   const tr = safeClosest(btn, 'tr'); if (!tr) return;
   if (isRowAnimating(tr)) return;
   setRowAnimating(tr, true, btn);
-  const unlock = () => setRowAnimating(tr, false, btn);
+  const unlock = () => setRowAnimating(tr, false, btn, ANIM.unlockDelayMs);
 
   const scroller = getScroller(tr);
   const trRectBefore = tr.getBoundingClientRect(); // 供“最后一行”基准使用
@@ -946,7 +956,7 @@ function collapseRow(btn){
   const tr = safeClosest(btn, 'tr'); if (!tr) return;
   if (isRowAnimating(tr)) return;
   setRowAnimating(tr, true, btn);
-  const unlock = () => setRowAnimating(tr, false, btn);
+  const unlock = () => setRowAnimating(tr, false, btn, 0);
 
   const scroller = getScroller(tr);
 

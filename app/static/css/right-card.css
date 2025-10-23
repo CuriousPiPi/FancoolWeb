@@ -280,6 +280,7 @@
   --subrow-h: 26px;
   /* 旧结构回退用的视觉缩进（兜底） */
   --subrow-indent: clamp(240px, 32vw, 480px);
+  --row-mask-extra: 480px;
 }
 
 /* 子行基础：固定行高由 .fc-subrow__row 控制 */
@@ -375,6 +376,26 @@
   -webkit-backdrop-filter: none !important;
   backdrop-filter: none !important;
   isolation: isolate;
+}
+
+/* 为正在动画的父行增加“向下延伸”的增强遮罩 */
+.fc-row-animating::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  height: var(--row-mask-extra, 24px);
+  /* 与本体相同的双层背景：容器底色 + 深色随机渐变，并与视口对齐 */
+  background-image:
+    linear-gradient(var(--bg-secondary), var(--bg-secondary)),
+    var(--dark-rand-gradient);
+  background-repeat: no-repeat, no-repeat;
+  background-size: 100% 100%, 100vw 100vh;
+  background-position:
+    0 0,
+    calc(var(--row-vp-left, 0px) * -1) calc(var(--row-vp-top, 0px) * -1);
+  pointer-events: none; /* 不拦截交互 */
 }
 
 /* 行内容在遮罩之上正常显示 */
