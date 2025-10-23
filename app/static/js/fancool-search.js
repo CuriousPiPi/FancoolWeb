@@ -495,13 +495,11 @@ function buildCustomConditionDropdown(sel, items){
     });
 
     listEl.innerHTML = `
-      <div class="sticky top-0 bg-white pb-1 border-b border-gray-100 mb-1">
-        <label class="inline-flex items-center gap-2">
+      <div class="space-y-1">
+        <label class="flex items-center gap-2">
           <input type="checkbox" id="cond_all" class="fc-checkbox">
           <span>-- 全部 --</span>
         </label>
-      </div>
-      <div class="space-y-1">
         ${renderItems.map(it => `
           <label class="flex items-center gap-2">
             <input type="checkbox" class="cond-item fc-checkbox" data-cond-id="${it.id}">
