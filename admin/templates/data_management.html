@@ -235,12 +235,21 @@
       .hint{ font-size: 12px; }
       .panel{ padding: 14px; }
     }
+
+    /* 统一全站复选框选中色 */
+    input[type="checkbox"]{
+      accent-color: var(--primary);
+    }
+    /* 批量管理结果表格更紧凑，不影响其它表格 */
+    #bmResultTable thead th{ padding: 8px 6px; }
+    #bmResultTable tbody td{ padding: 6px 6px; }
+
   </style>
 </head>
 <body>
   <div class="container">
     <div class="page-header">
-      <h2>数据管理</h2>
+      <h2>风扇库管理</h2>
       <div class="userbar">
         <span>当前管理员：{{ admin_name }}</span>
         <a class="btn-ghost small" href="/admin/logout" title="注销当前账户">注销</a>
@@ -248,7 +257,7 @@
     </div>
 
     <div class="tabs" role="tablist">
-      <div class="tab active" data-tab="upload">上传测试数据</div>
+      <div class="tab active" data-tab="upload">数据管理</div>
       <div class="tab" data-tab="brand">品牌管理</div>
       <div class="tab" data-tab="model">型号管理</div>
       <div class="tab" data-tab="condition">工况管理</div>
@@ -256,7 +265,7 @@
 
     <!-- 上传测试数据（保持不变） -->
     <div id="panel-upload" class="panel">
-      <h3>上传测试数据</h3>
+      <h3>数据管理</h3>
       <div id="restoreBar" class="restore" style="display:none;">
         <div style="color: var(--text); font-size: 14px; padding-bottom: 5px;">检测到未提交的本地草稿。</div>
         <div class="restore-actions">
@@ -331,10 +340,10 @@
                 <tr>
                   <th>#</th>
                   <th>转速 (rpm) *</th>
-                  <th>风量 (airflow_cfm) *</th>
-                  <th>等效噪音 (noise_db)</th>
-                  <th>总噪音 (total_db)</th>
-                  <th>环境噪音 (ambient_db)</th>
+                  <th>风量 (cfm) *</th>
+                  <th>等效噪音 (dBA)</th>
+                  <th>总噪音 (dBA)</th>
+                  <th>环境噪音 (dBA)</th>
                   <th class="actions-col">操作</th>
                 </tr>
               </thead>

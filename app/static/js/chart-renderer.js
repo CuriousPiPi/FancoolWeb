@@ -582,7 +582,7 @@ function setTheme(theme) {
     } : {
       type: 'scroll',
       orient: 'vertical',
-      right: 80, top: gridTop, bottom: 10,
+      left: '85%', top: gridTop, bottom: 10,
       itemWidth: 18, itemHeight: 10, itemGap: 16, align: 'auto',
       pageIconColor: t.pagerIcon, pageTextStyle: { color: t.axisLabel },
       textStyle: { color: t.axisLabel, fontFamily: t.fontFamily,

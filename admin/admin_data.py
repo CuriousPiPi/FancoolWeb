@@ -918,7 +918,7 @@ def api_batch_search():
         SELECT
           v.batch_id, v.model_id, v.condition_id, COALESCE(v.is_valid,0) AS is_valid,
           v.brand_name_zh, v.model_name, v.condition_name_zh,
-          v.data_count, v.create_date
+          v.data_count, DATE_FORMAT(v.create_date, '%Y-%m-%d %H:%i') AS create_date
         {base_from}
         {where_sql}
         ORDER BY v.create_date DESC
@@ -1031,7 +1031,7 @@ def api_batch_status():
         return resp_ok({'items': []})
 
     rows = _fetch_all(f"""
-        SELECT batch_id, COALESCE(is_valid,0) AS is_valid, create_date
+        SELECT batch_id, COALESCE(is_valid,0) AS is_valid, DATE_FORMAT(create_date, '%Y-%m-%d %H:%i') AS create_date
         FROM data_by_batch_view
         WHERE batch_id IN ({",".join(bset)})
     """, params)

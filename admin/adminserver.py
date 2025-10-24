@@ -51,7 +51,7 @@ app.secret_key = os.getenv('APP_SECRET', 'replace-me-in-prod')  # 与前台保�
 app.register_blueprint(data_mgmt_bp)
 app.logger.setLevel('WARNING')
 
-#app.config['TEMPLATES_AUTO_RELOAD'] = True
+app.config['TEMPLATES_AUTO_RELOAD'] = True
 #app.jinja_env.auto_reload = True
 
 # 将后台会话与前台隔离（独立 Cookie 名称与 Path）
