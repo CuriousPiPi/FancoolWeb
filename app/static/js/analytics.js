@@ -126,6 +126,22 @@
     });
   })();
 
+  // 右侧面板“展开/收起工况”按钮埋点（仅在将要展开时记录）
+  document.addEventListener('click', (e) => {
+    const toggle = e.target.closest && e.target.closest('.fc-expand-toggle');
+    if (!toggle) return;
+    const willExpand = toggle.getAttribute('aria-expanded') !== 'true';
+    if (!willExpand) return;
+
+    // 取所在行的 model_id
+    const tr = toggle.closest('tr');
+    const mid = tr && tr.dataset && tr.dataset.modelId ? String(tr.dataset.modelId) : '';
+    const target = mid ? `mid:${mid}` : null;
+
+    // 事件名：click_right_panel_expander；把 mid 写到 target_url
+    logEvent('click_right_panel_expander', target, 'home');
+  }, true);
+  
   // Expose API
   window.Analytics = {
     initVisitStartOnce,
