@@ -608,7 +608,7 @@ function setTheme(theme) {
 
     // 桌面：legend 仍用 right 定位。绘图区右边距 = max(180, legend.right + legendComputedW + 10)
     // 其中 10 为“绘图区右边”到“legend 左边”的固定间距
-    const legendRightDesktop = 20; // 你现在用的是 right: 0，如需与容器右边再留白可改为 10 等
+    const legendRightDesktop = 20; 
     const gridRightDesktop = !isN
       ? Math.max(180, legendRightDesktop + legendComputedW + 10)
       : 20; // 窄屏仍保留原 20
