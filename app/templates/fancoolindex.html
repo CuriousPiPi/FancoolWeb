@@ -22,7 +22,7 @@
   <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/font-awesome/6.5.2/css/solid.min.css" crossorigin="anonymous" referrerpolicy="no-referrer">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/tailwind.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/chart-renderer.css', v=1) }}">
-  <link rel="stylesheet" href="{{ url_for('static', filename='css/fancool.css', v=9) }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/fancool.css', v=10) }}">
   <!-- bumped v to 4 to refresh new styles (fc-subrow__scenario-extra) -->
   <link rel="stylesheet" href="{{ url_for('static', filename='css/right-card.css', v=6) }}">
 </head>
@@ -169,8 +169,8 @@
                       <div id="condPlaceholder" class="text-sm text-gray-500">-- 请先选择品牌 --</div>
                       <!-- 复选框列表（加载完成后显示） -->
                       <div id="condList" class="space-y-1 hidden"></div>
+                      <div id="conditionLoading" class="text-sm text-gray-500 hidden">加载中...</div>
                     </div>
-                    <div id="conditionLoading" class="text-sm text-gray-500 mt-1 hidden">加载中...</div>
                   </div>
 
                   <div class="fc-form-row">
@@ -590,7 +590,7 @@
   <script src="{{ url_for('static', filename='js/recently-removed.js', v=2) }}"></script>
   <script src="{{ url_for('static', filename='js/fancool.js', v=11) }}"></script>
   <script src="{{ url_for('static', filename='js/right-panel.js', v=5) }}"></script>
-  <script src="{{ url_for('static', filename='js/fancool-search.js', v=4) }}"></script>
+  <script src="{{ url_for('static', filename='js/fancool-search.js', v=5) }}"></script>
   <script src="{{ url_for('static', filename='js/analytics.js', v=1) }}"></script>
   
 </body>

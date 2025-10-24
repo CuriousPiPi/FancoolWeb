@@ -570,6 +570,20 @@ function initModelCascade(){
   const conditionLoadingEl = $$('#conditionLoading');
   if (!form || !brandSelect || !modelSelect) return;
 
+  // 新增：统一的显示/隐藏加载层方法（避免遗漏）
+  const showCondLoading = () => {
+    if (!conditionLoadingEl) return;
+    conditionLoadingEl.classList.remove('hidden');
+    conditionLoadingEl.removeAttribute('aria-hidden');
+  };
+  const hideCondLoading = () => {
+    if (!conditionLoadingEl) return;
+    conditionLoadingEl.classList.add('hidden');
+    conditionLoadingEl.setAttribute('aria-hidden', 'true');
+  };
+  // 新增：页面初始化即隐藏，防止加载早期露出
+  hideCondLoading();
+
   const uiBrand = buildCustomSelectFromNative(brandSelect, { placeholder:'-- 选择品牌 --' });
   const uiModel = buildCustomSelectFromNative(modelSelect, { placeholder:'-- 选择型号 --' });
 
@@ -581,21 +595,23 @@ function initModelCascade(){
       brandSelect.disabled = false;
       uiBrand.refresh(); uiBrand.setDisabled(false);
     } catch(_) {}
-    // 新增：初始时型号下拉禁用，提示“请先选择品牌”
+    // 型号默认禁用与占位
     modelSelect.innerHTML = '<option value="">-- 请先选择品牌 --</option>';
     modelSelect.value = '';
     modelSelect.disabled = true;
     uiModel.refresh();
     uiModel.setDisabled(true, { placeholder: '-- 请先选择品牌 --' });
-
+    // 初始化占位，并确保加载层收起
     setCondPlaceholder('\u00A0-- 请先选择品牌 --');
+    hideCondLoading();
   })();
 
   brandSelect.addEventListener('change', async ()=>{
     const bid = brandSelect.value;
+    // 切品牌先收起加载层，避免残留
+    hideCondLoading();
 
     if (!bid) {
-      // 新增：无品牌 → 型号禁用且显示“请先选择品牌”
       modelSelect.innerHTML = '<option value="">-- 请先选择品牌 --</option>';
       modelSelect.value = '';
       modelSelect.disabled = true;
@@ -603,7 +619,6 @@ function initModelCascade(){
       uiModel.setDisabled(true, { placeholder: '-- 请先选择品牌 --' });
 
       CondState.clear();
-      renderConditionList([]);
       setCondPlaceholder('-- 请先选择品牌 --');
       return;
     }
@@ -616,8 +631,8 @@ function initModelCascade(){
     uiModel.setDisabled(true, { placeholder: '-- 选择型号 --' });
 
     CondState.clear();
-    renderConditionList([]);
     setCondPlaceholder('-- 请先选择型号 --');
+    hideCondLoading(); // 确保这里也不显示加载层
 
     try {
       const models = await fetchModelsByBrand(bid);
@@ -626,28 +641,37 @@ function initModelCascade(){
       });
       modelSelect.disabled=false;
       uiModel.refresh();
-      uiModel.setDisabled(false); // 解除禁用，保留“选择型号”占位
+      uiModel.setDisabled(false);
     } catch(_){}
   });
 
-    modelSelect.addEventListener('change', async ()=>{
-      const mid = modelSelect.value;
-      CondState.clear();
-      renderConditionList([]);
-      updateCondCountLabel();
-      if (!mid) { setCondPlaceholder('-- 请先选择型号 --'); return; }
-      conditionLoadingEl && conditionLoadingEl.classList.remove('hidden');
-      setCondPlaceholder('加载中...');
-      try {
-        const items = await fetchConditionsByModel(mid);
-        if (Array.isArray(items) && items.length) renderConditionList(items);
-        else setCondPlaceholder('该型号暂无工况');
-      } catch(_){
-        setCondPlaceholder('加载失败，请重试');
-      } finally {
-        conditionLoadingEl && conditionLoadingEl.classList.add('hidden');
+  modelSelect.addEventListener('change', async ()=>{
+    const mid = modelSelect.value;
+    CondState.clear();
+    updateCondCountLabel();
+
+    if (!mid) {
+      setCondPlaceholder('-- 请先选择型号 --');
+      hideCondLoading(); // 型号清空时，收起加载层
+      return;
+    }
+
+    setCondPlaceholder('加载中...');
+    showCondLoading(); // 仅在真正请求工况时显示
+
+    try {
+      const items = await fetchConditionsByModel(mid);
+      if (Array.isArray(items) && items.length) {
+        renderConditionList(items);
+      } else {
+        setCondPlaceholder('该型号暂无工况');
       }
-    });
+    } catch(_){
+      setCondPlaceholder('加载失败，请重试');
+    } finally {
+      hideCondLoading(); // 无论成功失败，结束时都收起
+    }
+  });
 
     // 型号关键字搜索
     (function initModelKeywordSearch(){

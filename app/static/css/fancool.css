@@ -1247,6 +1247,22 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
   border-radius: 8px;
 }
 
+#conditionMulti { position: relative; }
+
+/* 覆盖式的加载层，不占用文档流高度 */
+#conditionLoading {
+  position: absolute;
+  inset: 0;
+  place-items: center;    /* 居中菊花/文案 */
+  pointer-events: none;   /* 不挡交互 */
+  z-index: 2;
+}
+
+/* 关键：不要无条件 display:grid，改为仅当不含 hidden 时显示 */
+#conditionLoading:not(.hidden) { display: grid; }
+/* 兜底（确保任何来源的 .hidden 都能生效） */
+#conditionLoading.hidden { display: none !important; }
+
 /* 多选项对齐：让复选框与文字垂直居中 */
 #conditionMulti #condList label {
   display: flex;
