@@ -545,30 +545,68 @@ function setTheme(theme) {
     const titleMeasure = measureText(titleText, titleFontSize, titleFontWeight, t.fontFamily);
     const gridTop = Math.max(54, titleTop + Math.ceil(titleMeasure.height) + 12);
 
+    // 构造 legend 文本数据（保持原有 formatter 的语义）
     const legendMeta = {};
     sList.forEach(s=>{
       const brand = s.brand || s.brand_name_zh || s.brand_name || '';
       const model = s.model || s.model_name || '';
-      const condition = s.condition_name_zh || s.condition || '';  // NEW: 统一用工况字段
+      const condition = s.condition_name_zh || s.condition || '';
       const key   = s.name || [brand, model].filter(Boolean).join(' ') || String(s.key || '');
-      legendMeta[key] = { brand, model, condition };               // CHANGED
+      legendMeta[key] = { brand, model, condition };
     });
     function desktopLegendFormatter(name){
       const m = legendMeta[name] || {};
       const line1 = [m.brand, m.model].filter(Boolean).join(' ');
-      const line2 = m.condition || '';                             // CHANGED: 第二行显示工况
+      const line2 = m.condition || '';
       if (line2) return `{l1|${line1}}\n{l2|${line2}}`;
       return `{l1|${line1||name}}`;
     }
     function mobileLegendFormatter(name){
       const m = legendMeta[name] || {};
       const left  = [m.brand, m.model].filter(Boolean).join(' ');
-      const right = m.condition || '';                              // CHANGED: 右侧显示工况
+      const right = m.condition || '';
       if (right) return `{m1|${left}} {m1|-} {m2|${right}}`;
       return `{m1|${left||name}}`;
     }
 
+    // ========== 关键变更开始 ==========
     const isN = isNarrow;
+
+    // 估算“legend 实际占用宽度”（图标 + 间距 + 文本最长行），用于计算 grid.right
+    let legendItemTextMaxW = 0;
+    if (!isN) {
+      const l1Size=13, l1Weight=600;
+      const l2Size=11, l2Weight=500;
+      sList.forEach(s=>{
+        const brand = s.brand || s.brand_name_zh || s.brand_name || '';
+        const model = s.model || s.model_name || '';
+        const condition = s.condition_name_zh || s.condition || '';
+        const line1 = [brand, model].filter(Boolean).join(' ') || (s.name || '');
+        const line2 = condition || '';
+        const w1 = measureText(line1, l1Size, l1Weight, t.fontFamily).width;
+        const w2 = line2 ? measureText(line2, l2Size, l2Weight, t.fontFamily).width : 0;
+        legendItemTextMaxW = Math.max(legendItemTextMaxW, Math.max(w1, w2));
+      });
+    }
+
+    // legend 图标与文字的间距估值
+    const iconW = 18;
+    const iconTextGap = 8;
+    const safety = 12; // 轻微安全冗余，避免测量误差
+    const legendComputedW = !isN ? (iconW + iconTextGap + legendItemTextMaxW + safety) : 0;
+
+    // 桌面：legend 仍用 right 定位。绘图区右边距 = max(180, legend.right + legendComputedW + 10)
+    // 其中 10 为“绘图区右边”到“legend 左边”的固定间距
+    const legendRightDesktop = 0; // 你现在用的是 right: 0，如需与容器右边再留白可改为 10 等
+    const gridRightDesktop = !isN
+      ? Math.max(180, legendRightDesktop + legendComputedW + 10)
+      : 20; // 窄屏仍保留原 20
+
+    // 窄屏 bottom：在原有“随条目数增加”的基础上，不小于 80px
+    const narrowBottomAuto = Math.min(320, 50 + (sList.length || 1) * 22);
+    const gridBottom = isN ? Math.max(140, narrowBottomAuto) : 40;
+    // ========== 关键变更结束 ==========
+
     const legendCfg = isN ? {
       type: 'scroll',
       orient: 'vertical',
@@ -582,7 +620,9 @@ function setTheme(theme) {
     } : {
       type: 'scroll',
       orient: 'vertical',
-      left: '85%', top: gridTop, bottom: 10,
+      right: legendRightDesktop,       // 仍用 right 定位
+      top: gridTop,
+      bottom: 10,
       itemWidth: 18, itemHeight: 10, itemGap: 16, align: 'auto',
       pageIconColor: t.pagerIcon, pageTextStyle: { color: t.axisLabel },
       textStyle: { color: t.axisLabel, fontFamily: t.fontFamily,
@@ -671,12 +711,12 @@ function setTheme(theme) {
       backgroundColor: bgNormal,
       color: sList.map(s=>s.color),
       textStyle:{ fontFamily:t.fontFamily },
-      // 修改：使用 CSS 的 --transition-speed 作为动画/状态过渡时长
       stateAnimation: { duration: transitionMs, easing: 'cubicOut' },
       animationDurationUpdate: transitionMs,
       animationEasingUpdate: 'cubicOut',
 
-      grid:{ left:40, right: (isN ? 20 : 220), top: gridTop, bottom: (isN ? Math.min(320, 50 + (sList.length || 1) * 22) : 40) },
+      // 关键：右边距/底边距按新规则
+      grid:{ left:40, right: gridRightDesktop, top: gridTop, bottom: gridBottom },
 
       title: { text: titleText, left: 'center', top: titleTop,
         textStyle: { color: t.axisLabel, fontSize: 20, fontWeight: 600, fontFamily: t.fontFamily } },
