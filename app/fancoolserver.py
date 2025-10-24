@@ -49,7 +49,7 @@ dictConfig({
         # SQLAlchemy 引擎与连接池（避免打印 SQL/连接池 INFO）
         'sqlalchemy.engine': {'level': 'WARNING', 'propagate': False},
         'sqlalchemy.pool': {'level': 'WARNING', 'propagate': False},
-        # 如果你有其他 noisy 的库，也可在此降级
+        # 如果有其他 noisy 的库，也可在此降级
     }
 })
 

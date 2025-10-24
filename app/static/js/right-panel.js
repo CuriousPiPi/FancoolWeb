@@ -861,7 +861,7 @@ async function expandRow(btn){
       } else {
         // 兜底：用“插入前 top + 行高估值”近似 bottom
         const prevTopFF = prevMap.get(firstFollower);
-        // 行高估值优先用当前行的可量高度，否则退回到一个小常量（32px），也可替换为你的 CSS 变量
+        // 行高估值优先用当前行的可量高度，否则退回到一个小常量（32px）
         const rowHEst = Math.round(
           (firstFollower && firstFollower.getBoundingClientRect().height) ||
           parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--rank-row-h')) ||
