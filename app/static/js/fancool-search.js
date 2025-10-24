@@ -503,7 +503,7 @@ function buildCustomConditionDropdown(sel, items){
         ${renderItems.map(it => `
           <label class="flex items-center gap-2">
             <input type="checkbox" class="cond-item fc-checkbox" data-cond-id="${it.id}">
-            <span class="truncate">${it.html}</span>
+            <span>${it.html}</span>
           </label>
         `).join('')}
       </div>`;

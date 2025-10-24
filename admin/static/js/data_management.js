@@ -5,13 +5,14 @@ const LS_KEY = 'admin_perf_draft_v2';
 let suspendDraft = true;
 
 // ===== Tabs =====
+// 调整：切换到“工况管理”页签时，修正该页的行布局，避免“风阻位置”换行且占满整行
 const tabs = document.querySelectorAll('.tab');
 const panels = { upload: $('#panel-upload'), brand: $('#panel-brand'), model: $('#panel-model'), condition: $('#panel-condition') };
 tabs.forEach(t => t.addEventListener('click', () => {
   tabs.forEach(x => x.classList.remove('active')); t.classList.add('active');
   const key = t.dataset.tab; Object.entries(panels).forEach(([k, el]) => el.style.display = (k === key ? '' : 'none'));
   if(key === 'brand'){ initBrandEditList(); }
-  if(key === 'condition'){ initConditionEditList(); }
+  if(key === 'condition'){ initConditionEditList(); fixCondLayout(); } // 新增 fixCondLayout()
 }));
 
 /* ====================== 添加品牌 ====================== */
@@ -405,138 +406,223 @@ if(modelEditForm){
 
 /* ====================== 添加工况 ====================== */
 const condForm=$('#condForm'), condMsg=$('#condMsg'), condSubmitBtn=$('#condSubmitBtn');
+const condNameInp = $('#condName'), rtZhInp = $('#rtZh'), rtEnInp = $('#rtEn'), rtLocSel = $('#rtLoc');
+
+// 即时唯一性校验：工况名
+let nameChkTimer=null;
+function checkCondNameUnique(name, excludeId){
+  if(!name){ condMsg.textContent=''; return; }
+  const url = `/admin/api/data/condition/name-exist?name=${encodeURIComponent(name)}${excludeId?`&exclude_id=${excludeId}`:''}`;
+  return fetch(url).then(r=>r.json()).then(j=>{
+    if(j.success && j.data.exists){
+      condMsg.className='err';
+      condMsg.textContent='该工况名称已存在';
+      return false;
+    } else {
+      if(condMsg.textContent==='该工况名称已存在'){ condMsg.textContent=''; }
+      return true;
+    }
+  }).catch(()=>true);
+}
+if(condNameInp){
+  condNameInp.addEventListener('input', ()=>{
+    if(nameChkTimer) clearTimeout(nameChkTimer);
+    nameChkTimer = setTimeout(()=>{ checkCondNameUnique(condNameInp.value.trim()); }, 300);
+  });
+}
+
+// 即时唯一性校验：类型中文 + 位置 组合
+let combChkTimer=null;
+function checkCondCombUnique(tzh, lzh, excludeId){
+  if(!tzh || !lzh){ return Promise.resolve(true); }
+  const url = `/admin/api/data/condition/comb-exist?type_zh=${encodeURIComponent(tzh)}&location_zh=${encodeURIComponent(lzh)}${excludeId?`&exclude_id=${excludeId}`:''}`;
+  return fetch(url).then(r=>r.json()).then(j=>{
+    if(j.success && j.data.exists){
+      condMsg.className='err';
+      condMsg.textContent='已存在该组合';
+      return false;
+    } else {
+      if(condMsg.textContent==='已存在该组合'){ condMsg.textContent=''; }
+      return true;
+    }
+  }).catch(()=>true);
+}
+[rtZhInp, rtLocSel].forEach(el=>{
+  el && el.addEventListener('change', ()=>{ 
+    checkCondCombUnique(rtZhInp.value.trim(), rtLocSel.value.trim());
+  });
+});
+
 if(condForm){
   condForm.addEventListener('submit', async e=>{
     e.preventDefault(); condMsg.textContent=''; condMsg.className=''; condSubmitBtn.disabled=true;
-    const zh=$('#rtZh').value.trim(), en=$('#rtEn').value.trim();
+    const nameZh=condNameInp?.value.trim() || '';
+    const zh=rtZhInp.value.trim(), en=rtEnInp.value.trim(), loc=rtLocSel.value.trim();
     const condIsValid = parseInt($('#condIsValid')?.value || '0', 10);
-    if(!zh||!en){ condMsg.className='err'; condMsg.textContent='风阻类型中文与英文均为必填'; condSubmitBtn.disabled=false; return; }
+    if(!nameZh || !zh || !en || !loc){
+      condMsg.className='err'; condMsg.textContent='请完善必填项'; condSubmitBtn.disabled=false; return;
+    }
+    // 提交前再次校验唯一性
+    const okName = await checkCondNameUnique(nameZh);
+    const okComb = await checkCondCombUnique(zh, loc);
+    if(!okName || !okComb){ condSubmitBtn.disabled=false; return; }
+
     try{
       const r=await fetch('/admin/api/data/condition/add',{
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({resistance_type_zh:zh,resistance_type_en:en, is_valid: condIsValid})
+        body:JSON.stringify({
+          condition_name_zh:nameZh,
+          resistance_type_zh:zh,
+          resistance_type_en:en,
+          resistance_location_zh:loc,
+          is_valid: condIsValid
+        })
       });
       const j=await r.json();
-      if(j.success){ condMsg.className='ok'; condMsg.textContent=`添加成功，condition_id：${(j.data.condition_ids||[]).join(', ')}`; }
-      else { condMsg.className='err'; condMsg.textContent=j.error_message||'提交失败'; }
-    }catch{ condMsg.className='err'; condMsg.textContent='网络或服务器错误'; } finally{ condSubmitBtn.disabled=false; }
+      if(j.success){
+        condMsg.className='ok';
+        condMsg.textContent=`添加成功，condition_id：${j.data.condition_id}`;
+        // 可选：清空输入
+        // condForm.reset();
+      } else {
+        condMsg.className='err'; condMsg.textContent=j.error_message||'提交失败';
+      }
+    }catch{
+      condMsg.className='err'; condMsg.textContent='网络或服务器错误';
+    } finally{ condSubmitBtn.disabled=false; }
   });
 }
 
-/* ====================== 工况管理：编辑 ====================== */
+/* ====================== 工况管理：编辑（改为单条记录） ====================== */
 const cmAdd = $('#cmAdd'), cmEdit = $('#cmEdit');
 const condAddBox = $('#condAddBox'), condEditBox = $('#condEditBox');
 if(cmAdd && cmEdit){
   const updateBoxes=()=>{ const m = document.querySelector('input[name="condMgmtMode"]:checked')?.value || 'add'; if(m==='add'){ condAddBox.style.display=''; condEditBox.style.display='none'; } else { condAddBox.style.display='none'; condEditBox.style.display=''; initConditionEditList(); } };
   cmAdd.addEventListener('change',updateBoxes); cmEdit.addEventListener('change',updateBoxes); updateBoxes();
 }
+
 const condEditInput=$('#condEditInput'), condEditOptions=$('#condEditOptions'), condEditHint=$('#condEditHint');
-const condOutId=$('#condOutId'), condInId=$('#condInId'), rtZhEdit=$('#rtZhEdit'), rtEnEdit=$('#rtEnEdit'), condEditIsValidOut=$('#condEditIsValidOut'), condEditIsValidIn=$('#condEditIsValidIn');
-const condEditForm=$('#condEditForm'), condEditSubmitBtn=$('#condEditSubmitBtn'), condEditMsg=$('#condEditMsg');
+const condEditId=$('#condEditId'), condNameEdit=$('#condNameEdit'), rtZhEdit=$('#rtZhEdit'), rtEnEdit=$('#rtEnEdit'), rtLocEdit=$('#rtLocEdit');
+const condEditForm=$('#condEditForm'), condEditSubmitBtn=$('#condEditSubmitBtn'), condEditMsg=$('#condEditMsg'), condEditIsValid=$('#condEditIsValid');
 
 let condTypesCache=[];
 async function initConditionEditList(){
   try{
+    if(condEditInput){ condEditInput.style.minWidth = '680px'; } // 更宽以展示更长标签
     const r=await fetch('/admin/api/data/condition/types'); const j=await r.json();
-    if(j.success){ condTypesCache=j.data.items||[]; condEditOptions.innerHTML=''; condTypesCache.forEach(it=>{ const opt=document.createElement('option'); opt.value = it.label; opt.dataset.tzh = it.type_zh; opt.dataset.ten = it.type_en; condEditOptions.appendChild(opt); }); }
+    if(j.success){
+      condTypesCache=j.data.items||[];
+      condEditOptions.innerHTML='';
+      condTypesCache.forEach(it=>{
+        const opt=document.createElement('option');
+        opt.value = it.label;              // 形如：名称 - 类型中/英 - 位置中 - 位置英
+        opt.dataset.cid = it.condition_id; // 直接选定具体记录
+        condEditOptions.appendChild(opt);
+      });
+    }
   }catch{}
 }
 function setCondEditEnabled(en){
-  if(en){ condEditForm.classList.remove('disabled'); [...condEditForm.querySelectorAll('input,select,button')].forEach(el=>el.disabled=false);}
+  if(en){ condEditForm.classList.remove('disabled'); [...condEditForm.querySelectorAll('input,select,button')].forEach(el=>el.disabled=false); }
   else { condEditForm.classList.add('disabled'); [...condEditForm.querySelectorAll('input,select,button')].forEach(el=>{ if(el.id!=='condEditSubmitBtn'){ el.value=''; } el.disabled=true; }); condEditMsg.textContent=''; }
 }
 setCondEditEnabled(false);
+
+async function loadConditionDetail(cid){
+  try{
+    const r=await fetch(`/admin/api/data/condition/detail?condition_id=${cid}`);
+    const j=await r.json();
+    if(!j.success){ condEditMsg.className='err'; condEditMsg.textContent=j.error_message||'加载失败'; setCondEditEnabled(false); return; }
+    const d=j.data;
+    condEditId.value = String(d.condition_id);
+    condNameEdit.value = d.condition_name_zh || '';
+    rtZhEdit.value = d.resistance_type_zh || '';
+    rtEnEdit.value = d.resistance_type_en || '';
+    rtLocEdit.value = d.resistance_location_zh || '';
+    condEditIsValid.value = String(d.is_valid ?? 0);
+    setCondEditEnabled(true); condEditMsg.textContent='';
+  }catch{
+    condEditMsg.className='err'; condEditMsg.textContent='网络或服务器错误'; setCondEditEnabled(false);
+  }
+}
 function commitPickCondition(){
   const v = (condEditInput.value||'').trim();
   const opt = [...condEditOptions.children].find(o=>o.value===v);
-  if(!opt){ condOutId.value=''; condInId.value=''; setCondEditEnabled(false); condEditHint.textContent='未选择工况'; return false; }
-  loadConditionTypeDetail(opt.dataset.tzh, opt.dataset.ten);
+  if(!opt){ condEditId.value=''; setCondEditEnabled(false); condEditHint.textContent='未选择工况'; return false; }
+  const cid = parseInt(opt.dataset.cid, 10);
   condEditHint.textContent = `已选择：${v}`;
+  loadConditionDetail(cid);
   return true;
 }
 if(condEditInput){
   condEditInput.addEventListener('change', commitPickCondition);
   condEditInput.addEventListener('input', ()=>{ if(!condEditInput.value.trim()){ setCondEditEnabled(false); condEditHint.textContent='未选择工况'; }});
 }
-async function loadConditionTypeDetail(tzh, ten){
-  try{
-    const r=await fetch(`/admin/api/data/condition/type-detail?type_zh=${encodeURIComponent(tzh)}&type_en=${encodeURIComponent(ten)}`);
-    const j=await r.json();
-    if(!j.success){ condEditMsg.className='err'; condEditMsg.textContent=j.error_message||'加载失败'; setCondEditEnabled(false); return; }
-    const d=j.data;
-    // 名称
-    rtZhEdit.value = d.type_zh || '';
-    rtEnEdit.value = d.type_en || '';
 
-    // 单一模式开关（空载/No Load）
-    const single = (d.single === 1) || (!!d.single_condition && !d.outlet && !d.inlet);
-    // ids 与 is_valid
-    if(single){
-      // 使用“出风控件”作为单一 is_valid 控件，隐藏“进风控件”
-      const singleId = d.single_condition?.condition_id || d.outlet?.condition_id || d.inlet?.condition_id || '';
-      const singleValid = d.single_condition?.is_valid ?? d.outlet?.is_valid ?? d.inlet?.is_valid ?? 0;
-      condOutId.value = singleId ? String(singleId) : '';
-      condInId.value = ''; // 清空
-      condEditIsValidOut.value = String(singleValid ?? 0);
-
-      // 隐藏右侧“进风”块
-      const inWrap = condEditIsValidIn.closest('div');
-      if(inWrap) inWrap.style.display='none';
-      // 调整左侧标签
-      const outLabel = condEditIsValidOut.closest('div')?.querySelector('label');
-      if(outLabel) outLabel.textContent = 'is_valid';
-
-    }else{
-      // 常规双向
-      condOutId.value = d.outlet?.condition_id || '';
-      condInId.value  = d.inlet?.condition_id || '';
-      condEditIsValidOut.value = String(d.outlet?.is_valid ?? 0);
-      condEditIsValidIn.value  = String(d.inlet?.is_valid ?? 0);
-
-      // 还原显示与标签
-      const inWrap = condEditIsValidIn.closest('div');
-      if(inWrap) inWrap.style.display='';
-      const outLabel = condEditIsValidOut.closest('div')?.querySelector('label');
-      if(outLabel) outLabel.textContent = '出风 is_valid';
-    }
-
-    // 缓存模式标志
-    loadConditionTypeDetail._singleMode = !!single;
-
-    setCondEditEnabled(true); condEditMsg.textContent='';
-  }catch{ condEditMsg.className='err'; condEditMsg.textContent='网络或服务器错误'; setCondEditEnabled(false); }
+// 编辑页即时唯一性校验（与添加一致，但排除自身）
+let editNameChkTimer=null;
+if(condNameEdit){
+  condNameEdit.addEventListener('input', ()=>{
+    if(editNameChkTimer) clearTimeout(editNameChkTimer);
+    editNameChkTimer = setTimeout(()=>{
+      const eid = parseInt(condEditId.value||'0',10) || 0;
+      fetch(`/admin/api/data/condition/name-exist?name=${encodeURIComponent(condNameEdit.value.trim())}&exclude_id=${eid}`)
+        .then(r=>r.json()).then(j=>{
+          if(j.success && j.data.exists){ condEditMsg.className='err'; condEditMsg.textContent='该工况名称已存在'; }
+          else if(condEditMsg.textContent==='该工况名称已存在'){ condEditMsg.textContent=''; }
+        }).catch(()=>{});
+    }, 300);
+  });
 }
+[rtZhEdit, rtLocEdit].forEach(el=>{
+  el && el.addEventListener('change', ()=>{
+    const eid = parseInt(condEditId.value||'0',10) || 0;
+    const t = rtZhEdit.value.trim(), l = rtLocEdit.value.trim();
+    if(!t || !l) return;
+    fetch(`/admin/api/data/condition/comb-exist?type_zh=${encodeURIComponent(t)}&location_zh=${encodeURIComponent(l)}&exclude_id=${eid}`)
+      .then(r=>r.json()).then(j=>{
+        if(j.success && j.data.exists){ condEditMsg.className='err'; condEditMsg.textContent='已存在该组合'; }
+        else if(condEditMsg.textContent==='已存在该组合'){ condEditMsg.textContent=''; }
+      }).catch(()=>{});
+  });
+});
 
 if(condEditForm){
   condEditForm.addEventListener('submit', async e=>{
     e.preventDefault(); condEditMsg.textContent=''; condEditMsg.className=''; condEditSubmitBtn.disabled=true;
-    const singleMode = !!loadConditionTypeDetail._singleMode;
-    const outId=parseInt(condOutId.value||'0',10), inId=parseInt(condInId.value||'0',10);
-    const zh = rtZhEdit.value.trim(), en = rtEnEdit.value.trim();
-    const vOut = parseInt(condEditIsValidOut.value||'0',10), vIn = parseInt(condEditIsValidIn.value||'0',10);
+    const cid=parseInt(condEditId.value||'0',10);
+    const nameZh = condNameEdit.value.trim();
+    const zh = rtZhEdit.value.trim(), en = rtEnEdit.value.trim(), loc = rtLocEdit.value.trim();
+    const v = parseInt(condEditIsValid.value||'0',10);
 
-    if(singleMode){
-      if(outId<=0){ condEditMsg.className='err'; condEditMsg.textContent='未正确加载记录'; condEditSubmitBtn.disabled=false; return; }
-      if(!zh || !en){ condEditMsg.className='err'; condEditMsg.textContent='请填写完整的中英文名称'; condEditSubmitBtn.disabled=false; return; }
-      if(!confirm(`确认将工况更新为：\n「${zh} / ${en}」\n状态：${vOut===1?'公开':'未公开'}？`)){ condEditSubmitBtn.disabled=false; return; }
-      try{
-        const r=await fetch('/admin/api/data/condition/type-update',{ method:'POST', headers:{'Content-Type':'application/json'},
-          body:JSON.stringify({ resistance_type_zh: zh, resistance_type_en: en, outlet:{ condition_id: outId, is_valid: vOut } /* inlet 省略 */ }) });
-        const j=await r.json();
-        if(j.success){ condEditMsg.className='ok'; condEditMsg.textContent='更新成功'; initConditionEditList(); }
-        else { condEditMsg.className='err'; condEditMsg.textContent=j.error_message||'提交失败'; }
-      }catch{ condEditMsg.className='err'; condEditMsg.textContent='网络或服务器错误'; } finally{ condEditSubmitBtn.disabled=false; }
-      return;
-    }
+    if(cid<=0){ condEditMsg.className='err'; condEditMsg.textContent='未正确加载记录'; condEditSubmitBtn.disabled=false; return; }
+    if(!nameZh || !zh || !en || !loc){ condEditMsg.className='err'; condEditMsg.textContent='请完善必填项'; condEditSubmitBtn.disabled=false; return; }
 
-    // 非单一模式：原逻辑
-    if(outId<=0 || inId<=0){ condEditMsg.className='err'; condEditMsg.textContent='未正确加载出风/进风记录'; condEditSubmitBtn.disabled=false; return; }
-    if(!zh || !en){ condEditMsg.className='err'; condEditMsg.textContent='请填写完整的中英文名称'; condEditSubmitBtn.disabled=false; return; }
-    if(!confirm(`确认将工况更新为：\n「${zh} / ${en}」\n出风：${vOut===1?'公开':'未公开'}；进风：${vIn===1?'公开':'未公开'}？`)){ condEditSubmitBtn.disabled=false; return; }
+    // 提交前二次唯一性校验
     try{
-      const r=await fetch('/admin/api/data/condition/type-update',{ method:'POST', headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({ resistance_type_zh: zh, resistance_type_en: en, outlet:{ condition_id: outId, is_valid: vOut }, inlet:{ condition_id: inId, is_valid: vIn } }) });
+      const [nameChk, combChk] = await Promise.all([
+        fetch(`/admin/api/data/condition/name-exist?name=${encodeURIComponent(nameZh)}&exclude_id=${cid}`).then(r=>r.json()),
+        fetch(`/admin/api/data/condition/comb-exist?type_zh=${encodeURIComponent(zh)}&location_zh=${encodeURIComponent(loc)}&exclude_id=${cid}`).then(r=>r.json())
+      ]);
+      if(nameChk.success && nameChk.data.exists){ condEditMsg.className='err'; condEditMsg.textContent='该工况名称已存在'; condEditSubmitBtn.disabled=false; return; }
+      if(combChk.success && combChk.data.exists){ condEditMsg.className='err'; condEditMsg.textContent='已存在该组合'; condEditSubmitBtn.disabled=false; return; }
+    }catch{}
+
+    if(!confirm(`确认将工况更新为：\n「${nameZh} - ${zh} / ${en} - ${loc}」\n状态：${v===1?'公开':'未公开'}？`)){ condEditSubmitBtn.disabled=false; return; }
+
+    try{
+      const r=await fetch('/admin/api/data/condition/update',{
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          condition_id: cid,
+          condition_name_zh: nameZh,
+          resistance_type_zh: zh,
+          resistance_type_en: en,
+          resistance_location_zh: loc,
+          is_valid: v
+        })
+      });
       const j=await r.json();
       if(j.success){ condEditMsg.className='ok'; condEditMsg.textContent='更新成功'; initConditionEditList(); }
       else { condEditMsg.className='err'; condEditMsg.textContent=j.error_message||'提交失败'; }
@@ -764,10 +850,10 @@ async function loadGroupByKey(gk){
     tr.innerHTML = `
       <td>${idx+1}</td>
       <td><input type="text" inputmode="numeric" pattern="[0-9]*" class="w-small perf-rpm" placeholder="rpm" value="${row.rpm??''}" /></td>
-      <td><input type="text" inputmode="decimal" class="w-small perf-airflow" placeholder="CFM" value="${row.airflow_cfm??''}" /></td>
-      <td><input type="text" inputmode="decimal" class="w-small perf-noise" placeholder="noise_db" value="${row.noise_db??''}" /></td>
-      <td><input type="text" inputmode="decimal" class="w-small perf-totaldb" placeholder="total_db" /></td>
-      <td><input type="text" inputmode="decimal" class="w-small perf-ambientdb" placeholder="ambient_db" /></td>
+      <td><input type="text" inputmode="decimal" class="w-small perf-airflow" placeholder="cfm" value="${row.airflow_cfm??''}" /></td>
+      <td><input type="text" inputmode="decimal" class="w-small perf-noise" placeholder="equivalent_dBA" value="${row.noise_db??''}" /></td>
+      <td><input type="text" inputmode="decimal" class="w-small perf-totaldb" placeholder="total_dBA" /></td>
+      <td><input type="text" inputmode="decimal" class="w-small perf-ambientdb" placeholder="ambient_dBA" /></td>
       <td><button type="button" class="delRowBtn">删除</button></td>
     `;
     perfTable.appendChild(tr);
@@ -880,10 +966,10 @@ function addPerfRow(rowData){
   tr.innerHTML=`
     <td>${idx}</td>
     <td><input type="text" inputmode="numeric" pattern="[0-9]*" class="w-small perf-rpm" placeholder="rpm" /></td>
-    <td><input type="text" inputmode="decimal" class="w-small perf-airflow" placeholder="CFM" /></td>
-    <td><input type="text" inputmode="decimal" class="w-small perf-noise" placeholder="noise_db" /></td>
-    <td><input type="text" inputmode="decimal" class="w-small perf-totaldb" placeholder="total_db" /></td>
-    <td><input type="text" inputmode="decimal" class="w-small perf-ambientdb" placeholder="ambient_db" /></td>
+    <td><input type="text" inputmode="decimal" class="w-small perf-airflow" placeholder="cfm" /></td>
+    <td><input type="text" inputmode="decimal" class="w-small perf-noise" placeholder="equivalent_dBA" /></td>
+    <td><input type="text" inputmode="decimal" class="w-small perf-totaldb" placeholder="total_dBA" /></td>
+    <td><input type="text" inputmode="decimal" class="w-small perf-ambientdb" placeholder="ambient_dBA" /></td>
     <td><button type="button" class="delRowBtn">删除</button></td>
   `;
   perfTable.appendChild(tr);
@@ -1174,10 +1260,735 @@ function bindDraftAutoSave(){
   new MutationObserver(()=>saveDraft()).observe(perfTable, { childList:true, subtree:true, attributes:false });
 }
 
+// 调整：批量管理区动作栏改用统一样式（不撑满整行，按钮右侧预留提示）
+async function initBatchManageSection(){
+  const panel = document.querySelector('#panel-upload');
+  if(!panel) return;
+
+  let uploadBox = document.querySelector('#uploadEditorBox');
+  if(!uploadBox){
+    uploadBox = document.createElement('div');
+    uploadBox.id = 'uploadEditorBox';
+    const nodes = [];
+    let cur = panel.firstElementChild;
+    while(cur && cur.tagName !== 'H3'){ cur = cur.nextElementSibling; }
+    if(cur){ cur = cur.nextElementSibling; }
+    while(cur){ nodes.push(cur); cur = cur.nextElementSibling; }
+    nodes.forEach(n => uploadBox.appendChild(n));
+    panel.appendChild(uploadBox);
+  }
+
+  const segWrap = document.createElement('div');
+  segWrap.className = 'seg'; segWrap.style.marginBottom = '10px';
+  segWrap.innerHTML = `
+    <input type="radio" id="umUpload" name="uploadMode" value="upload" checked />
+    <label for="umUpload">上传/编辑数据</label>
+    <input type="radio" id="umBatch" name="uploadMode" value="batch" />
+    <label for="umBatch">批量管理数据</label>
+  `;
+  panel.insertBefore(segWrap, uploadBox);
+
+  const batchBox = document.createElement('div');
+  batchBox.id = 'batchManageBox';
+  batchBox.style.display = 'none';
+  batchBox.innerHTML = `
+    <div class="row">
+      <div>
+        <label>品牌（多选）</label>
+        <input id="bmBrandInput" type="search" placeholder="点击选择或下拉全量" autocomplete="off" />
+        <div id="bmBrandChips" style="margin-top:6px;"></div>
+      </div>
+      <div>
+        <label>型号（多选）</label>
+        <input id="bmModelInput" type="search" placeholder="可按品牌过滤；未选品牌默认全量" autocomplete="off" />
+        <div id="bmModelChips" style="margin-top:6px;"></div>
+      </div>
+      <div>
+        <label>工况 - 类型 - 位置（多选）</label>
+        <input id="bmCondInput" type="search" placeholder="点击选择或下拉全量" autocomplete="off" />
+        <div id="bmCondChips" style="margin-top:6px;"></div>
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>创建时间（起）</label>
+        <input id="bmDateFrom" type="datetime-local" />
+      </div>
+      <div>
+        <label>创建时间（止）</label>
+        <input id="bmDateTo" type="datetime-local" />
+      </div>
+      <div>
+        <label>is_valid</label>
+        <div style="display:flex; gap:12px; align-items:center; padding:6px 0;">
+          <label style="font-weight:400; display:flex; align-items:center; gap:6px; height:32px; line-height:1;">
+            <input type="checkbox" id="bmIv0" style="width:16px; height:16px;" checked /> <span>0</span>
+          </label>
+          <label style="font-weight:400; display:flex; align-items:center; gap:6px; height:32px; line-height:1;">
+            <input type="checkbox" id="bmIv1" style="width:16px; height:16px;" checked /> <span>1</span>
+          </label>
+        </div>
+      </div>
+      <div class="align-end">
+        <button id="bmSearchBtn" type="button">搜索</button>
+      </div>
+    </div>
+    <div class="table-wrap" style="margin-top:10px;">
+      <div class="table-scroll">
+        <table id="bmResultTable">
+          <thead>
+            <tr>
+              <th><input type="checkbox" id="bmCheckAll" /></th>
+              <th>is_valid</th>
+              <th>品牌</th>
+              <th>型号</th>
+              <th>工况</th>
+              <th>条数</th>
+              <th>创建时间</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
+    <!-- 统一动作栏样式 -->
+    <div class="action-bar" id="bmActionBar">
+      <div class="ab-iv">
+        <label for="bmTargetIv">设置 is_valid</label>
+        <select id="bmTargetIv">
+          <option value="" selected disabled>请选择</option>
+          <option value="0">0（不公开）</option>
+          <option value="1">1（公开）</option>
+        </select>
+      </div>
+      <div class="ab-desc">
+        <label for="bmDesc">更新描述（必填）</label>
+        <input id="bmDesc" type="text" placeholder="请填写本次批量更新说明" />
+      </div>
+      <div class="ab-btns">
+        <button id="bmApplyBtn" type="button">批量提交</button>
+        <span class="ab-msg"><span id="bmMsg" class="hint"></span></span>
+      </div>
+    </div>
+  `;
+  panel.appendChild(batchBox);
+
+  // 统一占位表头
+  setBatchTableHeaderUnified();
+
+  // 子页签切换
+  const umUpload = document.querySelector('#umUpload');
+  const umBatch = document.querySelector('#umBatch');
+  const switchView = ()=>{
+    const mode = document.querySelector('input[name="uploadMode"]:checked')?.value || 'upload';
+    uploadBox.style.display = (mode==='upload' ? '' : 'none');
+    batchBox.style.display = (mode==='batch' ? '' : 'none');
+  };
+  umUpload.addEventListener('change', switchView);
+  umBatch.addEventListener('change', switchView);
+  switchView();
+
+  // 初始化选项与行为
+  initBatchFilters();
+}
+
+let bmSelectedBrands = [];      // {id, label}
+let bmSelectedModels = [];      // {id, label}
+let bmSelectedConds = [];       // {id, label}
+
+function chipHTML(label, id, type){
+  return `<span class="badge" data-type="${type}" data-id="${id}" style="margin-right:6px; margin-bottom:6px; display:inline-flex; gap:6px; align-items:center;">
+    ${label}<button type="button" data-role="rm" style="height:20px; padding:0 6px;" class="btn-ghost">×</button>
+  </span>`;
+}
+
+// 更新：initBatchFilters —— 渲染“已选列表”固定高度；型号括号只显示品牌中文；对齐要求已满足
+async function initBatchFilters(){
+  // 默认时间近7天
+  try{
+    const now = new Date();
+    const end = new Date(now.getTime() + 8*3600*1000);
+    const start = new Date(end.getTime() - 7*24*3600*1000);
+    const fmt = (d)=> d.toISOString().slice(0,16);
+    $('#bmDateFrom').value = fmt(start);
+    $('#bmDateTo').value = fmt(end);
+  }catch{}
+
+  const brandLabelById = new Map();
+  const condLabelById = new Map();
+  const modelLabelById = new Map();
+
+  const brandSelectedSet = new Set(bmSelectedBrands.map(x=>x.id));
+  const modelSelectedSet = new Set(bmSelectedModels.map(x=>x.id));
+  const condSelectedSet  = new Set(bmSelectedConds.map(x=>x.id));
+
+  const brandPicker = createMultiPicker($('#bmBrandInput'), {
+    title: '选择品牌',
+    fetchOnce: async ()=>{
+      const r = await fetch('/admin/api/data/brand/all');
+      const j = await r.json();
+      const items = (j.success ? j.data.items : []).map(b=>({ id: b.brand_id, label: b.label }));
+      items.forEach(it=> brandLabelById.set(it.id, it.label));
+      return { items };
+    },
+    dependencyKey: null,
+    toLabel: it => it.label,
+    getId: it => it.id,
+    selectedSet: brandSelectedSet,
+    onApply: ()=>{
+      bmSelectedBrands = [...brandSelectedSet].map(id=> ({ id, label: brandLabelById.get(id) || String(id) }));
+      // 品牌变化清空型号
+      bmSelectedModels = [];
+      modelSelectedSet.clear();
+      modelPicker && modelPicker.renderSelected();
+    },
+    selectedContainer: $('#bmBrandChips')
+  });
+  brandPicker.renderSelected();
+
+  const condPicker = createMultiPicker($('#bmCondInput'), {
+    title: '选择工况 - 类型 - 位置',
+    fetchOnce: async ()=>{
+      const r = await fetch('/admin/api/data/conditions/all');
+      const j = await r.json();
+      const items = (j.success ? j.data.items : []).map(c=>({ id: c.condition_id, label: c.label }));
+      items.forEach(it=> condLabelById.set(it.id, it.label));
+      return { items };
+    },
+    dependencyKey: null,
+    toLabel: it => it.label,
+    getId: it => it.id,
+    selectedSet: condSelectedSet,
+    onApply: ()=>{
+      bmSelectedConds = [...condSelectedSet].map(id=> ({ id, label: condLabelById.get(id) || String(id) }));
+    },
+    selectedContainer: $('#bmCondChips')
+  });
+  condPicker.renderSelected();
+
+  const modelPicker = createMultiPicker($('#bmModelInput'), {
+    title: '选择型号',
+    fetchOnce: async ()=>{
+      const params = new URLSearchParams();
+      if(bmSelectedBrands.length){
+        params.set('brand_ids', bmSelectedBrands.map(x=>x.id).join(','));
+      }
+      params.set('limit','200');
+      const r = await fetch(`/admin/api/data/batch/models?${params.toString()}`);
+      const j = await r.json();
+      const items = (j.success ? j.data.items : []).map(m=>{
+        // 仅显示品牌中文名
+        const brandZh = (m.brand_label || '').split('/')[0].trim();
+        const lbl = `${m.model_name}（${brandZh}）`;
+        modelLabelById.set(m.model_id, lbl);
+        return { id: m.model_id, label: lbl };
+      });
+      return { items };
+    },
+    dependencyKey: ()=> bmSelectedBrands.map(x=>x.id).sort().join(','),
+    toLabel: it => it.label,
+    getId: it => it.id,
+    selectedSet: modelSelectedSet,
+    onApply: ()=>{
+      bmSelectedModels = [...modelSelectedSet].map(id=> ({ id, label: modelLabelById.get(id) || String(id) }));
+    },
+    selectedContainer: $('#bmModelChips')
+  });
+  modelPicker.renderSelected();
+
+  // 搜索与提交
+  $('#bmSearchBtn').addEventListener('click', doBatchSearch);
+  $('#bmApplyBtn').addEventListener('click', applyBatchUpdate);
+}
+
+// 修改：renderChips 支持同步 picker 的 selectedSet（删除 chip 时同步取消勾选）
+function renderChips(containerSel, list, type, selectedSet){
+  const box = document.querySelector(containerSel);
+  box.innerHTML = list.map(x=> `<span class="badge" data-type="${type}" data-id="${x.id}" style="margin-right:6px; margin-bottom:6px; display:inline-flex; gap:6px; align-items:center;">
+    ${x.label}<button type="button" data-role="rm" style="height:20px; padding:0 6px;" class="btn-ghost">×</button>
+  </span>`).join('');
+  box.querySelectorAll('button[data-role="rm"]').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      const idAttr = btn.parentElement.getAttribute('data-id');
+      const id = /^\d+$/.test(idAttr) ? parseInt(idAttr,10) : idAttr;
+      const arr = (type==='brand') ? bmSelectedBrands : (type==='model'? bmSelectedModels : bmSelectedConds);
+      const idx = arr.findIndex(x=>x.id===id);
+      if(idx>-1){ arr.splice(idx,1); }
+      if(selectedSet && selectedSet.has(id)){ selectedSet.delete(id); }
+      renderChips(containerSel, arr, type, selectedSet);
+    });
+  });
+}
+
+function debounce(fn, wait){ let t=null; return function(){ const ctx=this, args=arguments; clearTimeout(t); t=setTimeout(()=>fn.apply(ctx,args), wait); }; }
+
+async function doBatchSearch(){
+  const bmMsg = $('#bmMsg'); bmMsg.textContent='';
+  const payload = {
+    brand_ids: bmSelectedBrands.map(x=>x.id),
+    model_ids: bmSelectedModels.map(x=>x.id),
+    condition_ids: bmSelectedConds.map(x=>x.id),
+    is_valid: [ $('#bmIv0').checked ? 0 : null, $('#bmIv1').checked ? 1 : null ].filter(v=>v!=null),
+    date_from: $('#bmDateFrom').value ? $('#bmDateFrom').value.replace('T',' ') + ':00' : '',
+    date_to:   $('#bmDateTo').value ? $('#bmDateTo').value.replace('T',' ') + ':59' : '',
+    page: 1,
+    page_size: 100
+  };
+  try{
+    const r = await fetch('/admin/api/data/batch/search', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    const j = await r.json();
+    if(!j.success){ bmMsg.className='err'; bmMsg.textContent=j.error_message||'搜索失败'; return; }
+    renderBatchResults(j.data.items||[]);
+    bmMsg.className='hint'; bmMsg.textContent = `共 ${j.data.total||0} 条，显示前 ${ (j.data.items||[]).length } 条`;
+  }catch{
+    bmMsg.className='err'; bmMsg.textContent='网络或服务器错误';
+  }
+}
+
+// 修改：渲染空结果时也重置统一表头（防止因清空后回到不统一的表头状态）
+function renderBatchResults(items){
+  const thead = document.querySelector('#bmResultTable thead tr');
+  if(thead){
+    thead.innerHTML = `
+      <th><input type="checkbox" id="bmCheckAll" style="width:16px;height:16px;" /></th>
+      <th>is_valid</th>
+      <th>品牌</th>
+      <th>型号</th>
+      <th>工况</th>
+      <th>条数</th>
+      <th>创建时间</th>
+    `;
+  }
+  const tb = document.querySelector('#bmResultTable tbody');
+  tb.innerHTML='';
+  (items||[]).forEach(it=>{
+    const tr=document.createElement('tr');
+    tr.dataset.batchId = it.batch_id;
+    tr.innerHTML = `
+      <td><input type="checkbox" class="bmRowChk" style="width:16px;height:16px;" /></td>
+      <td class="bmIv">${it.is_valid}</td>
+      <td>${escapeHtml(it.brand_name||'')}</td>
+      <td>${escapeHtml(it.model_name||'')}</td>
+      <td>${escapeHtml(it.condition_name||'')}</td>
+      <td>${it.data_count ?? ''}</td>
+      <td class="bmDate">${it.create_date ?? ''}</td>
+    `;
+    tb.appendChild(tr);
+  });
+  const all = document.querySelector('#bmCheckAll');
+  if(all){
+    all.checked = false;
+    all.addEventListener('change', ()=>{
+      document.querySelectorAll('.bmRowChk').forEach(cb=> cb.checked = all.checked);
+    });
+  }
+}
+
+function escapeHtml(s){ return String(s).replace(/[&<>"']/g, m=>({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;' }[m] )); }
+
+// 调整：批量提交时强校验 is_valid 必须手动选择（不再默认 0）
+async function applyBatchUpdate(){
+  const bmMsg = $('#bmMsg'); bmMsg.textContent=''; bmMsg.className='hint';
+  const targetStr = ($('#bmTargetIv').value ?? '').trim();
+  if(targetStr === ''){ bmMsg.className='err'; bmMsg.textContent='请选择 is_valid'; return; }
+  const target = parseInt(targetStr, 10);
+  if(!(target===0 || target===1)){ bmMsg.className='err'; bmMsg.textContent='is_valid 取值非法'; return; }
+
+  const desc = ($('#bmDesc').value||'').trim();
+  const batchIds = [...document.querySelectorAll('#bmResultTable tbody tr')].filter(tr=> tr.querySelector('.bmRowChk')?.checked).map(tr=> tr.dataset.batchId);
+  if(batchIds.length===0){ bmMsg.className='err'; bmMsg.textContent='请至少勾选一条'; return; }
+  if(!desc){ bmMsg.className='err'; bmMsg.textContent='请填写更新描述'; return; }
+  try{
+    $('#bmApplyBtn').disabled = true;
+    const r = await fetch('/admin/api/data/batch/update-state', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ batch_ids: batchIds, target_is_valid: target, description: desc })
+    });
+    const j = await r.json();
+    if(!j.success){
+      bmMsg.className='err'; bmMsg.textContent=j.error_message||'更新失败';
+    }else{
+      const failedSet = new Set((j.data.updated_failed||[]).map(x=>x.batch_id));
+      await refreshBatchStatuses(batchIds);
+      document.querySelectorAll('#bmResultTable tbody tr').forEach(tr=>{
+        tr.style.background = '';
+        const bid = tr.dataset.batchId;
+        if(failedSet.has(bid)){ tr.style.background = 'color-mix(in oklab, var(--err), transparent 85%)'; }
+      });
+      const hasFail = failedSet.size>0;
+      const hasChange = (j.data.updated_success||[]).length>0;
+      bmMsg.className = hasFail ? 'warn' : (hasChange ? 'ok' : 'hint');
+      bmMsg.textContent = hasFail ? '部分条目更新状态失败' : (hasChange ? '批量更新完成' : '未发生变化');
+    }
+  }catch{
+    bmMsg.className='err'; bmMsg.textContent='网络或服务器错误';
+  }finally{
+    $('#bmApplyBtn').disabled = false;
+  }
+}
+
+async function refreshBatchStatuses(batchIds){
+  try{
+    const r = await fetch('/admin/api/data/batch/status', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ batch_ids: batchIds }) });
+    const j = await r.json();
+    if(!j.success) return;
+    const map = new Map();
+    (j.data.items||[]).forEach(it=> map.set(it.batch_id, it));
+    document.querySelectorAll('#bmResultTable tbody tr').forEach(tr=>{
+      const info = map.get(tr.dataset.batchId);
+      if(info){
+        tr.querySelector('.bmIv').textContent = String(info.is_valid);
+        tr.querySelector('.bmDate').textContent = info.create_date || '';
+      }
+    });
+  }catch{}
+}
+
+// 更新：通用多选浮层 —— 修复按钮被遮挡、行紧凑、固定已选列表高度，统一蓝色勾选
+function createMultiPicker(anchorEl, {
+  title,
+  fetchOnce,
+  dependencyKey,
+  toLabel,
+  getId,
+  selectedSet,
+  onApply,
+  selectedContainer
+}){
+  let cache = null;   // { dep, items, labelById }
+  let panel, listEl, searchEl, countEl;
+
+  async function ensureData(){
+    const dep = dependencyKey ? dependencyKey() : '__static__';
+    if(cache && cache.dep === dep) return cache.items;
+    const { items } = await fetchOnce();
+    const labelById = new Map();
+    items.forEach(it => labelById.set(getId(it), toLabel(it)));
+    cache = { dep, items, labelById };
+    return items;
+  }
+
+  function ensurePanel(){
+    if(panel) return;
+    panel = document.createElement('div');
+    panel.className = 'picker';
+    panel.style.cssText = `
+      position:absolute; z-index:1000; min-width:320px; max-width:560px;
+      max-height:420px; overflow:hidden; display:none;
+      background: var(--card); border:1px solid var(--border); border-radius:10px; box-shadow: var(--shadow);
+    `;
+    panel.innerHTML = `
+      <div style="display:flex; align-items:center; gap:8px; padding:8px 10px; border-bottom:1px solid var(--border);">
+        <div style="font-weight:700; flex:0 0 auto;">${title||''}</div>
+        <input class="picker-search" placeholder="过滤关键字" style="flex:1 1 auto; height:32px; padding:0 10px; border:1px solid var(--border); border-radius:8px; color:var(--text); background:var(--card);" />
+      </div>
+      <div style="display:flex; align-items:center; gap:8px; padding:6px 10px; border-bottom:1px solid var(--border);">
+        <button type="button" data-act="sel-all" class="btn-ghost" style="height:28px;">全选</button>
+        <button type="button" data-act="clear" class="btn-ghost" style="height:28px;">清空</button>
+        <span class="hint" data-role="count" style="margin-left:auto;"></span>
+      </div>
+      <div class="picker-list" style="overflow:auto; max-height:300px; padding:4px 8px;"></div>
+      <div style="display:flex; gap:8px; justify-content:flex-end; padding:8px 10px; border-top:1px solid var(--border);">
+        <button type="button" data-act="apply">应用</button>
+        <button type="button" class="btn-ghost" data-act="close">关闭</button>
+      </div>
+    `;
+    listEl = panel.querySelector('.picker-list');
+    searchEl = panel.querySelector('.picker-search');
+    countEl = panel.querySelector('[data-role="count"]');
+    document.body.appendChild(panel);
+
+    panel.addEventListener('click', e=>{
+      const act = e.target.getAttribute('data-act');
+      if(act==='apply'){ onApply && onApply(); renderSelected(); close(); }
+      if(act==='close'){ close(); }
+      if(act==='sel-all'){ listEl.querySelectorAll('input[type="checkbox"]').forEach(cb=> cb.checked=true); syncSetFromList(); }
+      if(act==='clear'){ listEl.querySelectorAll('input[type="checkbox"]').forEach(cb=> cb.checked=false); syncSetFromList(); }
+      updateCount();
+    });
+    searchEl.addEventListener('input', renderList);
+
+    // 点击外部关闭
+    document.addEventListener('click', (e)=>{
+      if(panel.style.display==='none') return;
+      if(!panel.contains(e.target) && e.target!==anchorEl){
+        close();
+      }
+    });
+    // 窗口变化时重新定位
+    window.addEventListener('resize', ()=>{ if(panel && panel.style.display!=='none'){ position(anchorEl); } });
+    window.addEventListener('scroll', ()=>{ if(panel && panel.style.display!=='none'){ position(anchorEl); } }, true);
+  }
+
+  // 注意：open 改为 async，先显示，再渲染，再定位（二次），避免底部按钮被遮挡
+  async function open(){
+    ensurePanel();
+    panel.style.display = '';           // 先显示
+    position(anchorEl);                 // 初定位（基于当前高度）
+    await renderList();                 // 渲染列表（高度会变化）
+    position(anchorEl);                 // 再定位，保证底部按钮露出
+  }
+
+  function close(){ if(panel) panel.style.display='none'; }
+
+  // 可调参数：chrome 为头/操作/脚的总高度预留，必要时可调大（例如从 128 调到 148/160）
+  function calcHeights(){
+    const chrome = 148;   // ← 如果按钮仍未完全露出，调大这个值
+    const maxH = 440;     // 面板最大高度上限
+    return { chrome, maxH };
+  }
+
+  function position(anchor){
+    const r = anchor.getBoundingClientRect();
+    const viewportH = window.innerHeight || document.documentElement.clientHeight;
+    const below = viewportH - r.bottom - 10;
+    const above = r.top - 10;
+    const { chrome, maxH: baseMaxH } = calcHeights();
+
+    let place = 'below';
+    let avail = below;
+    if (below < 260 && above > below){ place = 'above'; avail = above; }
+
+    const maxH = Math.max(260, Math.min(baseMaxH, avail));
+    panel.style.maxHeight = maxH + 'px';
+    const listMax = Math.max(120, maxH - chrome);
+    listEl.style.maxHeight = listMax + 'px';
+
+    panel.style.minWidth = Math.max(320, r.width) + 'px';
+    panel.style.left = (window.scrollX + r.left) + 'px';
+    // 计算真实高度后再放置，保证底部不被遮挡
+    const ph = panel.offsetHeight || maxH;
+    const belowTop = window.scrollY + r.bottom + 6;
+    const aboveTop = window.scrollY + r.top - ph - 6;
+    panel.style.top  = place==='below' ? Math.max(6, belowTop) + 'px' : Math.max(6, aboveTop) + 'px';
+  }
+
+  function updateCount(){
+    if(!countEl) return;
+    const cnt = listEl.querySelectorAll('input[type="checkbox"]:checked').length;
+    countEl.textContent = `已选 ${cnt} 项`;
+  }
+
+  function syncSetFromList(){
+    const ids = [...listEl.querySelectorAll('input[type="checkbox"]')].filter(cb=>cb.checked).map(cb=> cb.getAttribute('data-id'));
+    selectedSet.clear();
+    ids.forEach(id=>{
+      selectedSet.add(/^\d+$/.test(id)? parseInt(id,10) : id);
+    });
+  }
+
+  function renderSelected(){
+    if(!selectedContainer) return;
+    // 固定高度，三列对齐
+    selectedContainer.style.border = '1px solid var(--border)';
+    selectedContainer.style.borderRadius = '8px';
+    selectedContainer.style.padding = '6px';
+    selectedContainer.style.height = '140px';   // 固定高度（由原先 maxHeight 改为固定 height）
+    selectedContainer.style.overflowY = 'auto';
+    selectedContainer.style.background = 'color-mix(in oklab, var(--card), transparent 0%)';
+
+    const ids = [...selectedSet];
+    const rows = ids.map(id=>{
+      const label = (cache && cache.labelById && cache.labelById.get(id)) || String(id);
+      return { id, label };
+    });
+    selectedContainer.innerHTML = rows.map(x => `
+      <div class="sel-row" data-id="${x.id}" style="display:flex; align-items:center; justify-content:space-between; gap:8px; padding:4px 6px; border-bottom:1px dashed var(--border);">
+        <div style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${x.label}</div>
+        <button type="button" class="btn-ghost" data-role="rm" style="height:24px; padding:0 8px;">×</button>
+      </div>
+    `).join('');
+    const last = selectedContainer.querySelector('.sel-row:last-child');
+    if(last){ last.style.borderBottom = 'none'; }
+    selectedContainer.querySelectorAll('button[data-role="rm"]').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const idAttr = btn.parentElement.getAttribute('data-id');
+        const id = /^\d+$/.test(idAttr) ? parseInt(idAttr,10) : idAttr;
+        if(selectedSet.has(id)) selectedSet.delete(id);
+        renderSelected();
+      });
+    });
+  }
+
+  async function renderList(){
+    const all = await ensureData();
+    const kw = (searchEl.value||'').trim().toLowerCase();
+    const filtered = kw ? all.filter(it => toLabel(it).toLowerCase().includes(kw)) : all;
+    listEl.innerHTML = '';
+    filtered.forEach(it=>{
+      const id = getId(it);
+      const lbl = toLabel(it);
+      const row = document.createElement('label');
+      // 更紧凑的条目；勾选框变大且统一蓝色
+      row.style.cssText = 'display:flex; align-items:center; gap:8px; padding:4px 2px; cursor:pointer; font-size:14px;';
+      row.innerHTML = `<input type="checkbox" data-id="${id}" style="width:16px; height:16px;"> <span style="line-height:1.2;">${lbl}</span>`;
+      const cb = row.querySelector('input');
+      cb.checked = selectedSet.has(id);
+      cb.addEventListener('change', ()=>{
+        if(cb.checked){ selectedSet.add(id); } else { selectedSet.delete(id); }
+        updateCount();
+      });
+      listEl.appendChild(row);
+    });
+    updateCount();
+  }
+
+  anchorEl.addEventListener('click', (e)=>{ e.preventDefault(); open(); });
+  return { open, close, renderSelected };
+}
+
+// 替换现有的 fixCondLayout：使用 CSS Grid 控制列宽，gap 仅控制列间距
+function fixCondLayout(){
+  // 可调参数
+  const GAP_PX = 50;                 // 四列之间的间距（不会改变长度，只控制间隙）
+  const POS_COL_WIDTH = 130;         // “风阻位置”列固定宽度（px），与 is_valid 下拉一致
+  const GRID_FRAC = '1fr 1fr 1fr';   // 前三列的宽度比例（可改为 '1.2fr 1fr 1fr' 等）
+  const SELECT_STD_WIDTH = 130;      // 下方 is_valid 下拉统一宽度（px）
+
+  // 通用：把一行改成 grid：前三列自适应(1fr/1fr/1fr)，最后一列固定宽度
+  function setupRow(containerSel, locSelectSel, isValidSel){
+    const row = document.querySelector(`${containerSel} .row`);
+    if(!row) return;
+
+    // 改为 Grid 布局
+    row.style.display = 'grid';
+    row.style.gridTemplateColumns = `${GRID_FRAC} ${POS_COL_WIDTH}px`;
+    row.style.columnGap = `${GAP_PX}px`;
+    row.style.alignItems = 'end'; // 底对齐更整齐
+
+    // 列容器允许收缩，子 input/select 100% 填满列
+    row.querySelectorAll(':scope > div').forEach(col => {
+      col.style.minWidth = '0';
+      col.style.width = '100%';
+      col.querySelectorAll('input, select').forEach(el => {
+        el.style.width = '100%';
+      });
+    });
+
+    // “风阻位置”列的选择框占满该固定列
+    const locSel = row.querySelector(locSelectSel);
+    if(locSel){ locSel.style.width = '100%'; }
+
+    // 下方 is_valid 下拉与其他页面一致
+    const iv = document.querySelector(isValidSel);
+    if(iv){ iv.style.width = `${SELECT_STD_WIDTH}px`; }
+  }
+
+  // 添加工况
+  setupRow('#condAddBox', 'select#rtLoc', '#condIsValid');
+  // 编辑工况
+  setupRow('#condEditBox', 'select#rtLocEdit', '#condEditIsValid');
+}
+
+// 新增：批量管理表头统一函数（占位/未载入时也与载入后保持一致的高度与勾选框大小）
+function setBatchTableHeaderUnified() {
+  const theadRow = document.querySelector('#bmResultTable thead tr');
+  if (!theadRow) return;
+  theadRow.innerHTML = `
+    <th><input type="checkbox" id="bmCheckAll" style="width:16px;height:16px;" /></th>
+    <th>is_valid</th>
+    <th>品牌</th>
+    <th>型号</th>
+    <th>工况</th>
+    <th>条数</th>
+    <th>创建时间</th>
+  `;
+  // 绑定“全选”占位（即便无数据时也保持行为存在）
+  const all = document.querySelector('#bmCheckAll');
+  if (all) {
+    all.checked = false;
+    all.addEventListener('change', () => {
+      document.querySelectorAll('.bmRowChk').forEach(cb => cb.checked = all.checked);
+    });
+  }
+}
+
+// 新增：统一“动作栏”样式（is_valid 下拉 + 更新描述 + 预览/提交按钮 + 提示），并为按钮右侧预留提示区域
+function injectActionBarStyles(){
+  if(document.getElementById('unifiedActionStyles')) return;
+  const css = document.createElement('style');
+  css.id = 'unifiedActionStyles';
+  css.textContent = `
+    /* 通用动作栏 */
+    .action-bar { display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin-top:12px; }
+    .action-bar .ab-iv { flex: 0 0 auto; }
+    .action-bar .ab-iv select { width:130px; }
+
+    .action-bar .ab-desc { flex: 1 1 360px; min-width:260px; }
+    .action-bar .ab-desc input[type="text"],
+    .action-bar .ab-desc input[type="search"],
+    .action-bar .ab-desc textarea { width:100%; }
+
+    .action-bar .ab-btns { margin-left:auto; display:flex; align-items:center; gap:10px; flex: 0 0 auto; }
+    .action-bar .ab-btns .ab-msg {
+      min-width:220px; max-width:40vw; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+    }
+  `;
+  document.head.appendChild(css);
+}
+
+// 新增：统一“上传/编辑数据”页的动作栏布局（不撑满整行，按钮右侧预留提示）
+function unifyUploadActionBar(){
+  const panel = document.querySelector('#panel-upload');
+  if(!panel) return;
+
+  const isValid = document.querySelector('#isValidSelect');
+  const desc = document.querySelector('#updateDesc');
+  const btn = document.querySelector('#perfSubmitBtn');
+  const msg = document.querySelector('#perfSubmitMsg');
+
+  if(!isValid || !desc || !btn || !msg) return;
+  if(document.querySelector('#uploadActionBar')) return;
+
+  // 插入到编辑区(perfEditor)后面
+  const anchor = document.querySelector('#perfEditor') || panel;
+  const bar = document.createElement('div');
+  bar.id = 'uploadActionBar';
+  bar.className = 'action-bar';
+
+  // 左：is_valid
+  const colIv = document.createElement('div');
+  colIv.className = 'ab-iv';
+  const lblIv = document.createElement('label');
+  lblIv.textContent = 'is_valid';
+  lblIv.setAttribute('for','isValidSelect');
+  colIv.appendChild(lblIv);
+  colIv.appendChild(isValid);
+
+  // 中：更新描述
+  const colDesc = document.createElement('div');
+  colDesc.className = 'ab-desc';
+  const lblDesc = document.createElement('label');
+  lblDesc.textContent = '更新描述（必填）';
+  lblDesc.setAttribute('for','updateDesc');
+  colDesc.appendChild(lblDesc);
+  colDesc.appendChild(desc);
+
+  // 右：按钮 + 提示
+  const colBtns = document.createElement('div');
+  colBtns.className = 'ab-btns';
+  const hint = document.createElement('span');
+  hint.className = 'ab-msg';
+  // 将既有提示节点挂到预留区域
+  hint.appendChild(msg);
+  colBtns.appendChild(btn);
+  colBtns.appendChild(hint);
+
+  bar.appendChild(colIv);
+  bar.appendChild(colDesc);
+  bar.appendChild(colBtns);
+
+  // 放到 perfEditor 后
+  if(anchor.nextSibling){ anchor.parentNode.insertBefore(bar, anchor.nextSibling); }
+  else { anchor.parentNode.appendChild(bar); }
+}
+
+// 初始化挂载：在页面就绪后统一样式，并重排上传页动作栏
 (async function init(){
   suspendDraft = true;
   resetUploadState();
   bindDraftAutoSave();
+  injectActionBarStyles();     // ← 注入统一样式（新增）
   try{
     const raw = localStorage.getItem(LS_KEY);
     if(raw){
@@ -1185,9 +1996,9 @@ function bindDraftAutoSave(){
       if(hasMeaningfulDraft(d)){ $('#restoreBar').style.display='block'; }
     }
   }catch(e){}
-  // 型号编辑“两级下拉”初始化（若元素不存在将安全跳过）
   try{ initModelEditTwoDropdowns(); }catch(e){}
-
-  // 修复点：初始化结束后允许自动保存草稿
+  try{ initBatchManageSection(); }catch(e){}
+  // 统一“上传/编辑数据”动作栏布局
+  try{ unifyUploadActionBar(); }catch(e){}
   suspendDraft = false;
 })();

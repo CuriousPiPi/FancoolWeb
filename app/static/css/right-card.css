@@ -280,7 +280,7 @@
   --subrow-h: 26px;
   /* 旧结构回退用的视觉缩进（兜底） */
   --subrow-indent: clamp(240px, 32vw, 480px);
-  --row-mask-extra: 480px;
+  --row-mask-extra: 240px;
 }
 
 /* 子行基础：固定行高由 .fc-subrow__row 控制 */
