@@ -667,6 +667,17 @@ function initTopQueriesAndLikesExpander(){
   function collectFollowers(fromTr){ const arr=[]; let n=fromTr.nextElementSibling; while(n){ arr.push(n); n=n.nextElementSibling; } return arr; }
   function collectFollowersAfter(el){ const arr=[]; let n=el?el.nextElementSibling:null; while(n){ arr.push(n); n=n.nextElementSibling; } return arr; }
   function measureTops(els){ const m=new Map(); els.forEach(el=>{ m.set(el, el.getBoundingClientRect().top); }); return m; }
+
+  // 新增：同时测量 top / height / bottom，供“底部为基准”使用
+  function measureTopAndHeight(els){
+    const m = new Map();
+    els.forEach(el => {
+      const r = el.getBoundingClientRect();
+      m.set(el, { top: r.top, height: r.height, bottom: r.bottom });
+    });
+    return m;
+  }
+
   function markAnimating(els,on){ els.forEach(el=>{ if(on) el.classList.add('fc-row-animating'); else el.classList.remove('fc-row-animating'); }); }
 
   // 不再做任何旧字段兼容，严格依赖统一字段
@@ -749,7 +760,8 @@ async function expandRow(btn){
   // 插入前：收集“后续主行”及其可视 top
   const followers = collectFollowers(tr);
   const prevMap = measureTops(followers);
-
+  const prevGeom = measureTopAndHeight(followers);
+  
   // 构造并插入子行
   const condsRaw = parseConds(tr);
   const sorted = condsRaw.slice().sort((a,b)=>{
@@ -830,24 +842,39 @@ async function expandRow(btn){
     dyBtn
   });
 
-  // 展开滚动同步（动态阈值）
+// 展开滚动同步（动态阈值）——改为“第一条下移主行的底部”为基准
   if (scroller) {
     const scRect = scroller.getBoundingClientRect();
     let freeSpacePx = 0;
 
     if (followers.length === 0) {
-      // 最后一行：基于“父行底边”
+      // 最后一行：仍用“父行底部”为基准（保持不变）
       freeSpacePx = Math.max(0, Math.round(scRect.bottom - trRectBefore.bottom));
     } else {
-      // 非最后一行：基于“第一条下移主行的插入前顶边”
       const firstFollower = followers[0];
-      const prevTopFF = prevMap.get(firstFollower);
-      if (typeof prevTopFF === 'number') {
-        freeSpacePx = Math.max(0, Math.round(scRect.bottom - prevTopFF));
+
+      // 优先用“插入前”测得的 bottom 作为基准
+      const g = prevGeom.get(firstFollower) || null;
+      if (g && Number.isFinite(g.top) && Number.isFinite(g.height)) {
+        const prevBottomFF = g.top + g.height;
+        freeSpacePx = Math.max(0, Math.round(scRect.bottom - prevBottomFF));
       } else {
-        // 兜底：用“插入后 top - 预计下移量”近似回推
-        const ffRect = firstFollower.getBoundingClientRect();
-        freeSpacePx = Math.max(0, Math.round(scRect.bottom - (ffRect.top - HExact)));
+        // 兜底：用“插入前 top + 行高估值”近似 bottom
+        const prevTopFF = prevMap.get(firstFollower);
+        // 行高估值优先用当前行的可量高度，否则退回到一个小常量（32px），也可替换为你的 CSS 变量
+        const rowHEst = Math.round(
+          (firstFollower && firstFollower.getBoundingClientRect().height) ||
+          parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--rank-row-h')) ||
+          32
+        );
+        if (typeof prevTopFF === 'number') {
+          const approxBottom = prevTopFF + rowHEst;
+          freeSpacePx = Math.max(0, Math.round(scRect.bottom - approxBottom));
+        } else {
+          // 再兜底：用“插入后 top - HExact + 行高估值”回推
+          const ffRect = firstFollower.getBoundingClientRect();
+          freeSpacePx = Math.max(0, Math.round(scRect.bottom - (ffRect.top - HExact + rowHEst)));
+        }
       }
     }
     startTrackScrollPinDynamic(scroller, +HExact, freeSpacePx);
