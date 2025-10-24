@@ -577,14 +577,25 @@ function setTheme(theme) {
     if (!isN) {
       const l1Size=13, l1Weight=600;
       const l2Size=11, l2Weight=500;
+      // Create a single offscreen canvas context for text measurement
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      // Precompute font strings
+      const l1Font = `${l1Weight} ${l1Size}px ${t.fontFamily}`;
+      const l2Font = `${l2Weight} ${l2Size}px ${t.fontFamily}`;
       sList.forEach(s=>{
         const brand = s.brand || s.brand_name_zh || s.brand_name || '';
         const model = s.model || s.model_name || '';
         const condition = s.condition_name_zh || s.condition || '';
         const line1 = [brand, model].filter(Boolean).join(' ') || (s.name || '');
         const line2 = condition || '';
-        const w1 = measureText(line1, l1Size, l1Weight, t.fontFamily).width;
-        const w2 = line2 ? measureText(line2, l2Size, l2Weight, t.fontFamily).width : 0;
+        ctx.font = l1Font;
+        const w1 = ctx.measureText(line1).width;
+        let w2 = 0;
+        if (line2) {
+          ctx.font = l2Font;
+          w2 = ctx.measureText(line2).width;
+        }
         legendItemTextMaxW = Math.max(legendItemTextMaxW, Math.max(w1, w2));
       });
     }
@@ -597,7 +608,7 @@ function setTheme(theme) {
 
     // 桌面：legend 仍用 right 定位。绘图区右边距 = max(180, legend.right + legendComputedW + 10)
     // 其中 10 为“绘图区右边”到“legend 左边”的固定间距
-    const legendRightDesktop = 0; // 你现在用的是 right: 0，如需与容器右边再留白可改为 10 等
+    const legendRightDesktop = 20; // 你现在用的是 right: 0，如需与容器右边再留白可改为 10 等
     const gridRightDesktop = !isN
       ? Math.max(180, legendRightDesktop + legendComputedW + 10)
       : 20; // 窄屏仍保留原 20
