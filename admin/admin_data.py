@@ -1215,6 +1215,24 @@ def api_perf_add():
         is_valid = int(payload.get('is_valid') if payload.get('is_valid') in (0, 1, '0', '1') else 0)
     except Exception:
         return resp_err('INVALID_INPUT', 'ID或is_valid格式错误')
+    
+    # 必填：前端生成 batch_id（UUIDv4）
+    batch_id = (payload.get('batch_id') or '').strip()
+    try:
+        parsed = uuid.UUID(batch_id, version=4)
+        if str(parsed) != batch_id:
+            raise ValueError()
+    except Exception:
+        return resp_err('INVALID_INPUT', 'batch_id 非法（需 UUIDv4）')
+    # 全局唯一：任意 model/condition 下均不得重复
+    try:
+        with _engine().begin() as conn:
+            dup = conn.execute(text("SELECT 1 FROM fan_performance_data WHERE batch_id=:bid LIMIT 1"),
+                               {'bid': batch_id}).fetchone()
+            if dup:
+                return resp_err('BATCH_ID_EXISTS', 'batch_id 已存在')
+    except Exception as e:
+        return resp_err('DB_READ_FAIL', f'校验 batch_id 失败: {e}', 500)
 
     # 前端更新描述（用于新批次的 notice）
     desc_front = (payload.get('description') or '').strip()
@@ -1241,7 +1259,6 @@ def api_perf_add():
     except Exception as e:
         return resp_err('INVALID_ROW', str(e))
 
-    new_batch = str(uuid.uuid4())
     try:
         with _engine().begin() as conn:
             prev_batches = []
@@ -1263,7 +1280,7 @@ def api_perf_add():
                         'm': model_id,
                         'c': condition_id,
                         'affected': old_bid,
-                        'desc': new_batch  # 被哪个新批次替换
+                        'desc': batch_id  # 被哪个新批次替换
                     })
 
                 # 关闭旧批次
@@ -1280,7 +1297,7 @@ def api_perf_add():
                     (model_id, condition_id, batch_id, rpm, airflow_cfm, noise_db, is_valid)
                     VALUES (:mid,:cid,:bid,:rpm,:air,:ndb,:valid)
                 """), {
-                    'mid': model_id, 'cid': condition_id, 'bid': new_batch,
+                    'mid': model_id, 'cid': condition_id, 'bid': batch_id,
                     'rpm': r['rpm'], 'air': r['airflow_cfm'], 'ndb': r['noise_db'], 'valid': is_valid
                 })
 
@@ -1295,12 +1312,67 @@ def api_perf_add():
                 """), {
                     'm': model_id,
                     'c': condition_id,
-                    'affected': new_batch,
+                    'affected': batch_id,
                     'action': action_value,
                     'desc': desc_front
                 })
     except Exception as e:
         return resp_err('DB_WRITE_FAIL', f'写入失败: {e}', 500)
 
+    return resp_ok({'inserted': len(cleaned), 'batch_id': batch_id}, message=f'成功插入 {len(cleaned)} 行')
 
-    return resp_ok({'inserted': len(cleaned), 'batch_id': new_batch}, message=f'成功插入 {len(cleaned)} 行')
+#绑定接口，把“性能批次 ↔ 模型（标定 run 或 model_hash）”持久化
+@data_mgmt_bp.post('/admin/api/calib/bind-model')
+def api_bind_model_to_perf():
+    if not session.get('is_admin'):
+        return resp_err('UNAUTHORIZED', '请先登录', 401)
+    data = request.get_json(force=True, silent=True) or {}
+    try:
+        model_id = int(data.get('model_id') or 0)
+        condition_id = int(data.get('condition_id') or 0)
+    except Exception:
+        return resp_err('INVALID_INPUT', 'model_id/condition_id 非法')
+    perf_batch_id = (data.get('perf_batch_id') or '').strip()
+    model_hash = (data.get('model_hash') or '').strip()
+    run_id = data.get('calib_run_id')
+
+    if model_id <= 0 or condition_id <= 0 or not perf_batch_id:
+        return resp_err('INVALID_INPUT', '缺少必要参数')
+
+    with _engine().begin() as conn:
+        # 校验 perf 批次属于该型号/工况
+        row = conn.execute(text("""
+            SELECT 1 FROM fan_performance_data
+            WHERE model_id=:m AND condition_id=:c AND batch_id=:bid LIMIT 1
+        """), {'m': model_id, 'c': condition_id, 'bid': perf_batch_id}).fetchone()
+        if not row:
+            return resp_err('NOT_FOUND', '性能批次不存在或不属于该型号/工况', 404)
+
+        # 若未给 run_id 但提供了 model_hash，可据此确认 run_id（可为空）
+        if not run_id and model_hash:
+            rid = conn.execute(text("""
+                SELECT id FROM calib_run
+                WHERE model_hash=:mh
+                ORDER BY finished_at DESC
+                LIMIT 1
+            """), {'mh': model_hash}).scalar()
+            run_id = int(rid or 0) if rid else None
+
+        # 要求至少能确定 model_hash
+        if not model_hash and run_id:
+            mh = conn.execute(text("SELECT model_hash FROM calib_run WHERE id=:rid LIMIT 1"),
+                              {'rid': run_id}).scalar()
+            model_hash = (mh or '').strip()
+        if not model_hash:
+            return resp_err('INVALID_INPUT', '无法确定 model_hash（请传 model_hash 或 calib_run_id）')
+
+        # upsert
+        conn.execute(text("""
+            INSERT INTO perf_model_binding (model_id, condition_id, perf_batch_id, calib_run_id, model_hash, created_at, created_by)
+            VALUES (:m,:c,:bid,:rid,:mh, NOW(), :by)
+            ON DUPLICATE KEY UPDATE calib_run_id=VALUES(calib_run_id), model_hash=VALUES(model_hash), created_by=VALUES(created_by)
+        """), {
+            'm': model_id, 'c': condition_id, 'bid': perf_batch_id,
+            'rid': run_id, 'mh': model_hash, 'by': (session.get('admin_name') or 'admin')
+        })
+    return resp_ok({'perf_batch_id': perf_batch_id, 'model_hash': model_hash, 'calib_run_id': run_id}, message='绑定成功')

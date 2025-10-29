@@ -8,48 +8,32 @@ from sqlalchemy import create_engine, text
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash
 from admin_data import data_mgmt_bp
+from admin_calib import calib_admin_bp
 
 # =========================
 # Config
 # =========================
-from logging.config import dictConfig
-
-dictConfig({
-    'version': 1,
-    'disable_existing_loggers': False,  # 不屏蔽第三方库，但我们会单独降级它们
-    'formatters': {
-        'default': {
-            'format': '[%(asctime)s] %(levelname)s in %(name)s: %(message)s',
-        },
-    },
-    'handlers': {
-        'wsgi': {
-            'class': 'logging.StreamHandler',
-            'stream': 'ext://sys.stdout',
-            'formatter': 'default',
-        },
-    },
-    # 根 logger：WARNING（抑制 INFO/DEBUG）
-    'root': {
-        'level': 'WARNING',
-        'handlers': ['wsgi']
-    },
-    'loggers': {
-        # Flask/werkzeug 的请求日志
-        'werkzeug': {'level': 'WARNING', 'propagate': True},
-        # SQLAlchemy 引擎与连接池（避免打印 SQL/连接池 INFO）
-        'sqlalchemy.engine': {'level': 'WARNING', 'propagate': False},
-        'sqlalchemy.pool': {'level': 'WARNING', 'propagate': False},
-        # 如果你有其他 noisy 的库，也可在此降级
-    }
-})
-
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_for=1)
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 app.secret_key = os.getenv('APP_SECRET', 'replace-me-in-prod')  # 与前台保持一致的 secret
 app.register_blueprint(data_mgmt_bp)
-app.logger.setLevel('WARNING')
+app.logger.setLevel('INFO')
+
+app.register_blueprint(calib_admin_bp)
+
+# 新增：启动时打印路由表（开发用）
+def _dump_routes(_app: Flask):
+    try:
+        lines = []
+        for rule in sorted(_app.url_map.iter_rules(), key=lambda r: r.rule):
+            methods = ','.join(sorted([m for m in rule.methods if m not in ('HEAD','OPTIONS')]))
+            lines.append(f"{methods:10s} {rule.rule}  -> {rule.endpoint}")
+        _app.logger.info("Registered routes:\n" + "\n".join(lines))
+    except Exception:
+        pass
+
+_dump_routes(app)
 
 app.config['TEMPLATES_AUTO_RELOAD'] = True
 #app.jinja_env.auto_reload = True
@@ -495,4 +479,4 @@ def api_health():
 if __name__ == '__main__':
     # 仅用于开发调试；生产请用 gunicorn + Nginx，并将 ADMIN_SESSION_COOKIE_* 设置为安全值
     port = int(os.getenv('ADMIN_PORT', '6001'))
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+    app.run(host='0.0.0.0', port=port, debug=True, use_reloader=False)

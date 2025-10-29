@@ -15,51 +15,94 @@ logger = logging.getLogger("curves.pchip_cache")  # 继承上层日志配置
 # 配置（通过环境变量可调）
 # =========================
 
-#CURVE_SMOOTH_ALPHA_RPM / CURVE_SMOOTH_ALPHA_NOISE：0.0~1.0
-#0.0：严格贴近单调矫正后的节点（几乎“穿”原始趋势）
-#1.0：节点被拉向全局线性趋势（更“直”）
-#CURVE_TENSION_TAU_RPM / CURVE_TENSION_TAU_NOISE：0.0~1.0
-#0.0：保持原始 PCHIP 段斜率
-#1.0：将段斜率压为 0（段内近似直线，但仍穿“平滑后的节点”）
+# CURVE_SMOOTH_ALPHA_*：0.0~1.0
+# 0.0：严格贴近“用于插值的节点”（即单调矫正/趋势平滑后的节点或原始节点）
+# 1.0：节点被拉向全局线性趋势
+# CURVE_TENSION_TAU_*：0.0~1.0
+# 0.0：保持原始 PCHIP 段斜率
+# 1.0：将段斜率压为 0（段内近似直线）
 _ALPHA = {
     "rpm": float(os.getenv("CURVE_SMOOTH_ALPHA_RPM", "0.6")),
     "noise_db": float(os.getenv("CURVE_SMOOTH_ALPHA_NOISE", "0.2")),
+    # 频谱拟合分支默认不做趋势平滑
+    "spectrum_db": float(os.getenv("CURVE_SMOOTH_ALPHA_SPECTRUM", "0.0")),
 }
 _TAU = {
     "rpm": float(os.getenv("CURVE_TENSION_TAU_RPM", "0.0")),
     "noise_db": float(os.getenv("CURVE_TENSION_TAU_NOISE", "0.0")),
-}   
+    # 频谱拟合分支默认不开张力
+    "spectrum_db": float(os.getenv("CURVE_TENSION_TAU_SPECTRUM", "0.0")),
+}
+
+# 新增：按轴控制“单调矫正开关”与“节点锁定（跳过单调与平滑）”
+def _env_monotone_enable(axis: str) -> bool:
+    ax = _axis_norm(axis)
+    if ax == "rpm":
+        key = "CURVE_MONOTONE_ENABLE_RPM"
+        default = "1"
+    elif ax == "noise_db":
+        key = "CURVE_MONOTONE_ENABLE_NOISE"
+        default = "1"
+    else:  # spectrum_db
+        key = "CURVE_MONOTONE_ENABLE_SPECTRUM"
+        default = "0"  # 频谱拟合分支默认禁用单调
+    return (os.getenv(key, default) or "").strip() in ("1", "true", "True", "YES", "yes")
+
+def _env_node_lock(axis: str) -> bool:
+    ax = _axis_norm(axis)
+    if ax == "rpm":
+        key = "CURVE_NODE_LOCK_RPM"
+        default = "0"
+    elif ax == "noise_db":
+        key = "CURVE_NODE_LOCK_NOISE"
+        default = "0"
+    else:  # spectrum_db
+        key = "CURVE_NODE_LOCK_SPECTRUM"
+        default = "1"  # 频谱拟合分支默认锁定节点（不改写）
+    return (os.getenv(key, default) or "").strip() in ("1", "true", "True", "YES", "yes")
 
 def reload_curve_params_from_env():
     """
     重新从环境变量加载平滑/张力参数。
     - 无需重启进程即可生效新参数。
-    - 不需要清理内存/磁盘缓存：α/τ 已参与缓存键，后续请求会自动 MISS 并重建覆盖。
+    - 不需要清理内存/磁盘缓存：α/τ/单调/锁定 均参与缓存键，后续请求会自动 MISS 并重建覆盖。
     """
     old_alpha = dict(_ALPHA)
     old_tau = dict(_TAU)
 
-    _ALPHA["rpm"]      = float(os.getenv("CURVE_SMOOTH_ALPHA_RPM",      str(_ALPHA["rpm"])))
-    _ALPHA["noise_db"] = float(os.getenv("CURVE_SMOOTH_ALPHA_NOISE",    str(_ALPHA["noise_db"])))
-    _TAU["rpm"]        = float(os.getenv("CURVE_TENSION_TAU_RPM",       str(_TAU["rpm"])))
-    _TAU["noise_db"]   = float(os.getenv("CURVE_TENSION_TAU_NOISE",     str(_TAU["noise_db"])))
+    _ALPHA["rpm"]         = float(os.getenv("CURVE_SMOOTH_ALPHA_RPM",         str(_ALPHA["rpm"])))
+    _ALPHA["noise_db"]    = float(os.getenv("CURVE_SMOOTH_ALPHA_NOISE",       str(_ALPHA["noise_db"])))
+    _ALPHA["spectrum_db"] = float(os.getenv("CURVE_SMOOTH_ALPHA_SPECTRUM",    str(_ALPHA["spectrum_db"])))
+
+    _TAU["rpm"]           = float(os.getenv("CURVE_TENSION_TAU_RPM",          str(_TAU["rpm"])))
+    _TAU["noise_db"]      = float(os.getenv("CURVE_TENSION_TAU_NOISE",        str(_TAU["noise_db"])))
+    _TAU["spectrum_db"]   = float(os.getenv("CURVE_TENSION_TAU_SPECTRUM",     str(_TAU["spectrum_db"])))
 
     logger.info("curve-cache PARAMS RELOADED: ALPHA %s -> %s, TAU %s -> %s", old_alpha, _ALPHA, old_tau, _TAU)
 
 def _env_alpha_for_axis(axis: str) -> float:
-    # 从模块常量读取，并夹取到 [0,1]
     ax = _axis_norm(axis)
     val = float(_ALPHA.get(ax, 0.0))
     return max(0.0, min(1.0, val))
 
 def _env_tau_for_axis(axis: str) -> float:
-    # 从模块常量读取，并夹取到 [0,1]
     ax = _axis_norm(axis)
     val = float(_TAU.get(ax, 0.0))
     return max(0.0, min(1.0, val))
 
 def _axis_norm(axis: str) -> str:
-    return "noise_db" if axis == "noise" else axis
+    """
+    规范化轴名称：
+    - "rpm" -> "rpm"
+    - "noise" -> "noise_db"
+    - "spectrum" -> "spectrum_db"
+    - 其他原样返回（向后兼容）
+    """
+    if axis == "noise":
+        return "noise_db"
+    if axis == "spectrum":
+        return "spectrum_db"
+    return axis
 
 def curve_cache_dir() -> str:
     d = os.getenv("CURVE_CACHE_DIR", "./curve_cache")
@@ -82,7 +125,6 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 def _env_samples_n() -> int:
-    # 可选：将采样点写入缓存文件（开发调试用，生产建议为 0）
     n = _env_int("CURVE_CACHE_SAMPLES_N", 0)
     return max(0, min(2001, n))
 
@@ -90,19 +132,15 @@ def _env_inmem_enable() -> bool:
     return _env_bool("CURVE_CACHE_INMEM_ENABLE", "1")
 
 def _env_inmem_max_models() -> int:
-    # 进程内最多缓存多少个模型（按模型个数）
     return max(0, _env_int("CURVE_CACHE_INMEM_MAX_MODELS", 2000))
 
 def _env_inmem_max_points() -> int:
-    # 进程内缓存的总“结点数”上限（所有模型的 len(x) 之和），粗略代表内存体量
     return max(0, _env_int("CURVE_CACHE_INMEM_MAX_POINTS", 200000))
 
 def _env_inmem_admit_hits() -> int:
-    # 准入策略：同一 key 命中多少次后才放入内存（避免冷门一次性数据占位）
     return max(1, _env_int("CURVE_CACHE_INMEM_ADMIT_HITS", 2))
 
 def _env_inmem_hits_window() -> int:
-    # 命中计数字典的最大大小（超限时随机或 FIFO 丢弃旧计数，避免计数字典无限膨胀）
     return max(512, _env_int("CURVE_CACHE_INMEM_HITS_WINDOW", 4096))
 
 
@@ -128,7 +166,6 @@ class _InMemLRU:
             m = self._map.get(key)
             if m is None:
                 return None
-            # LRU：最近使用放到尾部
             self._map.move_to_end(key, last=True)
             return m
 
@@ -137,13 +174,11 @@ class _InMemLRU:
             return
         w = self._weight(model)
         with self._lock:
-            # 如果已存在，先删除旧的再插入
             old = self._map.pop(key, None)
             if old is not None:
                 self._points_sum -= self._weight(old)
             self._map[key] = model
             self._points_sum += w
-            # 逐出直到满足双上限
             evicted = 0
             while (len(self._map) > self.max_models) or (self._points_sum > self.max_points):
                 k, v = self._map.popitem(last=False)
@@ -169,15 +204,12 @@ def _inmem_key(model_id: int, condition_id: int, axis: str, raw_hash: str) -> st
 
 
 def _note_hit(key: str) -> int:
-    # 轻量命中计数，控制上限窗口，避免无界增长
     if not _INMEM or _ADMIT_HITS <= 1:
-        return _ADMIT_HITS  # 视为已满足
+        return _ADMIT_HITS
     with _HITS_LOCK:
         cnt = _HITS.get(key, 0) + 1
         _HITS[key] = cnt
-        # 简单窗口控制：超窗一半时随机/顺序清理一批（这里用 FIFO 式清理）
         if len(_HITS) > _HITS_WINDOW:
-            # 清理前 10% 键
             n_purge = max(1, _HITS_WINDOW // 10)
             for i, k in enumerate(list(_HITS.keys())):
                 _HITS.pop(k, None)
@@ -331,7 +363,6 @@ def _blend_nodes_with_trend(xs: List[float], ys_mono: List[float], axis: str) ->
         return ys_mono[:]
     a, b = _ols_linear(xs, ys_mono)
     ys_lin = [a + b * x for x in xs]
-    # 线性插值到“更直”的趋势
     return [(1.0 - alpha) * ym + alpha * yl for ym, yl in zip(ys_mono, ys_lin)]
 
 def _scale_slopes(m: List[float], axis: str) -> List[float]:
@@ -363,15 +394,43 @@ def build_pchip_model_with_opts(xs_in: List[float], ys_in: List[float], axis: st
     if len(xs) == 1:
         return {"x": xs, "y": ys, "m": [0.0], "x0": xs[0], "x1": xs[0]}
 
-    # 单调矫正（强约束），再按轴做“可控平滑”到线性趋势
-    ys_mono = _pava_isotonic_non_decreasing(ys)
-    ys_target = _blend_nodes_with_trend(xs, ys_mono, axis)
+    ax = _axis_norm(axis)
+
+    # 频谱拟合专用分支：
+    # - 默认“节点锁定”（不改写节点值）
+    # - 默认不做单调矫正、不做趋势平滑与张力
+    # - 可通过环境变量覆盖（见 _env_*）
+    if ax == "spectrum_db":
+        if _env_node_lock(ax) or not _env_monotone_enable(ax):
+            ys_target = ys[:]
+        else:
+            # 若显式开启单调，可选地做一次单调 + 平滑（默认不会走到这里）
+            ys_mono = _pava_isotonic_non_decreasing(ys)
+            ys_target = _blend_nodes_with_trend(xs, ys_mono, ax)
+        m = _pchip_slopes_fritsch_carlson(xs, ys_target)
+        m = _scale_slopes(m, ax)
+        return {"x": xs, "y": ys_target, "m": m, "x0": xs[0], "x1": xs[-1]}
+
+    # 其他轴：保留原有逻辑
+    # 节点锁定：跳过单调矫正与趋势平滑，严格使用原始节点
+    if _env_node_lock(ax):
+        ys_target = ys[:]
+        m = _pchip_slopes_fritsch_carlson(xs, ys_target)
+        return {"x": xs, "y": ys_target, "m": m, "x0": xs[0], "x1": xs[-1]}
+
+    # 单调矫正（可禁用），再按轴做“可控平滑”到线性趋势
+    if _env_monotone_enable(ax):
+        ys_mono = _pava_isotonic_non_decreasing(ys)
+    else:
+        ys_mono = ys[:]
+    ys_target = _blend_nodes_with_trend(xs, ys_mono, ax)
 
     # 斜率（保形）并可按轴缩放“曲率”
     m = _pchip_slopes_fritsch_carlson(xs, ys_target)
-    m = _scale_slopes(m, axis)
+    m = _scale_slopes(m, ax)
 
     return {"x": xs, "y": ys_target, "m": m, "x0": xs[0], "x1": xs[-1]}
+
 # =========================
 # 磁盘缓存
 # =========================
@@ -380,13 +439,8 @@ def _model_cache_path(model_id: int, condition_id: int, axis: str) -> str:
 
 # 新增：删除某轴缓存（包含磁盘 + 进程内 LRU）
 def delete_cached_model(model_id: int, condition_id: int, axis: str) -> bool:
-    """
-    删除指定 (model_id, condition_id, axis) 的缓存文件，并尽量从进程内 LRU 清理该轴的所有版本。
-    返回 True 表示磁盘文件被删除（或原本不存在），False 表示删除过程中发生了错误。
-    """
     axis = _axis_norm(axis)
     ok = True
-    # 磁盘
     p = _model_cache_path(model_id, condition_id, axis)
     try:
         if os.path.exists(p):
@@ -396,12 +450,10 @@ def delete_cached_model(model_id: int, condition_id: int, axis: str) -> bool:
         ok = False
         logger.warning("curve-cache DELETE ERROR: key=%s path=%s err=%s", f"{model_id}/{condition_id}/{axis}", p, repr(e))
 
-    # 进程内 LRU：按前缀逐出（raw_hash 不同，但前缀固定）
     try:
         if _INMEM:
             prefix = f"{int(model_id)}|{int(condition_id)}|{axis}|"
             evicted = 0
-            # 复制 key 列表避免遍历时修改
             for k in list(_INMEM._map.keys()):
                 if k.startswith(prefix):
                     m = _INMEM._map.pop(k, None)
@@ -490,22 +542,20 @@ def _save_cached_model(model: Dict[str, Any], model_id: int, condition_id: int, 
 # =========================
 def _compose_cache_key(xs: List[float], ys: List[float], axis: str) -> str:
     """
-    基于“原始点 + 轴 + 平滑/张力参数”生成稳定的缓存键。
+    基于“原始点 + 轴 + 平滑/张力/单调/锁定 参数”生成稳定的缓存键。
     注意：只基于原始点（未平滑）做点哈希，确保装载时不必重做预处理。
     """
     base = raw_points_hash(xs, ys)
     ax = _axis_norm(axis)
     alpha = _env_alpha_for_axis(ax)
     tau = _env_tau_for_axis(ax)
-    s = f"{base}|axis={ax}|alpha={alpha:.6f}|tau={tau:.6f}"
+    s = f"{base}|axis={ax}|alpha={alpha:.6f}|tau={tau:.6f}|monotone={int(_env_monotone_enable(ax))}|lock={int(_env_node_lock(ax))}"
     return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 def get_or_build_pchip(model_id: int, condition_id: int, axis: str, xs: List[float], ys: List[float]) -> Optional[Dict[str, Any]]:
     axis = _axis_norm(axis)
-    # 改：用“原始点 + 轴 + α/τ”组合键
     expect_key = _compose_cache_key(xs, ys, axis)
 
-    # 进程内 LRU 优先
     ikey = _inmem_key(model_id, condition_id, axis, expect_key)
     if _INMEM:
         m = _INMEM.get(ikey)
@@ -514,7 +564,6 @@ def get_or_build_pchip(model_id: int, condition_id: int, axis: str, xs: List[flo
             _note_hit(ikey)
             return m
 
-    # 磁盘命中
     cached = _load_cached_model_if_valid(model_id, condition_id, axis, xs, ys)
     if cached:
         if _INMEM and _note_hit(ikey) >= _ADMIT_HITS:
@@ -523,7 +572,6 @@ def get_or_build_pchip(model_id: int, condition_id: int, axis: str, xs: List[flo
                         ikey, _INMEM.stats()["size"], _INMEM.stats()["points"])
         return cached
 
-    # 构建
     p = _model_cache_path(model_id, condition_id, axis)
     logger.info("curve-cache BUILD: key=%s dir=%s path=%s points=%d",
                 f"{model_id}/{condition_id}/{axis}", _abs_cache_dir(), p, len(xs or []))
@@ -539,7 +587,6 @@ def get_or_build_pchip(model_id: int, condition_id: int, axis: str, xs: List[flo
                                f"{model_id}/{condition_id}/{axis}", p, repr(e))
         return None
 
-    # 保存时直接用组合键作为 raw_hash
     _save_cached_model(model, model_id, condition_id, axis, expect_key)
     model["type"] = "pchip_v1"
     model["axis"] = axis

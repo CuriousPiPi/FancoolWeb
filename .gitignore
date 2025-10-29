@@ -3,3 +3,4 @@ app/tailwindcss.exe
 app/curves/__pycache__/__init__.cpython-312.pyc
 app/curves/__pycache__/pchip_cache.cpython-312.pyc
 admin/__pycache__/admin_data.cpython-312.pyc
+admin/audio_calib/__pycache__/pipeline.cpython-312.pyc
