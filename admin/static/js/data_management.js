@@ -4,9 +4,11 @@ const $ = s => document.querySelector(s);
 const LS_KEY = 'admin_perf_draft_v2';
 let suspendDraft = true;
 
+// 顶部初始化：统一用 window 作用域
 if (typeof window !== 'undefined') {
   window.lastCalibRunId = null;
   window.lastCalibModelHash = null;
+  window.lastCalibBatchId = null;   // 新增：全局 audio_batch_id
 }
 
 // ===== Tabs =====
@@ -686,6 +688,7 @@ function resetUploadState(keepBrand=false){
   try {
     window.lastCalibRunId = null;
     window.lastCalibModelHash = null;
+    window.lastCalibBatchId = null;   
   } catch (e) {}
 }
 
@@ -1120,7 +1123,6 @@ perfSubmitBtn.addEventListener('click', async ()=>{
   const res2 = gatherRowsForPreview();
   if(!res2.ok){ perfSubmitMsg.className='err'; perfSubmitMsg.textContent='内容已变更，请先重新预览'; previewReady=false; perfSubmitBtn.textContent='预览'; return; }
 
-  // 新增：提交前校验“更新描述”必填
   if(!desc){ perfSubmitMsg.className='err'; perfSubmitMsg.textContent='请填写更新描述'; return; }
 
   perfSubmitBtn.disabled=true;
@@ -1146,28 +1148,37 @@ perfSubmitBtn.addEventListener('click', async ()=>{
       if(j.success){
         perfSubmitMsg.className='ok';
         perfSubmitMsg.textContent=`成功插入 ${j.data.inserted} 行`;
-        // 保持交互区可见
         previewReady=false; perfSubmitBtn.textContent='预览';
 
-        // 绑定 频谱模型 ↔ 性能批次（可用 model_hash 或 calib_run_id，其一即可）
-        try{
+        // 新版绑定：使用 audio_batch_id（lastCalibBatchId）+ perf_batch_id
+        try {
           const perfBatchId = j.data.batch_id;
-          const mh = (typeof window.lastCalibModelHash === 'string' && window.lastCalibModelHash.trim()) ? window.lastCalibModelHash.trim() : null;
-          const rid = (typeof window.lastCalibRunId === 'number' || typeof window.lastCalibRunId === 'string') ? window.lastCalibRunId : null;
-          if(mh || rid){
-            await fetch('/admin/api/calib/bind-model', {
+          const abid = (typeof window.lastCalibBatchId === 'string' && window.lastCalibBatchId.trim())
+            ? window.lastCalibBatchId.trim()
+            : null;
+          if (abid) {
+            const resp = await fetch('/admin/api/calib/bind-model', {
               method:'POST',
               headers:{'Content-Type':'application/json'},
-              body: JSON.stringify({
-                model_id: mid,
-                condition_id: cid,
-                perf_batch_id: perfBatchId,
-                model_hash: mh || undefined,
-                calib_run_id: rid || undefined
-              })
+              body: JSON.stringify({ model_id: mid, condition_id: cid, perf_batch_id: perfBatchId, audio_batch_id: abid })
             });
+            const jb = await resp.json().catch(()=>({success:false}));
+            if (!jb.success) {
+              let extra = '';
+              const binds = jb.meta && Array.isArray(jb.meta.bindings) ? jb.meta.bindings : [];
+              if (binds.length) {
+                const pairs = binds.map(b => `${b.model_name || `mid=${b.model_id}`} - ${b.condition_name_zh || `cid=${b.condition_id}`}`).join('；');
+                extra = `（已绑定：${pairs}）`;
+              }
+              console.warn('bind-model failed:', jb.error_message || '', extra);
+              const msgEl = document.querySelector('#perfSubmitMsg');
+              if (msgEl) {
+                msgEl.className = 'warn';
+                msgEl.textContent = (msgEl.textContent ? msgEl.textContent + '；' : '') + `绑定音频失败：${jb.error_message || '请稍后重试'}${extra}`;
+              }
+            }
           }
-        }catch(e){
+        } catch (e) {
           console.warn('bind-model failed:', e);
         }
       } else {
@@ -1192,7 +1203,7 @@ perfSubmitBtn.addEventListener('click', async ()=>{
           condition_id: cid,
           group_key: currentGroupKey,
           is_valid: parseInt(isValidSelect.value,10),
-          description: desc, // 新增
+          description: desc,
           changes
         })
       });
@@ -1201,7 +1212,6 @@ perfSubmitBtn.addEventListener('click', async ()=>{
         const rowsChanged = (j.data?.updated_rows || 0) + (j.data?.state_changed_rows || 0);
         perfSubmitMsg.className='ok';
         perfSubmitMsg.textContent=`编辑提交成功，更新 ${rowsChanged} 行`;
-        // 保持交互区可见
         previewReady=false; perfSubmitBtn.textContent='预览';
       } else {
         perfSubmitMsg.className='err'; perfSubmitMsg.textContent=j.error_message||'提交失败';
@@ -1213,6 +1223,7 @@ perfSubmitBtn.addEventListener('click', async ()=>{
     perfSubmitBtn.disabled=false;
   }
 });
+
 if($('#restoreBtn')) $('#restoreBtn').addEventListener('click', async ()=>{ const ok = await restoreDraft(); if(ok){ $('#restoreBar').style.display='none'; } else { alert('未找到可恢复的草稿或草稿信息不完整，无法恢复'); } });
 if($('#discardBtn')) $('#discardBtn').addEventListener('click', ()=>{ clearDraft(); });
 
@@ -2061,7 +2072,6 @@ function renderPreview(rows){
 }
 
 // ====== 噪音标定：上传zip并自动回填 ======
-let lastCalibBatchId = null;
 
 function injectUploadZipButton(){
   const anchorBox = document.querySelector('#perfEditor .flex-inline') || document.querySelector('#perfEditor');
@@ -2086,67 +2096,62 @@ function injectUploadZipButton(){
     if(mid<=0 || cid<=0){ alert('请先选择品牌/型号/工况'); return; }
 
     // 新增：检查当前 mid+cid 是否已有绑定
-    try{
-      const r = await fetch(`/admin/api/calib/bindings?model_id=${mid}&condition_id=${cid}`);
-      const j = await r.json();
-      if(j.success){
-        const items = j.data.items || [];
-        if(items.length > 0){
-          const pick = await chooseExistingBinding(items);
-          if(pick && pick !== '__go_upload__'){
-            // 记住 run 与 hash，用于 perf.add 后绑定（若需要）
-            window.lastCalibRunId = pick.calib_run_id || null;
-            window.lastCalibModelHash = pick.model_hash || null;
+try{
+    const r = await fetch(`/admin/api/calib/bindings?model_id=${mid}&condition_id=${cid}`);
+    const j = await r.json();
+    if(j.success){
+      const items = j.data.items || [];
+      if(items.length > 0){
+        const pick = await chooseExistingBinding(items);
+        if(pick && pick !== '__go_upload__'){
+          // 记住 audio 批次用于后续绑定与预览
+          window.lastCalibBatchId = pick.audio_batch_id || null;
 
-            // 回填噪音（优先 run_id，回退 model_hash）
-            try{
-              let noiseUrl = null;
-              if(window.lastCalibRunId){ noiseUrl = `/admin/api/calib/rpm-noise?run_id=${encodeURIComponent(window.lastCalibRunId)}`; }
-              else if(window.lastCalibModelHash){ noiseUrl = `/admin/api/calib/rpm-noise?model_hash=${encodeURIComponent(window.lastCalibModelHash)}`; }
-              if(noiseUrl){
-                const r2 = await fetch(noiseUrl);
-                const j2 = await r2.json();
-                if(j2.success){
-                  const items2 = j2.data.items || [];
-                  const isRowEmpty = tr => ([...tr.querySelectorAll('input')].every(inp => !String(inp.value||'').trim()));
-                  let emptyRows = [...perfTable.querySelectorAll('tr')].filter(isRowEmpty);
-                  for(const it2 of items2){
-                    const rpm = parseInt(it2.rpm,10); if(!rpm) continue;
-                    const ndb = (it2.noise_db!=null)? String(it2.noise_db) : '';
-                    let row = [...perfTable.querySelectorAll('tr')]
-                      .find(tr=> parseInt((tr.querySelector('.perf-rpm')?.value||'').trim(),10)===rpm);
-                    if(!row){
-                      if(emptyRows.length){
-                        row = emptyRows.shift();
-                        const rpmInp = row.querySelector('.perf-rpm');
-                        const noiseInp = row.querySelector('.perf-noise');
-                        if(rpmInp && (!rpmInp.value || !rpmInp.value.trim())) rpmInp.value = String(rpm);
-                        if(noiseInp && (!noiseInp.value || !noiseInp.value.trim())) noiseInp.value = ndb;
-                      }else{
-                        row = addPerfRow({ rpm: rpm, airflow_cfm: '', noise_db: ndb });
-                      }
+          // 回填噪音：按 audio_batch_id
+          try{
+            if(window.lastCalibBatchId){
+              const r2 = await fetch(`/admin/api/calib/rpm-noise?audio_batch_id=${encodeURIComponent(window.lastCalibBatchId)}`);
+              const j2 = await r2.json();
+              if(j2.success){
+                const items2 = j2.data.items || [];
+                const isRowEmpty = tr => ([...tr.querySelectorAll('input')].every(inp => !String(inp.value||'').trim()));
+                let emptyRows = [...perfTable.querySelectorAll('tr')].filter(isRowEmpty);
+                for(const it2 of items2){
+                  const rpm = parseInt(it2.rpm,10); if(!rpm) continue;
+                  const ndb = (it2.noise_db!=null)? String(it2.noise_db) : '';
+                  let row = [...perfTable.querySelectorAll('tr')]
+                    .find(tr=> parseInt((tr.querySelector('.perf-rpm')?.value||'').trim(),10)===rpm);
+                  if(!row){
+                    if(emptyRows.length){
+                      row = emptyRows.shift();
+                      const rpmInp = row.querySelector('.perf-rpm');
+                      const noiseInp = row.querySelector('.perf-noise');
+                      if(rpmInp && (!rpmInp.value || !rpmInp.value.trim())) rpmInp.value = String(rpm);
+                      if(noiseInp && (!noiseInp.value || !noiseInp.value.trim())) noiseInp.value = ndb;
                     }else{
-                      const n = row.querySelector('.perf-noise');
-                      if(n && (!n.value || n.value.trim()==='')) n.value = ndb;
+                      row = addPerfRow({ rpm: rpm, airflow_cfm: '', noise_db: ndb });
                     }
+                  }else{
+                    const n = row.querySelector('.perf-noise');
+                    if(n && (!n.value || n.value.trim()==='')) n.value = ndb;
                   }
-                  renumberRows(); markDirty(); saveDraft();
                 }
+                renumberRows(); markDirty(); saveDraft();
               }
-            }catch(e){}
+            }
+          }catch(e){}
 
-            // 预览（若有 audio_batch_id）
-            if(pick.audio_batch_id){ ensureCalibPreview(pick.audio_batch_id); }
-            return; // 不再弹出“选择文件”
-          } else if (pick === '__go_upload__'){
-            // 显式选择“改为上传文件”，继续走下方文件弹窗
-          } else {
-            // 取消：终止
-            return;
-          }
+          // 预览
+          if(window.lastCalibBatchId){ ensureCalibPreview(window.lastCalibBatchId); }
+          return; // 不再弹出文件
+        } else if (pick === '__go_upload__'){
+          // 继续走选择文件
+        } else {
+          return; // 取消
         }
       }
-    }catch(e){ /* 忽略错误，继续走选择文件 */ }
+    }
+  }catch(e){ /* 忽略错误，继续走选择文件 */ }
 
     if(mode === 'edit'){
       // 仅当已载入历史数据且所有 noise_db 均为空时允许
@@ -2157,36 +2162,56 @@ function injectUploadZipButton(){
     document.getElementById('uploadZipFile').click();
   });
 
-  // 上传 zip 回填噪音：优先填充现有“全空行”，再考虑新增行（避免首行空着）
-  file.addEventListener('change', async ()=>{
-    const f = file.files && file.files[0];
-    if(!f){ return; }
-    try{
-      btn.disabled = true; btn.textContent = '处理中…';
-      const mid = parseInt(upModelId.value||'0',10);
-      const cid = parseInt(upConditionSelect.value||'0',10);
+// 上传 zip 回填噪音：优先填充现有“全空行”，再考虑新增行（避免首行空着）
+file.addEventListener('change', async ()=>{
+  const f = file.files && file.files[0];
+  if(!f){ return; }
+  try{
+    btn.disabled = true; btn.textContent = '处理中…';
+    const mid = parseInt(upModelId.value||'0',10);
+    const cid = parseInt(upConditionSelect.value||'0',10);
 
-      const fd = new FormData();
-      fd.append('model_id', String(mid));
-      fd.append('condition_id', String(cid));
-      fd.append('file', f);
+    const fd = new FormData();
+    fd.append('model_id', String(mid));
+    fd.append('condition_id', String(cid));
+    fd.append('file', f);
 
-      const r = await fetch('/admin/api/calib/upload_zip', { method:'POST', body: fd });
-      const j = await r.json();
-      if(!j.success){ alert(j.error_message||'上传失败'); return; }
+    const r = await fetch('/admin/api/calib/upload_zip', { method:'POST', body: fd });
+    const j = await r.json();
+    if(!j.success){ alert(j.error_message||'上传失败'); return; }
 
-      lastCalibBatchId = j.data.batch_id || null;
-      // 缓存本次标定 run 与模型哈希，用于性能批次提交后绑定
-      window.lastCalibRunId = j.data.run_id ?? null;
-      window.lastCalibModelHash = j.data.model_hash ?? null;
+    window.lastCalibBatchId = j.data.batch_id || null;
+    window.lastCalibRunId = j.data.run_id ?? null;
+    window.lastCalibModelHash = j.data.model_hash ?? null;
 
-      // 新增：若为已存在音频（duplicated）
-      if (j.data.duplicated === 1) {
+    // 新增：当音频已存在时，先做“绑定一致性”校验
+    if (j.data.duplicated === 1) {
+      const binds = Array.isArray(j.data.bindings) ? j.data.bindings : [];
+      if (binds.length > 0) {
+        const allSame = binds.every(b =>
+          parseInt(b.model_id,10) === mid && parseInt(b.condition_id,10) === cid
+        );
+        if (!allSame) {
+          const pairs = binds.map(b => {
+            const m = b.model_name || `mid=${b.model_id}`;
+            const c = b.condition_name_zh || `cid=${b.condition_id}`;
+            return `${m} - ${c}`;
+          }).join('；');
+          alert(`该音频已绑定到其他型号/工况，已拒绝回填。\n已绑定：${pairs}\n如需回填，请切换到对应的型号/工况再试。`);
+          window.lastCalibBatchId = null;
+          window.lastCalibRunId = null;
+          window.lastCalibModelHash = null;
+          btn.disabled = false; btn.textContent = '上传音频zip'; file.value = '';
+          return;
+        }
+        // allSame => 按需求“直接回填”，不再弹确认
+      } else {
+        // 尚未绑定：保留原有“确认后回填/预览”
         const boundCount = parseInt(j.data.bound_count ?? '0', 10) || 0;
         if (boundCount === 0) {
           if (confirm('检测到服务器已存在相同音频且尚未绑定任何型号/工况，是否直接回填/预览？')) {
-            // 回填
             const items = j.data.rpm_noise || [];
+            // 回填
             if (mode === 'reupload' || mode === 'new' || mode === 'edit') {
               const isRowEmpty = (tr)=>[...tr.querySelectorAll('input')].every(inp => !String(inp.value||'').trim());
               let emptyRows = [...perfTable.querySelectorAll('tr')].filter(isRowEmpty);
@@ -2216,12 +2241,12 @@ function injectUploadZipButton(){
             if (j.data.batch_id) {
               ensureCalibPreview(j.data.batch_id);
             }
-            // 直接返回（无需继续处理“新增音频”路径）
             btn.disabled = false; btn.textContent = '上传音频zip'; file.value = '';
             return;
           }
         }
       }
+    }
 
       // 回填逻辑
       const items = j.data.rpm_noise || [];
@@ -2346,8 +2371,7 @@ async function chooseExistingBinding(items){
             <tr style="text-align:left; border-bottom:1px solid var(--border,#e5e7eb);">
               <th style="padding:8px 6px;">创建时间</th>
               <th style="padding:8px 6px;">perf_batch_id</th>
-              <th style="padding:8px 6px;">model_hash</th>
-              <th style="padding:8px 6px;">run_id</th>
+              <th style="padding:8px 6px;">audio_batch_id</th>
               <th style="padding:8px 6px;">操作</th>
             </tr>
           </thead>
@@ -2360,14 +2384,13 @@ async function chooseExistingBinding(items){
       </div>
     `;
     const tbody = panel.querySelector('tbody');
-    const short = (s,len=10)=> (typeof s==='string' && s.length>len ? (s.slice(0,6)+'…'+s.slice(-4)) : (s||''));
+    const short = (s,len=20)=> (typeof s==='string' && s.length>len ? (s.slice(0,10)+'…'+s.slice(-8)) : (s||''));
     (items||[]).forEach((it, idx)=>{
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td style="padding:8px 6px; border-bottom:1px dashed var(--border,#eee);">${it.created_at || ''}</td>
-        <td style="padding:8px 6px; border-bottom:1px dashed var(--border,#eee);" title="${it.perf_batch_id||''}">${short(it.perf_batch_id, 20)}</td>
-        <td style="padding:8px 6px; border-bottom:1px dashed var(--border,#eee);" title="${it.model_hash||''}">${short(it.model_hash, 20)}</td>
-        <td style="padding:8px 6px; border-bottom:1px dashed var(--border,#eee);">${it.calib_run_id ?? ''}</td>
+        <td style="padding:8px 6px; border-bottom:1px dashed var(--border,#eee);" title="${it.perf_batch_id||''}">${short(it.perf_batch_id, 28)}</td>
+        <td style="padding:8px 6px; border-bottom:1px dashed var(--border,#eee);" title="${it.audio_batch_id||''}">${short(it.audio_batch_id, 28)}</td>
         <td style="padding:8px 6px; border-bottom:1px dashed var(--border,#eee);">
           <button type="button" data-idx="${idx}">选择</button>
         </td>

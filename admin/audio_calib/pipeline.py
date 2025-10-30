@@ -1,56 +1,4 @@
 # -*- coding: utf-8 -*-
-"""
-构建 R→LAeq 标定（仅 A 加权）并输出：
-- calib.json：R→LAeq（去环境）PCHIP 模型、各 RPM 锚点 1/12 频带谱（扣环境后）
-- calibration_report.csv：总体报告（env 与各挡位在“处理后口径”的 LAeq 与 AWA 的对比）
-
-处理与参数要点（本版采用“逐带聚合前 MAD 可独立开关”的更清晰命名与逻辑）：
-1) 仅 A 加权；默认 perfile 标定
-   - 对 env/ 与各 RPM 目录内的每个音频，先用“整段无裁剪/无高通”口径与各自 .AWA 的 LAeq 标定得到 sA_use（Pa/FS）
-   - env/ 的会话基准刻度 sA_env 由 env/.AWA LAeq 与整段口径得到
-
-2) 处理阶段（用于稳健聚合与锚点谱）
-   - 默认裁剪：首/尾各 0.5 s（可参数配置）
-   - 默认高通：20 Hz（可参数配置；<=0 关闭）
-   - 分帧 Welch，求 A 加权 1/12 带能量时序 E_A[k, t] 与每帧总能量 Etot(t)
-
-3) 双通道聚合（env 与 meas），“100 表示关闭逐带分位改为均值”
-   - 先按 Etot 选“底部 Qf%”帧作为候选（--env-agg-per-frame, --meas-agg-per-frame；默认 env=40、meas=40；设 100 表示不过滤）
-   - 然后“逐带聚合前 MAD（双侧）”——可独立开关（与是否启用逐帧/逐带分位无关）
-     · 控制开关：--env-mad-pre-band on|off（默认 on）、--meas-mad-pre-band on|off（默认 on）
-     · 强度：--mad-tau（默认 3.0）
-   - 最后逐带聚合：
-     · 若 Qb% < 100（--env-agg-per-band, --meas-agg-per-band），按该分位取值（默认 env=20、meas=100→关闭逐带分位）
-     · 若 Qb%=100：改为逐带均值（仍在 MAD 之后）
-
-4) 环境基线带向平滑
-   - --env-smooth-bands（默认 0）：0 不平滑；1 表示 3 点中值（左右各 1 带）带向平滑
-
-5) 能量域扣环境与无效标记
-   - 判定：若 E_meas_band ≤ (--snr-ratio-min × E_env_band) 则该带记为无效（None），不写 0 dB（避免与负值混淆）
-   - LAeq 合成时，None 按 0 能量处理；扣除能量用于合成为 max(E_meas - E_env, 0)
-
-6) 报告（calibration_report.csv）
-   - 记录 env 与每个挡位（以及每个文件）的“处理后口径”的 LAeq（raw 与 post_env）与 .AWA LAeq 的差值
-   - 便于你根据参数快速对齐口径并观察 None 的影响
-
-默认参数（满足你的设定）：
-- 标定：--calib-mode=perfile
-- env：--env-agg-per-frame=40，--env-agg-per-band=20，--env-mad-pre-band=on，--env-smooth-bands=0
-- meas：--meas-agg-per-frame=40，--meas-agg-per-band=100，--meas-mad-pre-band=on
-- MAD：--mad-tau=3.0
-- below_env：--snr-ratio-min=1.0
-- 处理阶段裁剪与高通：--trim-head-sec=0.5，--trim-tail-sec=0.5，--highpass-hz=20
-
-依赖：numpy, soundfile, scipy
-
-整合版：内存流水线（不写中间文件）
-- 输入：root_dir（包含 env/ 与各 Rxxxx 目录），params 字典
-- 输出：
-  - preview_model_json（前端频谱预览所需模型）
-  - per_rpm_rows（每档聚合输出，含 env=0 行）
-可选：传 out_dir 时，会把 calib.json 和 calibration_report.csv 顺手写出（便于排查）
-"""
 
 import os, re, math, json, sys
 from typing import Dict, Any, List, Tuple, Optional
@@ -81,10 +29,10 @@ def a_weight_db(freq_hz: np.ndarray) -> np.ndarray:
     ra_num = (12200.0**2) * (f2**2)
     ra_den = (f2 + 20.6**2) * np.sqrt((f2 + 107.7**2) * (f2 + 737.9**2)) * (f2 + 12200.0**2)
     ra = ra_num / np.maximum(ra_den, 1e-30)
-    return 20.0 * np.log10(np.maximum(ra, 1e-30)) + 2.0  # IEC 61672 近似
+    return 20.0 * np.log10(np.maximum(ra, 1e-30)) + 2.0
 
 def bands_per_decade_from_npo(n_per_octave: int) -> int:
-    return int(round((n_per_octave * 10.0) / 3.0))  # 1/3→10, 1/6→20, 1/12→40
+    return int(round((n_per_octave * 10.0) / 3.0))
 
 RENARD_MANTISSAS = {
     3:  [1.00, 2.00, 5.00],
@@ -301,20 +249,72 @@ def aggregate_two_stage_with_preband_mad(E_frames: np.ndarray,
         out[k] = float(np.quantile(vk, q)) if use_quantile else float(np.mean(vk))
     return out
 
+# ---------------- 本地 PCHIP（锚点保持，无单调/平滑改写） ----------------
+def _pchip_slopes_fritsch_carlson(xs: List[float], ys: List[float]) -> List[float]:
+    n = len(xs)
+    if n < 2:
+        return [0.0] * n
+    h = [xs[i + 1] - xs[i] for i in range(n - 1)]
+    delta = [(ys[i + 1] - ys[i]) / h[i] if h[i] != 0 else 0.0 for i in range(n - 1)]
+    m = [0.0] * n
+    m[0] = delta[0]
+    m[-1] = delta[-1]
+    for i in range(1, n - 1):
+        if delta[i - 1] * delta[i] > 0:
+            m[i] = (delta[i - 1] + delta[i]) / 2.0
+        else:
+            m[i] = 0.0
+    for i in range(n - 1):
+        if delta[i] == 0.0:
+            m[i] = 0.0
+            m[i + 1] = 0.0
+        else:
+            a = m[i] / delta[i]
+            b = m[i + 1] / delta[i]
+            s = a * a + b * b
+            if s > 9.0:
+                t = 3.0 / math.sqrt(s)
+                m[i] = t * a * delta[i]
+                m[i + 1] = t * b * delta[i]
+        if m[i] < 0:
+            m[i] = 0.0
+        if m[i + 1] < 0:
+            m[i + 1] = 0.0
+    return m
+
+def _build_pchip_anchor(xs_in: List[float], ys_in: List[float]) -> Optional[Dict[str, Any]]:
+    pairs = []
+    for x, y in zip(xs_in, ys_in):
+        try:
+            xf = float(x); yf = float(y)
+            if math.isfinite(xf) and math.isfinite(yf):
+                pairs.append((xf, yf))
+        except Exception:
+            continue
+    if not pairs:
+        return None
+    pairs.sort(key=lambda t: t[0])
+    xs: List[float] = []
+    ys: List[float] = []
+    for x, y in pairs:
+        if xs and abs(x - xs[-1]) < 1e-9:
+            ys[-1] = (ys[-1] + y) / 2.0
+        else:
+            xs.append(x); ys.append(y)
+    if len(xs) == 1:
+        return {"x": xs, "y": ys, "m": [0.0], "x0": xs[0], "x1": xs[0]}
+    m = _pchip_slopes_fritsch_carlson(xs, ys)
+    return {"x": xs, "y": ys, "m": m, "x0": xs[0], "x1": xs[-1]}
+
 # ---------------- 流水线：标定 → 频谱模型 ----------------
 def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """
-    读取 root_dir 下 env/ 与 Rxxxx 目录，计算 calib（含 anchor_spectra）与每档聚合 per_rpm_rows
-    返回 (calib_json_dict, per_rpm_rows)
-    """
-    # 参数映射与默认
     fs = int(params.get('fs', 48000) or 48000)
     n_per_oct = int(params.get('n_per_oct', 12))
     fmin = float(params.get('fmin_hz', 20.0))
     fmax = float(params.get('fmax_hz', 20000.0))
     frame_sec = float(params.get('frame_sec', 1.0))
     hop_sec = float(params.get('hop_sec', 0.5*frame_sec))
-    hop_ratio = 1.0 - max(0.0, min(hop_sec/frame_sec if frame_sec>0 else 0.0, 1.0))  # 把 step 秒换为“重叠比”的表达
+    hop_ratio = 1.0 - max(0.0, min(hop_sec/frame_sec if frame_sec>0 else 0.0, 1.0))
     band_grid = str(params.get('band_grid', 'iec-decimal'))
 
     trim_head_sec = float(params.get('trim_head_sec', 0.5))
@@ -329,21 +329,19 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     meas_mad_on = bool(params.get('meas_mad_pre_band', True))
     mad_tau = float(params.get('mad_tau', 3.0))
     snr_ratio_min = float(params.get('snr_ratio_min', 1.0))
-    perfile_median = bool(params.get('perfile_median', False))  # 跨文件取中位：默认 False=均值
+    perfile_median = bool(params.get('perfile_median', False))
 
     root = os.path.abspath(root_dir)
     env_dir = os.path.join(root, "env")
     if not os.path.isdir(env_dir):
         raise RuntimeError("缺少 env/ 目录")
 
-    # 频带
     centers = make_centers_iec61260(n_per_octave=n_per_oct, fmin=fmin, fmax=fmax) if band_grid == 'iec-decimal' else \
-              make_centers_iec61260(n_per_octave=n_per_oct, fmin=fmin, fmax=fmax)  # 也可接入 binary 网格
+              make_centers_iec61260(n_per_octave=n_per_oct, fmin=fmin, fmax=fmax)
     if centers.size == 0:
         raise RuntimeError("频带中心为空，请调整 fmin/fmax")
     K = centers.size
 
-    # 环境 AWA 与音频
     env_awa_path = find_awa(env_dir)
     if not env_awa_path:
         raise RuntimeError("env/ 缺少 .AWA")
@@ -355,7 +353,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     if not env_files:
         raise RuntimeError("env/ 无音频文件")
 
-    # SLM-like 环境刻度（A）
     E_env_A_full_list = []
     for p in env_files:
         x_full, fs_full = read_audio_mono(p, fs, for_slm_like=True)
@@ -365,7 +362,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     sA_env = (P0 * 10.0**(LAeq_env_awa/20.0)) / math.sqrt(max(float(np.sum(E_env_A_mean)), 1e-30))
     s2A_env = sA_env**2
 
-    # 环境稳健基线（处理口径）
     E_env_A_proc_list, Etot_env_list = [], []
     for p in env_files:
         x_p, fs_p = read_audio_mono(p, fs, trim_head_sec, trim_tail_sec, highpass_hz, for_slm_like=False)
@@ -380,7 +376,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     E_env12_A_pa2_base = s2A_env * E_env_FS_A_rob
     la_env_from_base = db10_from_energy(np.array([np.sum(E_env12_A_pa2_base)])).item()
 
-    # 各转速
     rpm_nodes: List[float] = []
     la_nodes_raw: List[float] = []
     la_nodes_envsub: List[float] = []
@@ -388,7 +383,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     invalid_band_stats: Dict[float, int] = {}
     anchor_items: List[Dict] = []
 
-    # 报告
     report_rows: List[Dict[str, object]] = []
     report_rows.append({
         "scope": "env",
@@ -420,7 +414,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
         la_sub_files: List[float] = []
 
         for ap in files:
-            # perfile 标定（整段）
             x_full, fs_full = read_audio_mono(ap, fs, for_slm_like=True)
             E_A_full, _ = bands_time_energy_A(x_full, fs_full, centers, n_per_oct, frame_sec, hop_ratio, grid=band_grid)
             E_A_full_mean = np.mean(E_A_full, axis=1) if E_A_full.size else np.zeros((K,))
@@ -430,7 +423,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
                 sA_use = sA_env
             s2A_use = sA_use**2
 
-            # 处理阶段
             x_proc, fs_proc = read_audio_mono(ap, fs, trim_head_sec, trim_tail_sec, highpass_hz, for_slm_like=False)
             E_A_proc, Etot = bands_time_energy_A(x_proc, fs_proc, centers, n_per_oct, frame_sec, hop_ratio, grid=band_grid)
             E_A_rob = aggregate_two_stage_with_preband_mad(
@@ -461,7 +453,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
                 "delta_post_env_db": (la_sub - LAeq_dir) if np.isfinite(LAeq_dir) else ""
             })
 
-        # 该档聚合
         E_raw_stack = np.stack(E_raw_list_pa2, axis=0)
         E_sub_stack = np.stack(E_sub_list_pa2, axis=0)
         if perfile_median:
@@ -475,7 +466,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
             la_raw_rpm = float(np.mean(np.array(la_raw_files, float)))
             la_sub_rpm = float(np.mean(np.array(la_sub_files, float)))
 
-        # 频带输出：扣环境后 → dB；能量<=0 → None
         L_band_db = db10_from_energy(E_anchor_pa2)
         spectrum_db: List[Optional[float]] = []
         invalid_count = 0
@@ -515,7 +505,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     if not rpm_nodes:
         raise RuntimeError("未找到任何 RPM 挡位数据")
 
-    # rpm→LAeq（去环境）PCHIP
     pairs = sorted(zip(rpm_nodes, la_nodes_envsub, la_nodes_raw, anchor_items), key=lambda t:t[0])
     rpm_nodes = [p[0] for p in pairs]
     la_nodes_envsub = [p[1] for p in pairs]
@@ -564,9 +553,7 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
         }
     }
 
-    # per_rpm_rows（用于写 calib_report_item）
     per_rpm_rows: List[Dict[str, Any]] = []
-    # env 聚合（rpm=0）
     per_rpm_rows.append({
         'rpm': 0,
         'la_env_db': float(LAeq_env_awa),
@@ -577,21 +564,16 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
         'used_env_awa': 1,
         'used_rpm_awa': None
     })
-    # 每档聚合
     for idx, r in enumerate(rpm_nodes):
-        item = anchor_items[idx]
-        # 档位 AWA 存在与否（缺失则回退 env 的逻辑已体现在标度 sA_use 的选择里）
-        # 这里仅用于报告 delta
-        # 无目录 AWA 则 used_rpm_awa=0，delta 写 None
         per_rpm_rows.append({
             'rpm': int(round(r)),
-            'la_env_db': None,  # env 行才写
+            'la_env_db': None,
             'la_raw_db': float(la_nodes_raw[idx]),
             'la_post_env_db': float(la_nodes_envsub[idx]),
             'delta_raw_db': None,
             'delta_post_env_db': None,
             'used_env_awa': None,
-            'used_rpm_awa': None  # 如需统计可在这里赋 0/1
+            'used_rpm_awa': None
         })
 
     return calib, per_rpm_rows
@@ -603,9 +585,6 @@ def build_model_from_calib_in_memory(calib: Dict[str, Any],
                                      rpm_peak_tol: float = 50.0,
                                      model_id: Optional[int] = None,
                                      condition_id: Optional[int] = None) -> Dict[str, Any]:
-    """
-    用 calib.anchor_spectra 构建频谱模型（锚点处严格一致），并携带 anchor_presence/anchor_spectra_db
-    """
     anchor = calib.get("anchor_spectra") or (calib.get("calibration") or {}).get("anchor_spectra")
     if not anchor or not anchor.get("items") or not anchor.get("centers_hz"):
         raise RuntimeError("calib 未包含 anchor_spectra.centers_hz/items")
@@ -630,7 +609,6 @@ def build_model_from_calib_in_memory(calib: Dict[str, Any],
         raise RuntimeError("anchor_spectra.items 为空或频谱缺失")
     rpm_unique = sorted(set(float(r) for r in rpm_list))
     rpm_min = float(min(rpm_unique)); rpm_max = float(max(rpm_unique))
-    # rpm_bin：中位间隔
     diffs = np.diff(np.sort(np.array(rpm_unique, float))); diffs = diffs[diffs>0]
     rpm_bin = float(np.median(diffs)) if diffs.size else None
 
@@ -645,14 +623,14 @@ def build_model_from_calib_in_memory(calib: Dict[str, Any],
                 xs.append(float(r)); ys.append(float(v))
         points_per_band.append(len(xs))
         if len(xs) >= max(2, int(min_points_per_band)):
-            mdl = pchip_build(xs, ys, axis="spectrum")
+            mdl = _build_pchip_anchor(xs, ys)  # 锚点保持的 PCHIP
             band_models.append(mdl)
         elif len(xs) == 1 and int(min_points_per_band) <= 1:
             r0, y0 = xs[0], ys[0]
             if single_point_policy == "drop":
                 band_models.append(None)
             else:
-                mdl = pchip_build([rpm_min, rpm_max], [y0, y0], axis="spectrum")
+                mdl = _build_pchip_anchor([rpm_min, rpm_max], [y0, y0])
                 band_models.append(mdl)
         else:
             band_models.append(None)
@@ -664,7 +642,6 @@ def build_model_from_calib_in_memory(calib: Dict[str, Any],
         if isinstance(nodes_rpm, list) and isinstance(nodes_la, list) and len(nodes_rpm) >= 2 and len(nodes_rpm) == len(nodes_la):
             xs = [float(x) for x in nodes_rpm]
             ys = [float(y) for y in nodes_la]
-            # rpm → LAeq（去环境）的曲线：若提供了 model_id/condition_id，走曲线缓存；否则内建构建
             if (model_id is not None) and (condition_id is not None):
                 calib_model = pchip_get(int(model_id), int(condition_id), "rpm", xs, ys)
             else:
@@ -712,10 +689,6 @@ def run_calibration_and_model(root_dir: str,
                               out_dir: Optional[str]=None,
                               model_id: Optional[int] = None,
                               condition_id: Optional[int] = None) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    """
-    一步到位：标定→频谱模型，返回 (preview_model_json, per_rpm_rows)
-    out_dir 若提供，会把 calib.json 与 calibration_report.csv 写出用于排查
-    """
     calib, per_rpm_rows = calibrate_from_points_in_memory(root_dir, params)
     model = build_model_from_calib_in_memory(calib,
                                              min_points_per_band=int(params.get('min_points_per_band', 1)),
@@ -723,13 +696,11 @@ def run_calibration_and_model(root_dir: str,
                                              rpm_peak=None,
                                              rpm_peak_tol=float(params.get('rpm_peak_tol', 50.0)),
                                              model_id=model_id, condition_id=condition_id)
-    # 可选落盘
     if out_dir:
         try:
             os.makedirs(out_dir, exist_ok=True)
             with open(os.path.join(out_dir, 'calib.json'), 'w', encoding='utf-8') as f:
                 json.dump(calib, f, ensure_ascii=False, indent=2)
-            # 仅写 env 与 rpm 聚合两类
             import csv
             with open(os.path.join(out_dir, 'calibration_report.csv'), 'w', newline='', encoding='utf-8') as f:
                 w = csv.DictWriter(f, fieldnames=[
@@ -738,7 +709,6 @@ def run_calibration_and_model(root_dir: str,
                     "delta_raw_db","delta_post_env_db"
                 ])
                 w.writeheader()
-                # env 行
                 env = next((r for r in per_rpm_rows if int(r['rpm'])==0), None)
                 if env:
                     w.writerow({
@@ -749,7 +719,6 @@ def run_calibration_and_model(root_dir: str,
                         "delta_raw_db": env.get('delta_raw_db'),
                         "delta_post_env_db": ""
                     })
-                # rpm 聚合
                 for r in per_rpm_rows:
                     if int(r['rpm']) == 0: continue
                     w.writerow({
