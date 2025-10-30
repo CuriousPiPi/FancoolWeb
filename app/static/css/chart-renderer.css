@@ -11,7 +11,7 @@
   --shadow-strong:0 8px 24px rgba(0,0,0,0.18);
   --fit-handle-w: 16px;
   --fit-handle-h: 24px;
-  --fit-hitbox:   36px;  /* 透明命中区一边尺寸（桌面） */
+  --fit-hitbox:   36px;
 }
 [data-theme="dark"]{
   --bg-bubble:#1f293700;
@@ -24,6 +24,25 @@
   --ok-pressed:#15803d;
   --shadow:0 6px 20px rgba(0,0,0,0.35);
   --shadow-strong:0 8px 24px rgba(0,0,0,0.45);
+}
+
+/* 频谱模式：强制隐藏曲线专属交互（防止鼠标事件又显示） */
+[data-chart-mode="spectrum"] #fitButtons,
+[data-chart-mode="spectrum"] #fitBubble,
+[data-chart-mode="spectrum"] #fitPointer,
+[data-chart-mode="spectrum"] .chart-xaxis-overlay {
+  display: none !important;
+  visibility: hidden !important;
+}
+
+/* 非频谱模式：隐藏频谱的 RPM 水平滑块（如仍存在旧控件） */
+:root:not([data-chart-mode="spectrum"]) [data-role="spectrum-rpm-controls"]{
+  display: none !important;
+}
+
+/* 非频谱模式：隐藏频谱竖直 RPM 导轨 */
+:root:not([data-chart-mode="spectrum"]) .spr-rail{
+  display: none !important;
 }
 
  /*x轴切换开关
@@ -167,7 +186,7 @@
   width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-bottom: 9px solid var(--accent);
 }
 
-/* 给把手增加透明“扩大命中区”——提高易点中性，不改变外观 */
+/* 透明命中区扩大 */
 .fit-pointer .handle::before{
   content: "";
   position: absolute;

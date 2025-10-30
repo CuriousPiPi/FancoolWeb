@@ -15,6 +15,7 @@ from flask import Flask, request, render_template, session, jsonify, g, make_res
 from sqlalchemy import create_engine, text
 from user_agents import parse as parse_ua
 from werkzeug.middleware.proxy_fix import ProxyFix
+from curves.spectrum_cache import load as load_spectrum  # 放在文件顶部其他 import 之后
 
 from curves.pchip_cache import get_or_build_pchip, eval_pchip
 
@@ -1445,6 +1446,72 @@ def api_recent_updates():
     except Exception as e:
         app.logger.exception(e)
         return resp_err('INTERNAL_ERROR', str(e), 500)
+
+@app.post('/api/spectrum-models')
+def api_spectrum_models():
+    """
+    返回频谱动态模型的必要字段，供前端本地插值：
+      - centers_hz
+      - band_models_pchip（每频带的 PCHIP：x, y, m, x0, x1）
+      - rpm_min / rpm_max（若无则从 calibration.calib_model.x0/x1 兜底）
+      - calibration（仅保留 rpm_peak 等必要信息）
+      - anchor_presence
+    不返回调试用途的模型摘要/信息浮层字段。
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        raw_pairs = data.get('pairs') or []
+        uniq, seen = [], set()
+        for p in raw_pairs:
+            try:
+                mid = int(p.get('model_id')); cid = int(p.get('condition_id'))
+            except Exception:
+                continue
+            t = (mid, cid)
+            if t in seen: continue
+            seen.add(t); uniq.append(t)
+        if not uniq:
+            return resp_ok({'models': [], 'missing': []})
+
+        models = []
+        missing = []
+        for mid, cid in uniq:
+            j = load_spectrum(mid, cid)
+            if not j or not isinstance(j, dict):
+                missing.append({'model_id': mid, 'condition_id': cid})
+                continue
+
+            m = (j.get('model') or {})
+            calib = m.get('calibration') or {}
+            calib_model = calib.get('calib_model') or {}
+
+            slim = {
+                'version': m.get('version'),
+                'centers_hz': m.get('centers_hz') or m.get('freq_hz') or m.get('freq') or [],
+                'band_models_pchip': m.get('band_models_pchip') or [],
+                'rpm_min': m.get('rpm_min') or calib_model.get('x0'),
+                'rpm_max': m.get('rpm_max') or calib_model.get('x1'),
+                'calibration': {
+                    'rpm_peak': calib.get('rpm_peak'),
+                    'rpm_peak_tol': calib.get('rpm_peak_tol'),
+                    'session_delta_db': calib.get('session_delta_db'),
+                },
+                'anchor_presence': m.get('anchor_presence') or {}
+            }
+
+            models.append({
+                'key': f'{mid}_{cid}',
+                'model_id': mid,
+                'condition_id': cid,
+                'model': slim,
+                'type': j.get('type') or 'spectrum_v2'
+            })
+
+        return resp_ok({'models': models, 'missing': missing})
+    except Exception as e:
+        app.logger.exception(e)
+        return resp_err('INTERNAL_ERROR', f'频谱模型接口异常: {e}', 500)
+
     
 # =========================================
 # Entrypoint

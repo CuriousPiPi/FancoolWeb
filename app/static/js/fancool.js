@@ -6,6 +6,7 @@ const FRONT_MAX_ITEMS = (window.APP_CONFIG && window.APP_CONFIG.maxItems) || 8;
 const LIKESET_VERIFY_MAX_AGE_MS = 5 * 60 * 1000;      // 5 分钟指纹过期
 const PERIODIC_VERIFY_INTERVAL_MS = 3 * 60 * 1000;    // 3 分钟后台触发一次检查
 const LIKE_FULL_FETCH_THRESHOLD = 20;
+let lastSpectrumData = null;
 
 /* 在最前阶段就写入上限标签，避免闪烁 */
 (function initMaxItemsLabel(){
@@ -34,6 +35,22 @@ const LIKE_FULL_FETCH_THRESHOLD = 20;
       window.APP_CONFIG.recentLikesLimit = cfg.recent_likes_limit ?? 50;
     }
   } catch(_){}
+})();
+
+window.refreshActiveChartFromLocalDebounced = (function(){
+  let tid = null;
+  return function(showToast=false){
+    clearTimeout(tid);
+    tid = setTimeout(() => {
+      try {
+        refreshActiveChartFromLocal(showToast);
+      } catch (e) {
+        console.error('[refreshActiveChartFromLocal] failed:', e);
+        // 兜底提示，避免静默失败
+        try { showError('图表刷新失败：' + e.message); } catch(_) {}
+      }
+    }, 0);
+  };
 })();
 
 window.DisplayCache = (function(){
@@ -559,9 +576,9 @@ function filterChartDataForAxis(chartData) {
   return cleaned;
 }
 
+// 替换：postChartData -> 统一委派给 ChartHostManager
 function postChartData(chartData){
   lastChartData = chartData;
-
   const prepared = withFrontColors(chartData);
   const filtered = filterChartDataForAxis(prepared);
   const payload = {
@@ -569,20 +586,19 @@ function postChartData(chartData){
     theme: currentThemeStr(),
     chartBg: getChartBg()
   };
-  if (pendingShareMeta) {
-    payload.shareMeta = pendingShareMeta;
-    pendingShareMeta = null;
-  }
-
-  if (window.ChartRenderer && typeof ChartRenderer.render === 'function') {
+  if (pendingShareMeta) { payload.shareMeta = pendingShareMeta; pendingShareMeta = null; }
+  // 改为宿主管理器渲染（当视图为 curves 时生效）
+  if (window.ChartHostManager && typeof ChartHostManager.render === 'function') {
+    ChartHostManager.render(payload);
+  } else if (window.ChartRenderer && typeof ChartRenderer.render === 'function') {
     ChartRenderer.render(payload);
   }
 }
 
+// 替换：resizeChart -> 走宿主
 function resizeChart(){
-  if (window.ChartRenderer && typeof ChartRenderer.resize === 'function') {
-    ChartRenderer.resize();
-  }
+  if (window.ChartHostManager?.resize) ChartHostManager.resize();
+  else if (window.ChartRenderer?.resize) ChartRenderer.resize();
 }
 
 /* =========================================================
@@ -958,15 +974,26 @@ function setTheme(t) {
   // 等两帧再刷新图表/布局（保留原逻辑）
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
-      if (lastChartData) {
-        postChartData(lastChartData);
+      const active = window.ChartHostManager?.getActive?.() || 'curves';
+      if (active === 'spectrum') {
+        if (lastSpectrumData) {
+          // 频谱渲染
+          window.ChartHostManager?.render?.({ chartData: lastSpectrumData, theme: currentThemeStr(), chartBg: getChartBg() });
+        } else {
+          window.ChartHostManager?.resize?.();
+        }
       } else {
-        resizeChart();
+        if (lastChartData) {
+          postChartData(lastChartData);
+        } else {
+          resizeChart();
+        }
       }
       syncTopTabsViewportHeight();
     });
   });
 }
+
 
 // 初始化：只调用一次
 setTheme(currentTheme);
@@ -1401,8 +1428,8 @@ document.addEventListener('click', async e=>{
     return;
   }
 
-  const quickRemove = safeClosest(e.target, '.js-list-remove');
-if (quickRemove){
+const quickRemove = safeClosest(e.target, '.js-list-remove');
+  if (quickRemove){
     const midAttr = quickRemove.dataset.modelId;
     const cidAttr = quickRemove.dataset.conditionId;
     const sel = LocalState.getSelected();
@@ -1423,14 +1450,14 @@ if (quickRemove){
       rebuildSelectedFans(LocalState.getSelected());
       window.__APP.features.recentlyRemoved.rebuild(LocalState.getRecentlyRemoved());
       syncQuickActionButtons();
-      refreshChartFromLocal(false);
+      window.refreshActiveChartFromLocalDebounced(false);   
     } else {
       showError('移除失败（未找到）');
     }
     return;
   }
 
- {
+  {
     const picker = ['.js-ranking-add','.js-search-add','.js-rating-add','.js-likes-add'];
     for (const sel of picker){
       const btn = safeClosest(e.target, sel);
@@ -1458,20 +1485,18 @@ if (quickRemove){
           hideLoading('op'); return;
         }
 
-        // 立即更新前端状态与 UI
         const addedSummary = LocalState.addPairs(pairs);
         rebuildSelectedFans(LocalState.getSelected());
         ensureLikeStatusBatch(addedSummary.addedDetails.map(d => ({ model_id: d.model_id, condition_id: d.condition_id })));
         window.__APP.features.recentlyRemoved.rebuild(LocalState.getRecentlyRemoved());
         syncQuickActionButtons();
         applySidebarColors();
-        refreshChartFromLocal(false);
+        window.refreshActiveChartFromLocalDebounced(false);   // 改这里
 
         hideLoading('op');
         showSuccess(`新增 ${addedSummary.added} 组`);
         window.__APP.sidebar.maybeAutoOpenSidebarOnAdd && window.__APP.sidebar.maybeAutoOpenSidebarOnAdd();
 
-        // 埋点改为后台、无阻塞
         const addType = btn.dataset.addType || '';
         const fallbackMap = { likes:'liked', rating:'top_rating', ranking:'top_query', search:'search' };
         const logSource = btn.dataset.logSource || fallbackMap[addType] || 'unknown';
@@ -1484,7 +1509,6 @@ if (quickRemove){
     }
   }
 
-
   const removeBtn = safeClosest(e.target, '.js-remove-fan');
   if (removeBtn){
     const fanKey = removeBtn.dataset.fanKey;
@@ -1495,7 +1519,7 @@ if (quickRemove){
       rebuildSelectedFans(LocalState.getSelected());
       window.__APP.features.recentlyRemoved.rebuild(LocalState.getRecentlyRemoved());
       syncQuickActionButtons();
-      refreshChartFromLocal(false);
+      window.refreshActiveChartFromLocalDebounced(false);   // 改这里
     } else {
       showInfo('条目不存在');
     }
@@ -1531,7 +1555,7 @@ if (quickRemove){
       window.__APP.features.recentlyRemoved.rebuild(LocalState.getRecentlyRemoved());
       syncQuickActionButtons();
       applySidebarColors();
-      refreshChartFromLocal(false);
+      window.refreshActiveChartFromLocalDebounced(false);    // 改这里
     } catch(err){
       hideLoading('op');
       showError('清空失败: '+err.message);
@@ -1661,34 +1685,104 @@ function scheduleAdjust(){
    初始数据获取
    ========================================================= */
 (function mountChartRendererEarly(){
+  // 替换 ensureSwitchUI（函数内仅新增“显式隐藏/显示频谱滑块”的处理，其余保持不变）
+  function ensureSwitchUI(){
+    const wrap = document.getElementById('chart-settings');
+    if (!wrap || document.getElementById('chartViewSwitch')) return;
+    const box = document.createElement('div');
+    box.id = 'chartViewSwitch';
+    box.className = 'fc-tabs fc-tabs__subseg';
+    box.style.position = 'absolute';
+    box.style.top = '8px';
+    // 移到容器左上角并向右偏移 80px
+    box.style.left = (12 + 80) + 'px';
+    box.style.zIndex = '3';
+    box.innerHTML = `
+      <div class="fc-seg" role="tablist" aria-label="图表视图">
+        <button class="fc-seg__btn" data-view="curves" role="tab">性能曲线</button>
+        <button class="fc-seg__btn" data-view="spectrum" role="tab">噪音频谱</button>
+        <span class="fc-seg__thumb"></span>
+      </div>`;
+    wrap.appendChild(box);
+
+    function applyActive(){
+      const active = window.ChartHostManager?.getActive?.() || 'curves';
+      const btns = box.querySelectorAll('.fc-seg__btn');
+      btns.forEach(b=> b.classList.toggle('is-active', b.dataset.view === active));
+      const thumb = box.querySelector('.fc-seg__thumb');
+      if (thumb) thumb.style.transform = (active === 'spectrum') ? 'translateX(100%)' : 'translateX(0)';
+    }
+
+    function hideCurveFitFloatingUI(){
+      const fb = document.getElementById('fitBubble');
+      const fp = document.getElementById('fitPointer');
+      const fbtn = document.getElementById('fitButtons');
+      if (fb) fb.style.visibility = 'hidden';
+      if (fp) fp.style.visibility = 'hidden';
+      if (fbtn) fbtn.style.visibility = 'hidden';
+    }
+
+    box.addEventListener('click', (e)=>{
+      const btn = e.target.closest('.fc-seg__btn');
+      if (!btn) return;
+      const view = btn.dataset.view;
+      window.ChartHostManager?.switchTo?.(view);
+      applyActive();
+
+      // 显式切换模式标记 + 并显式控制频谱滑块的可见性（防止残留）
+      const rpmCtrl = document.querySelector('[data-role="spectrum-rpm-controls"]');
+      if (view === 'spectrum') {
+        document.documentElement.setAttribute('data-chart-mode','spectrum');
+        if (rpmCtrl) rpmCtrl.style.display = 'flex';
+        hideCurveFitFloatingUI();
+        refreshSpectrumDynamicFromLocal(false);   // 懒加载频谱
+      } else {
+        document.documentElement.removeAttribute('data-chart-mode');
+        if (rpmCtrl) rpmCtrl.style.display = 'none';
+        refreshChartFromLocal(false);
+      }
+    });
+
+    // 明确默认激活“性能曲线”
+    window.ChartHostManager?.switchTo?.('curves');
+    applyActive();
+  }
+
   function doMount(){
     const el = document.getElementById('chartHost');
-    if (el && window.ChartRenderer && typeof ChartRenderer.mount === 'function') {
-      ChartRenderer.mount(el);
+    if (el && window.ChartHostManager && typeof ChartHostManager.mount === 'function') {
+      ChartHostManager.mount(el);
 
-      // NEW: 监听 X 轴切换，写回 LocalState，并按新轴刷新曲线
-      if (typeof ChartRenderer.setOnXAxisChange === 'function') {
+      // 仅对曲线视图绑定 X 轴切换回调
+      if (window.ChartRenderer?.setOnXAxisChange) {
         ChartRenderer.setOnXAxisChange((next) => {
-          // 规范化
           const nx = (next === 'noise') ? 'noise_db' : next;
           try { localStorage.setItem('x_axis_type', nx); } catch(_) {}
           frontXAxisType = nx;
-          // 同步给应用状态（影响 /api/curves 的 x_axis_type）
           if (typeof LocalState?.setXAxisType === 'function') {
             try { LocalState.setXAxisType(nx); } catch(_) {}
           }
-          // 重新取数并渲染（避免沿用旧轴裁剪过的数据）
           refreshChartFromLocal(false);
         });
       }
+      ensureSwitchUI();
+
+      // 首屏加载默认性能曲线图
+      document.documentElement.removeAttribute('data-chart-mode');
+      window.ChartHostManager?.switchTo?.('curves');
+      refreshChartFromLocal(false);
     }
   }
-  if (document.readyState !== 'loading') {
-    doMount();
-  } else {
-    document.addEventListener('DOMContentLoaded', doMount, { once:true });
-  }
+  if (document.readyState !== 'loading') doMount();
+  else document.addEventListener('DOMContentLoaded', doMount, { once:true });
 })();
+
+// 新增：按当前视图刷新图表（解决频谱模式下增删后需要手动切换的问题）
+function refreshActiveChartFromLocal(showToast=false){
+  const active = window.ChartHostManager?.getActive?.() || 'curves';
+  if (active === 'spectrum') return refreshSpectrumDynamicFromLocal(showToast);
+  return refreshChartFromLocal(showToast);
+}
 
 // NEW: 批量获取 (model_id, condition_id) 的显示元信息
 async function fetchMetaForPairs(pairs){
@@ -2314,6 +2408,77 @@ async function logNewPairs(addedDetails, source = 'unknown') {
   await window.Analytics.logQueryPairs(source, pairs);
 }
 
+// 替换 refreshSpectrumDynamicFromLocal：补充 missing 提示 + 保持“频谱视图立即可见”
+async function refreshSpectrumDynamicFromLocal(showToast=false){
+  const pairs = LocalState.getSelectionPairs();
+  const theme = currentThemeStr();
+
+  if (!pairs.length) {
+    lastSpectrumData = { modelsByKey: {} };
+    const payload = { chartData: lastSpectrumData, theme, chartBg: getChartBg() };
+    window.ChartHostManager?.render?.(payload);
+    window.SpectrumRenderer?.render?.({ chartData: lastSpectrumData, theme });
+    return;
+  }
+
+  try {
+    // 预取显示元信息，供 legend 与缺失提示
+    const metaItems = await fetchMetaForPairs(pairs);
+    if (metaItems?.length) DisplayCache.setFromMeta(metaItems);
+
+    const resp = await fetch('/api/spectrum-models', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ pairs })
+    });
+    const j = await resp.json();
+    const n = normalizeApiResponse(j);
+    if (!n.ok){ showError(n.error_message || '获取频谱模型失败'); return; }
+
+    const modelsByKey = {};
+    for (const item of (n.data.models || [])) {
+      const key = `${item.model_id}_${item.condition_id}`;
+      const info = DisplayCache.get(item.model_id, item.condition_id) || {};
+      const name = `${info.brand||''} ${info.model||''} - ${info.condition||''}`.trim() || key;
+      modelsByKey[key] = {
+        name,
+        color: ColorManager.getColor(key),
+        brand: info.brand || '',
+        modelName: info.model || '',
+        condition: info.condition || '',
+        model: item.model
+      };
+    }
+
+    // 缺失项提示
+    const missing = Array.isArray(n.data?.missing) ? n.data.missing : [];
+    if (missing.length > 0) {
+      if (missing.length === 1) {
+        const miss = missing[0];
+        const meta = DisplayCache.get(miss.model_id, miss.condition_id);
+        if (meta) {
+          showInfo(`该组数据尚无噪音频谱：${meta.brand} ${meta.model} - ${meta.condition}`);
+        } else {
+          showInfo('该组数据尚无噪音频谱');
+        }
+      } else {
+        showInfo(`${missing.length} 组数据尚无噪音频谱`);
+      }
+    }
+
+    lastSpectrumData = { modelsByKey };
+    const payload = { chartData: lastSpectrumData, theme, chartBg: getChartBg() };
+    window.ChartHostManager?.render?.(payload);
+
+    // 当前视图为频谱 → 直接渲染，确保“添加后无需切换即可显示”
+    if ((window.ChartHostManager?.getActive?.() || 'curves') === 'spectrum') {
+      window.SpectrumRenderer?.render?.({ chartData: lastSpectrumData, theme });
+    }
+
+    if (showToast) showSuccess('已加载频谱模型');
+  } catch(e){
+    showError('频谱模型请求异常: '+e.message);
+  }
+}
 
 function generateDarkGradient() {
   // 随机主色 & 副色 (HSL)
@@ -2340,3 +2505,4 @@ function generateDarkGradient() {
   const baseIsFirst = l1 <= l2;
   root.style.setProperty('--dark-rand-base', baseIsFirst ? stop1 : stop2);
 }
+

@@ -13,14 +13,9 @@
   let isFs = false;
 
   function getCssTransitionMs(){
-    try {
-      const raw = getComputedStyle(document.documentElement).getPropertyValue('--transition-speed').trim();
-      if (!raw) return 300;
-      if (raw.endsWith('ms')) return Math.max(0, parseFloat(raw));
-      if (raw.endsWith('s'))  return Math.max(0, parseFloat(raw) * 1000);
-      const n = parseFloat(raw);
-      return Number.isFinite(n) ? n : 300;
-    } catch(_) { return 300; }
+    // 改为复用 RendererBase 工具
+    return (window.RendererBase && RendererBase.utils.getCssTransitionMs())
+      || 300;
   }
   // NEW: 追踪 root 的几何变化（位置/尺寸），用于在容器“移动但不改变尺寸”时重放置拟合气泡
   let __lastRootRect = { left:0, top:0, width:0, height:0 };
@@ -380,29 +375,21 @@ function setTheme(theme) {
   }
 
   function tokens(theme) {
-    const dark = (theme||'').toLowerCase()==='dark';
-    return {
-      fontFamily:'system-ui,-apple-system,"Segoe UI","Helvetica Neue","Microsoft YaHei",Arial,sans-serif',
-      axisLabel: dark ? '#d1d5db' : '#4b5563',
-      axisName:  dark ? '#9ca3af' : '#6b7280',
-      axisLine:  dark ? '#374151' : '#e5e7eb',
-      gridLine:  dark ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.08)',
-      tooltipBg: dark ? 'var(--bg-bubble)' : 'rgba(255,255,255,0.98)',
-      tooltipBorder: dark ? '#374151' : '#e5e7eb',
-      tooltipText: dark ? '#f3f4f6' : '#1f2937',
-      tooltipShadow: dark ? '0 6px 20px rgba(0,0,0,0.35)' : '0 6px 20px rgba(0,0,0,0.12)',
-      pagerIcon: dark ? '#93c5fd' : '#2563eb'
-    };
+    // 改为复用 RendererBase 工具
+    return (window.RendererBase && RendererBase.utils.tokens(theme))
+      || {
+        fontFamily:'system-ui,-apple-system,"Segoe UI","Helvetica Neue","Microsoft YaHei",Arial,sans-serif',
+        axisLabel:'#4b5563', axisName:'#6b7280', axisLine:'#e5e7eb',
+        gridLine:'rgba(0,0,0,0.08)', tooltipBg:'rgba(255,255,255,0.98)',
+        tooltipBorder:'#e5e7eb', tooltipText:'#1f2937', tooltipShadow:'0 6px 20px rgba(0,0,0,0.12)',
+        pagerIcon:'#2563eb'
+      };
   }
 
   function measureText(text, size, weight, family){
-    const ctx = __textMeasureCtx;
-    ctx.font = `${String(weight||400)} ${Number(size||14)}px ${family||'sans-serif'}`;
-    const m = ctx.measureText(text || '');
-    const width = m.width || 0;
-    const ascent = (typeof m.actualBoundingBoxAscent === 'number') ? m.actualBoundingBoxAscent : size * 0.8;
-    const descent = (typeof m.actualBoundingBoxDescent === 'number') ? m.actualBoundingBoxDescent : size * 0.2;
-    return { width, height: ascent + descent };
+    // 改为复用 RendererBase 工具
+    return (window.RendererBase && RendererBase.utils.measureText(text, size, weight, family))
+      || { width: 0, height: Number(size||14) };
   }
 
   const TITLE_GLUE = '  -  ';
@@ -508,8 +495,8 @@ function setTheme(theme) {
   }
 
   function getExportBg() {
-    const bgBody = getComputedStyle(document.body).backgroundColor;
-    return bgBody && bgBody !== 'rgba(0, 0, 0, 0)' ? bgBody : '#ffffff';
+    // 改为复用 RendererBase 工具
+    return (window.RendererBase && RendererBase.utils.getExportBg()) || '#ffffff';
   }
 
   function buildOption(payload) {

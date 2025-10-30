@@ -1,0 +1,39 @@
+/* 频谱模式下的竖直 RPM 导轨与手柄（颜色由 JS 注入 inline style 自适应主题） */
+.spr-rail {
+  position: absolute;
+  z-index: 3;
+  pointer-events: auto;
+  width: 32px;             /* 增大可点击区，便于点中 */
+}
+.spr-rail .spr-track {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 4px;              /* 轨道视觉宽度，中心对齐第二 y 轴轴线 */
+  border-radius: 2px;
+}
+.spr-rail .spr-knob {
+  position: absolute;
+  left: 50%;
+  transform: translate(-50%, -50%);  /* 以中心对齐轨道中心线 */
+  width: 26px;            /* 把手更大 */
+  height: 16px;           /* 把手更大 */
+  border-radius: 12px;
+  box-shadow: 0 3px 10px rgba(0,0,0,0.22);
+  cursor: grab;
+  touch-action: none;
+}
+.spr-rail.dragging .spr-knob {
+  cursor: grabbing;
+}
+.spr-rail .spr-readout {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  top: -22px;              /* 移到上方覆盖第二轴“转速(RPM)”标题位置 */
+  font-size: 12px;
+  font-weight: 800;
+  white-space: nowrap;
+  user-select: none;
+  pointer-events: none;
+}

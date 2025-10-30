@@ -108,7 +108,7 @@ function rebuild(list){
         rebuild(window.LocalState?.getRecentlyRemoved?.());
         try { window.syncQuickActionButtons?.(); } catch(_){}
         try { window.applySidebarColors?.(); } catch(_){}
-        try { window.refreshChartFromLocal?.(false); } catch(_){}
+        try { window.refreshActiveChartFromLocalDebounced?.(false); } catch(_){}
       } else if (result && result.reason === 'already_selected'){
         if (typeof window.showInfo === 'function') window.showInfo('已在图表中，已从最近移除列表剔除');
         rebuild(window.LocalState?.getRecentlyRemoved?.());

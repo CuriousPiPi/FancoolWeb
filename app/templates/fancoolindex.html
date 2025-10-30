@@ -22,6 +22,7 @@
   <link rel="stylesheet" href="https://cdn.bootcdn.net/ajax/libs/font-awesome/6.5.2/css/solid.min.css" crossorigin="anonymous" referrerpolicy="no-referrer">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/tailwind.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/chart-renderer.css', v=1) }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/spectrum-renderer.css', v=1) }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='css/fancool.css', v=10) }}">
   <!-- bumped v to 4 to refresh new styles (fc-subrow__scenario-extra) -->
   <link rel="stylesheet" href="{{ url_for('static', filename='css/right-card.css', v=7) }}">
@@ -585,7 +586,10 @@
   <script src="{{ url_for('static', filename='js/theme-pref.js', v=1) }}"></script>
   <script src="{{ url_for('static', filename='js/color-manager.js', v=1) }}"></script>
   <script src="{{ url_for('static', filename='vendor/echarts/5.4.2/echarts.min.js') }}"></script>
+  <script src="{{ url_for('static', filename='js/chart-host-manager.js', v=1) }}"></script>
   <script src="{{ url_for('static', filename='js/chart-renderer.js', v=7) }}"></script>
+  <script src="{{ url_for('static', filename='js/renderer-base.js', v=1) }}"></script>
+  <script src="{{ url_for('static', filename='js/spectrum-renderer.js', v=1) }}"></script>
   <script src="{{ url_for('static', filename='js/sidebar.js', v=3) }}"></script>
   <script src="{{ url_for('static', filename='js/recently-removed.js', v=2) }}"></script>
   <script src="{{ url_for('static', filename='js/fancool.js', v=11) }}"></script>
