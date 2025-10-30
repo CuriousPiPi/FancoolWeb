@@ -219,20 +219,20 @@ def _load_params() -> Dict[str, Any]:
         try: return json.loads(env_json)
         except Exception: pass
     return {
-        "env_agg_per_frame": 40, "env_agg_per_band": 20, "env_mad_pre_band": True, "env_smooth_bands": 0,
+        "env_agg_per_frame": 40, "env_agg_per_band": 30, "env_mad_pre_band": True, "env_smooth_bands": 0,
         "meas_agg_per_frame": 40, "meas_agg_per_band": 100, "meas_mad_pre_band": True, "mad_tau": 3.0,
         "snr_ratio_min": 1.0, "trim_head_sec": 0.5, "trim_tail_sec": 0.5, "highpass_hz": 20,
-        "n_per_oct": 12, "fmin_hz": 20, "fmax_hz": 20000, "frame_sec": 0.02, "hop_sec": 0.01,
+        "n_per_oct": 24, "fmin_hz": 20, "fmax_hz": 20000, "frame_sec": 0.5, "hop_sec": 0.25,
         "band_grid": "iec-decimal", "perfile_median": False
     }
 
 def _run_inproc_and_collect(work_dir: str, params: Dict[str, Any], model_id: int, condition_id: int) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     try:
-        from admin.audio_calib.pipeline import run_calibration_and_model as _rcm
+        from admin.audio_calib.pipeline_old import run_calibration_and_model as _rcm
         run_calibration_and_model = _rcm
     except Exception:
         try:
-            from .audio_calib.pipeline import run_calibration_and_model as _rcm
+            from .audio_calib.pipeline_old import run_calibration_and_model as _rcm
             run_calibration_and_model = _rcm
         except Exception:
             audio_dir = os.path.join(APP_DIR, 'audio_calib')

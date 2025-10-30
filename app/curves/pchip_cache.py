@@ -12,8 +12,8 @@ from typing import List, Dict, Any, Optional
 # =========================
 
 _ALPHA = {
-    "rpm": float(os.getenv("CURVE_SMOOTH_ALPHA_RPM", "0.6")),
-    "noise_db": float(os.getenv("CURVE_SMOOTH_ALPHA_NOISE", "0.2")),
+    "rpm": float(os.getenv("CURVE_SMOOTH_ALPHA_RPM", "0.0")),
+    "noise_db": float(os.getenv("CURVE_SMOOTH_ALPHA_NOISE", "0.0")),
 }
 _TAU = {
     "rpm": float(os.getenv("CURVE_TENSION_TAU_RPM", "0.0")),

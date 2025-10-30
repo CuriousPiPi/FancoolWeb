@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+
 import os, re, math, json, sys
 from typing import Dict, Any, List, Tuple, Optional
 
@@ -138,6 +139,7 @@ def _local_baseline_pa2(band_E: np.ndarray, k: int, win_bands: int = 3) -> float
     n = band_E.size
     lo = max(0, k - win_bands)
     hi = min(n, k + win_bands + 1)
+    # 去掉自身频带
     arr = band_E[lo:hi].copy()
     rm_idx = min(k - lo, arr.size - 1)
     arr = np.delete(arr, rm_idx) if arr.size > 0 else arr
@@ -160,83 +162,56 @@ def _distribute_line_to_bands(f_line: float, centers: np.ndarray, f1: np.ndarray
     ww = ww / max(1e-30, np.sum(ww))
     return [(int(i), float(v)) for i, v in zip(idx.tolist(), ww.tolist())]
 
-def _build_harmonic_models_from_nodes(centers: np.ndarray,
-                                      n_per_oct: int,
-                                      rpm_nodes: List[float],
-                                      per_frame_bandE: np.ndarray,
-                                      per_frame_rpm: np.ndarray,
-                                      n_blade: int,
-                                      h_max: Optional[int] = None,
-                                      baseline_win_bands: int = 3,
-                                      kernel_sigma_bands: float = 0.25) -> Dict[str, Any]:
-    """
-    从 sweep 帧级数据学习谐波幅度 L_h(R)：
-    - centers: (K,)
-    - per_frame_bandE: (K, T) 每帧 A 加权带能量（已 AWA 校正）
-    - per_frame_rpm: (T,) 每帧 RPM 估计（已平滑）
-    """
+def _build_harmonic_models_from_anchors(centers: np.ndarray,
+                                        n_per_oct: int,
+                                        anchor_items: List[Dict[str, Any]],
+                                        n_blade: int,
+                                        h_max: Optional[int] = None,
+                                        baseline_win_bands: int = 3,
+                                        kernel_sigma_bands: float = 0.25) -> Dict[str, Any]:
     f1, f2 = band_edges_from_centers(centers, n_per_oct, grid="iec-decimal")
-    T = per_frame_bandE.shape[1]
-    if T <= 0 or n_blade <= 0:
+    rpm_list: List[float] = []
+    bandE_by_rpm: Dict[float, np.ndarray] = {}
+    for it in anchor_items:
+        r = float(it.get("rpm") or float("nan"))
+        spec = it.get("spectrum_db")
+        if not np.isfinite(r) or not isinstance(spec, list) or len(spec) != centers.size:
+            continue
+        E = np.array([_dbA_band_to_pa2(v) for v in spec], dtype=float)
+        bandE_by_rpm[r] = E
+        rpm_list.append(r)
+    if not rpm_list:
         return {}
-    rpm_min = float(np.nanmin(per_frame_rpm)); rpm_max = float(np.nanmax(per_frame_rpm))
-    if not np.isfinite(rpm_min) or not np.isfinite(rpm_max) or rpm_max <= rpm_min:
-        return {}
+    rpm_unique = sorted(set(rpm_list))
+    rpm_min, rpm_max = min(rpm_unique), max(rpm_unique)
     if not h_max:
         fmax = float(f2[-1])
         bpf_max = (n_blade * rpm_max) / 60.0
         h_max = int(max(1, math.floor(fmax / max(1e-9, bpf_max))))
-    K = centers.size
-    # 为每阶次收集节点（R, Lh_db），后按 R 分箱聚合得到节点再 PCHIP
     models = []
-    # 分箱中心（采用与 rpm_nodes 相同，便于对齐）
-    xs_centers = np.array(sorted(set(float(r) for r in rpm_nodes)), float)
-    if xs_centers.size < 2:
-        xs_centers = np.linspace(rpm_min, rpm_max, num=max(3, int(round((rpm_max-rpm_min)/50.0))), dtype=float)
-    # 三角权重核（半宽约=一个节点间距）
-    bin_step = float(np.median(np.diff(xs_centers))) if xs_centers.size >= 2 else max(1.0, (rpm_max-rpm_min)/20.0)
-    halfw = max(1.0, bin_step)
-    def tri_w(x, c): 
-        d = abs(x - c)
-        return max(0.0, 1.0 - d/halfw)
     for h in range(1, int(h_max) + 1):
-        ys_nodes: List[float] = []
-        xs_nodes: List[float] = []
-        for c in xs_centers:
-            wsum = 0.0
-            E_line_acc = 0.0
-            # 聚合所有帧对该节点的贡献
-            for t in range(T):
-                rpm_t = float(per_frame_rpm[t])
-                if not np.isfinite(rpm_t):
-                    continue
-                w = tri_w(rpm_t, c)
-                if w <= 0:
-                    continue
-                f_line = h * n_blade * (rpm_t / 60.0)
-                # 找到落在哪个频带
-                idxs = np.where((f_line >= f1) & (f_line <= f2))[0]
-                if idxs.size == 0:
-                    continue
-                k = int(idxs[0])
-                Es = float(per_frame_bandE[k, t])
-                # 局部基线（邻域中位）
-                base = _local_baseline_pa2(per_frame_bandE[:, t], k, win_bands=baseline_win_bands)
-                E_line = max(0.0, Es - base)
-                if E_line > 0.0:
-                    E_line_acc += w * E_line
-                    wsum += w
-            if wsum > 0:
-                Eh = E_line_acc / wsum
-                Lh_db = 10.0 * math.log10(max(Eh/(P0**2), 1e-30))
-                xs_nodes.append(float(c))
-                ys_nodes.append(float(Lh_db))
-        if len(xs_nodes) == 0:
+        xs: List[float] = []
+        ys_db: List[float] = []
+        for r in rpm_unique:
+            E_k = bandE_by_rpm.get(r)
+            if E_k is None: continue
+            f_line = h * n_blade * (r / 60.0)
+            idxs = np.where((f_line >= f1) & (f_line <= f2))[0]
+            if idxs.size == 0:
+                continue
+            k = int(idxs[0])
+            E_base = _local_baseline_pa2(E_k, k, win_bands=baseline_win_bands)
+            E_line = max(0.0, float(E_k[k] - E_base))
+            if E_line <= 0.0:
+                continue
+            xs.append(r)
+            ys_db.append(10.0 * math.log10(max(E_line / (P0**2), 1e-30)))
+        if len(xs) == 0:
             mdl = None
-        elif len(xs_nodes) == 1:
-            mdl = _build_pchip_anchor([xs_centers[0], xs_centers[-1]], [ys_nodes[0], ys_nodes[0]], nonneg=False)
+        elif len(xs) == 1:
+            mdl = _build_pchip_anchor([rpm_min, rpm_max], [ys_db[0], ys_db[0]], nonneg=False)
         else:
-            mdl = _build_pchip_anchor(xs_nodes, ys_nodes, nonneg=False)
+            mdl = _build_pchip_anchor(xs, ys_db, nonneg=False)
         models.append({"h": h, "amp_pchip_db": mdl})
     return {
         "n_blade": int(n_blade),
@@ -253,9 +228,9 @@ def read_audio_mono(path: str,
                     highpass_hz: float = 20.0,
                     for_slm_like: bool = False) -> Tuple[np.ndarray, int]:
     x, fs = sf.read(path, always_2d=False)
-    if hasattr(x, "ndim") and np.ndim(x) > 1:
+    if x.ndim > 1:
         x = np.mean(x, axis=1)
-    x = np.asarray(x, dtype=np.float64)
+    x = x.astype(np.float64)
 
     if for_slm_like:
         x = x - np.mean(x)
@@ -333,11 +308,8 @@ def bands_time_energy_A(x: np.ndarray, fs: int, centers: np.ndarray, n_per_oct: 
 
 # ---------------- AWA/IO ----------------
 def find_awa(folder: str) -> Optional[str]:
-    try:
-        cands = [os.path.join(folder, fn) for fn in os.listdir(folder) if fn.lower().endswith(".awa")]
-        return cands[0] if cands else None
-    except Exception:
-        return None
+    cands = [os.path.join(folder, fn) for fn in os.listdir(folder) if fn.lower().endswith(".awa")]
+    return cands[0] if cands else None
 
 def parse_awa_la(path: str) -> float:
     if not path or not os.path.exists(path):
@@ -354,10 +326,7 @@ def parse_awa_la(path: str) -> float:
     return float(m.group(1)) if m else float("nan")
 
 def list_audio(folder: str) -> List[str]:
-    try:
-        return sorted([os.path.join(folder, fn) for fn in os.listdir(folder) if fn.lower().endswith(AUDIO_EXTS)])
-    except Exception:
-        return []
+    return sorted([os.path.join(folder, fn) for fn in os.listdir(folder) if fn.lower().endswith(AUDIO_EXTS)])
 
 def parse_rpm_from_name(name: str) -> Optional[float]:
     try:
@@ -407,29 +376,6 @@ def aggregate_two_stage_with_preband_mad(E_frames: np.ndarray,
             keep = mad_clip_both_mask(vk, mad_tau)
             vk = vk[keep] if np.any(keep) else vk
         out[k] = float(np.quantile(vk, q)) if use_quantile else float(np.mean(vk))
-    return out
-
-# 新增：env 每频带低分位（MAD 后）作为基线，默认取 30% 分位，避免过度扣除
-def env_band_baseline_low_quantile(E_frames: np.ndarray,
-                                   Etot: np.ndarray,
-                                   low_percent: float = 30.0,
-                                   mad_tau: float = 3.0,
-                                   enable_mad_pre_band: bool = True) -> np.ndarray:
-    if E_frames.size == 0:
-        return np.zeros((0,), dtype=float)
-    # 环境帧优先选低能量帧（例如最弱的40%），再在每带上做 MAD+低分位
-    mask_frames = select_frames_by_quantile(Etot, 40.0)
-    E_sel = E_frames[:, mask_frames] if np.any(mask_frames) else E_frames
-    K, _ = E_sel.shape
-    out = np.zeros((K,), dtype=float)
-    q = max(0.0, min(low_percent/100.0, 1.0))
-    for k in range(K):
-        vk = E_sel[k, :]
-        if enable_mad_pre_band and vk.size >= 3:
-            keep = mad_clip_both_mask(vk, mad_tau)
-            vk = vk[keep] if np.any(keep) else vk
-        out[k] = float(np.quantile(vk, q)) if vk.size else 0.0
-    out = np.maximum(out, 0.0)
     return out
 
 # ---------------- 本地 PCHIP（锚点保持，可选单调） ----------------
@@ -490,7 +436,7 @@ def _build_pchip_anchor(xs_in: List[float], ys_in: List[float], *, nonneg: bool 
     m = _pchip_slopes_fritsch_carlson(xs, ys, nonneg=nonneg)
     return {"x": xs, "y": ys, "m": m, "x0": xs[0], "x1": xs[-1]}
 
-# ---------------- 流水线：标定（env + 短录音） ----------------
+# ---------------- 流水线：标定 → 频谱模型 ----------------
 def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     fs = int(params.get('fs', 48000) or 48000)
     n_per_oct = int(params.get('n_per_oct', 12))
@@ -501,9 +447,8 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     hop_ratio = 1.0 - max(0.0, min(hop_sec/frame_sec if frame_sec>0 else 0.0, 1.0))
     band_grid = str(params.get('band_grid', 'iec-decimal'))
 
-    # 建议：AWA 校正后再截去首尾 0.5~1.0 s（默认 0.75）
-    trim_head_sec = float(params.get('trim_head_sec', 0.75))
-    trim_tail_sec = float(params.get('trim_tail_sec', 0.75))
+    trim_head_sec = float(params.get('trim_head_sec', 0.5))
+    trim_tail_sec = float(params.get('trim_tail_sec', 0.5))
     highpass_hz   = float(params.get('highpass_hz', 20.0))
 
     env_qf = float(params.get('env_agg_per_frame', 40.0))
@@ -515,15 +460,14 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     mad_tau = float(params.get('mad_tau', 3.0))
     snr_ratio_min = float(params.get('snr_ratio_min', 1.0))
     perfile_median = bool(params.get('perfile_median', False))
-    # 新：env 每带低分位
-    env_band_percentile = float(params.get('env_band_percentile', 30.0))  # 20~40% 推荐区间
 
     root = os.path.abspath(root_dir)
     env_dir = os.path.join(root, "env")
     if not os.path.isdir(env_dir):
         raise RuntimeError("缺少 env/ 目录")
 
-    centers = make_centers_iec61260(n_per_octave=n_per_oct, fmin=fmin, fmax=fmax)
+    centers = make_centers_iec61260(n_per_octave=n_per_oct, fmin=fmin, fmax=fmax) if band_grid == 'iec-decimal' else \
+              make_centers_iec61260(n_per_octave=n_per_oct, fmin=fmin, fmax=fmax)
     if centers.size == 0:
         raise RuntimeError("频带中心为空，请调整 fmin/fmax")
     K = centers.size
@@ -539,7 +483,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     if not env_files:
         raise RuntimeError("env/ 无音频文件")
 
-    # AWA 绝对刻度系数，用“整段”估算（SLM-like），再用于后续带级统计
     E_env_A_full_list = []
     for p in env_files:
         x_full, fs_full = read_audio_mono(p, fs, for_slm_like=True)
@@ -549,7 +492,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     sA_env = (P0 * 10.0**(LAeq_env_awa/20.0)) / math.sqrt(max(float(np.sum(E_env_A_mean)), 1e-30))
     s2A_env = sA_env**2
 
-    # 帧级：用于 per-band 基线（MAD + 低分位）
     E_env_A_proc_list, Etot_env_list = [], []
     for p in env_files:
         x_p, fs_p = read_audio_mono(p, fs, trim_head_sec, trim_tail_sec, highpass_hz, for_slm_like=False)
@@ -558,16 +500,11 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     E_env_A_frames = np.hstack(E_env_A_proc_list) if E_env_A_proc_list else np.zeros((K,0))
     Etot_env = np.concatenate(Etot_env_list) if Etot_env_list else np.zeros((0,))
 
-    # 原总量重建（诊断）
     E_env_FS_A_rob = aggregate_two_stage_with_preband_mad(
         E_env_A_frames, Etot_env, qf_percent=env_qf, qb_percent=env_qb, mad_tau=mad_tau, enable_mad_pre_band=env_mad_on
     )
-    la_env_from_base = db10_from_energy(np.array([np.sum(s2A_env * E_env_FS_A_rob)])).item()
-
-    # 新：env 带级基线，低分位 + MAD
-    E_env12_A_pa2_base = s2A_env * env_band_baseline_low_quantile(
-        E_env_A_frames, Etot_env, low_percent=env_band_percentile, mad_tau=mad_tau, enable_mad_pre_band=env_mad_on
-    )
+    E_env12_A_pa2_base = s2A_env * E_env_FS_A_rob
+    la_env_from_base = db10_from_energy(np.array([np.sum(E_env12_A_pa2_base)])).item()
 
     rpm_nodes: List[float] = []
     la_nodes_raw: List[float] = []
@@ -590,7 +527,7 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
 
     for name in sorted(os.listdir(root)):
         d = os.path.join(root, name)
-        if not os.path.isdir(d) or os.path.basename(d).lower() in ("env", "sweep"):
+        if not os.path.isdir(d) or os.path.basename(d).lower() == "env":
             continue
         m = _R_RPM.match(os.path.basename(d))
         rpm = float(m.group(1)) if m else parse_rpm_from_name(name)
@@ -607,7 +544,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
         la_sub_files: List[float] = []
 
         for ap in files:
-            # 绝对刻度：用 SLM-like 全段对齐 .AWA
             x_full, fs_full = read_audio_mono(ap, fs, for_slm_like=True)
             E_A_full, _ = bands_time_energy_A(x_full, fs_full, centers, n_per_oct, frame_sec, hop_ratio, grid=band_grid)
             E_A_full_mean = np.mean(E_A_full, axis=1) if E_A_full.size else np.zeros((K,))
@@ -617,7 +553,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
                 sA_use = sA_env
             s2A_use = sA_use**2
 
-            # 截断 + 高通后的帧级能量
             x_proc, fs_proc = read_audio_mono(ap, fs, trim_head_sec, trim_tail_sec, highpass_hz, for_slm_like=False)
             E_A_proc, Etot = bands_time_energy_A(x_proc, fs_proc, centers, n_per_oct, frame_sec, hop_ratio, grid=band_grid)
             E_A_rob = aggregate_two_stage_with_preband_mad(
@@ -625,8 +560,8 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
             )
 
             E_meas12_A_pa2 = s2A_use * E_A_rob
-            # env 基线使用 calib/env 的保守低分位
             E_env12_A_pa2 = E_env12_A_pa2_base * (s2A_use / s2A_env)
+            none_mask = (E_meas12_A_pa2 <= (snr_ratio_min * E_env12_A_pa2))
             E_sub_pos = np.maximum(E_meas12_A_pa2 - E_env12_A_pa2, 0.0)
 
             E_raw_list_pa2.append(E_meas12_A_pa2)
@@ -725,7 +660,7 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
             "weighting": "A",
             "grid": band_grid,
             "env_band_energy_A": np.asarray(E_env12_A_pa2_base, float).tolist(),
-            "note": "spectrum_db 为能量域扣环境后的 1/12 频带 dB（无效带为 null）；env 基线采用 MAD + 低分位（保守扣除）"
+            "note": "spectrum_db 为能量域扣环境后的 1/12 频带 dB（无效带为 null）"
         },
         "stats": {
             "per_rpm_counts": {str(k): int(v) for k, v in per_rpm_counts.items()},
@@ -741,7 +676,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
             "meas_mad_pre_band": bool(meas_mad_on),
             "mad_tau": mad_tau,
             "snr_ratio_min": snr_ratio_min,
-            "env_band_percentile": env_band_percentile,
             "trim_head_sec": trim_head_sec,
             "trim_tail_sec": trim_tail_sec,
             "highpass_hz": highpass_hz,
@@ -774,7 +708,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
 
     return calib, per_rpm_rows
 
-# ---------------- anchor-only 模型（回退方案） ----------------
 def build_model_from_calib_in_memory(calib: Dict[str, Any],
                                      min_points_per_band: int = 1,
                                      single_point_policy: str = "flat",
@@ -809,6 +742,7 @@ def build_model_from_calib_in_memory(calib: Dict[str, Any],
     diffs = np.diff(np.sort(np.array(rpm_unique, float))); diffs = diffs[diffs>0]
     rpm_bin = float(np.median(diffs)) if diffs.size else None
 
+    # 允许通过环境变量控制是否强制非负斜率（默认：允许负斜率更贴真）
     nonneg = (os.getenv("RPM_BAND_PCHIP_NONNEG", "0").strip() in ("1","true","True","YES","yes"))
 
     band_models: List[Optional[Dict[str, Any]]] = []
@@ -865,10 +799,10 @@ def build_model_from_calib_in_memory(calib: Dict[str, Any],
             "session_awa_db": None,
             "energy_scale": 1.0,
             "calib_model": calib_model,
-            "rpm_peak": float(rpm_max),
+            "rpm_peak": float(rpm_peak) if (rpm_peak is not None and np.isfinite(rpm_peak)) else float(rpm_max),
             "rpm_peak_tol": float(rpm_peak_tol),
-            "n_per_oct": int((anchor or {}).get("n_per_oct", 12)),
-            "closure_mode": "none"  # 默认不在推理端做动态闭合，减少整体抖动
+            # 追加：保存 n_per_oct 方便推理
+            "n_per_oct": int((anchor or {}).get("n_per_oct", 12))
         },
         "band_models_pchip": band_models,
         "anchor_presence": presence_by_rpm,
@@ -884,7 +818,7 @@ def build_model_from_calib_in_memory(calib: Dict[str, Any],
         }
     }
 
-    # 构建 Δ_pchip（诊断/可选闭合）
+     # 1) 总量闭合修正：构建 Δ 曲线（保留用于诊断；预测阶段使用动态闭合确保精确对齐）
     corr_pchip: Optional[Dict[str, Any]] = None
     try:
         if calib_model and isinstance(calib_model, dict) and (out_model.get("band_models_pchip") or []):
@@ -903,9 +837,9 @@ def build_model_from_calib_in_memory(calib: Dict[str, Any],
     except Exception:
         corr_pchip = None
     out_model["calibration"]["laeq_correction_db_pchip"] = corr_pchip
-    out_model["calibration"]["laeq_correction_note"] = "Optional slow closure Δ(R); default closure_mode=none."
+    out_model["calibration"]["laeq_correction_note"] = "Prediction applies exact dynamic closure: Δ=LA_fit−LA_synth at query RPM."
 
-    # 谐波（回退：用锚点估一个）
+    # 2) 谐波注入模型（参数可由环境变量调节）
     try:
         n_blade_env = os.getenv("FAN_BLADE_COUNT", "7").strip()
         n_blade = int(n_blade_env) if n_blade_env else 7
@@ -916,343 +850,34 @@ def build_model_from_calib_in_memory(calib: Dict[str, Any],
     except Exception:
         hb_win = 3
     try:
-        hb_sigma = float(os.getenv("HARMONICS_SIGMA_BANDS", "0.25"))
+        hb_sigma = float(os.getenv("HARMONICS_SIGMA_BANDS", "0.1"))
     except Exception:
         hb_sigma = 0.25
-    harmonics = _build_harmonic_models_from_anchors_fallback(centers=np.array(centers, float),
-                                                             n_per_oct=int((anchor or {}).get("n_per_oct", 12)),
-                                                             anchor_items=items,
-                                                             n_blade=n_blade,
-                                                             baseline_win_bands=hb_win,
-                                                             kernel_sigma_bands=hb_sigma)
+    harmonics = _build_harmonic_models_from_anchors(
+        centers=np.array(centers, float),
+        n_per_oct=int((anchor or {}).get("n_per_oct", 12)),
+        anchor_items=items,
+        n_blade=n_blade,
+        h_max=None,
+        baseline_win_bands=hb_win,
+        kernel_sigma_bands=hb_sigma
+    )
     out_model["calibration"]["harmonics"] = harmonics
+
     return out_model
 
-def _build_harmonic_models_from_anchors_fallback(centers: np.ndarray,
-                                                 n_per_oct: int,
-                                                 anchor_items: List[Dict[str, Any]],
-                                                 n_blade: int,
-                                                 baseline_win_bands: int = 3,
-                                                 kernel_sigma_bands: float = 0.25) -> Dict[str, Any]:
-    # 轻量回退：复用原 anchor 的谐波抽取逻辑（较稀疏）
-    return _build_harmonic_models_from_anchors(centers, n_per_oct, anchor_items, n_blade,
-                                               h_max=None, baseline_win_bands=baseline_win_bands,
-                                               kernel_sigma_bands=kernel_sigma_bands)
-
-# ---------------- sweep 长录音增强的模型 ----------------
-def build_model_from_calib_with_sweep_in_memory(root_dir: str,
-                                                calib: Dict[str, Any],
-                                                params: Dict[str, Any]) -> Dict[str, Any]:
-    # 参数
-    fs = int(params.get('fs', 48000) or 48000)
-    n_per_oct = int((calib.get("anchor_spectra") or {}).get("n_per_oct", params.get('n_per_oct', 12)))
-    fmin = float(params.get('fmin_hz', 20.0))
-    fmax = float(params.get('fmax_hz', 20000.0))
-    frame_sec = float(params.get('frame_sec', 1.0))
-    hop_sec = float(params.get('hop_sec', 0.5*frame_sec))
-    hop_ratio = 1.0 - max(0.0, min(hop_sec/frame_sec if frame_sec>0 else 0.0, 1.0))
-    band_grid = str(params.get('band_grid', 'iec-decimal'))
-    trim_head_sec = float(params.get('trim_head_sec', 0.75))
-    trim_tail_sec = float(params.get('trim_tail_sec', 0.75))
-    highpass_hz   = float(params.get('highpass_hz', 20.0))
-    # 分箱与稳态
-    rpm_bin = float(params.get('sweep_rpm_bin', 50.0))
-    stable_only = bool(params.get('sweep_stable_only', True))
-    max_rpm_deriv = float(params.get('sweep_max_rpm_deriv', 80.0))  # rpm/s
-    max_la_deriv = float(params.get('sweep_max_la_deriv', 6.0))     # dB/s
-    # SNR 门限
-    sweep_snr_ratio_min = float(params.get('sweep_snr_ratio_min', 2.0))
-    # 头尾对齐窗口
-    head_align_sec = float(params.get('sweep_head_align_sec', 10.0))
-    tail_align_sec = float(params.get('sweep_tail_align_sec', 10.0))
-    # 谐波参数
-    try:
-        n_blade_env = os.getenv("FAN_BLADE_COUNT", "7").strip()
-        n_blade = int(n_blade_env) if n_blade_env else 7
-    except Exception:
-        n_blade = 7
-    hb_sigma = float(os.getenv("HARMONICS_SIGMA_BANDS", "0.25"))
-    hb_win = int(os.getenv("HARMONICS_BASELINE_WIN_BANDS", "3"))
-    # 闭合模式（默认不闭合，避免抖动）
-    closure_mode = str(params.get('closure_mode', 'none')).strip().lower()
-
-    anchor = calib.get("anchor_spectra") or {}
-    centers = np.array(anchor.get("centers_hz") or make_centers_iec61260(n_per_octave=n_per_oct, fmin=fmin, fmax=fmax), float)
-    if centers.size == 0:
-        raise RuntimeError("频带中心为空")
-    rpm_min = float(calib.get("rpm_min", np.nanmin(np.array(calib.get("rpm_nodes") or [], float))))
-    rpm_max = float(calib.get("rpm_max", np.nanmax(np.array(calib.get("rpm_nodes") or [], float))))
-    calib_model = calib.get("pchip_rpm_to_laeq_envsub")
-    la_env_calib = float(calib.get("laeq_env_db"))
-    E_envA_band = np.maximum(np.array((anchor.get("env_band_energy_A") or []), float), 0.0)
-    if E_envA_band.size != centers.size:
-        # 缺失时退化为全零，避免负值
-        E_envA_band = np.zeros((centers.size,), float)
-
-    # 定位 sweep 目录与音频/AWA
-    root = os.path.abspath(root_dir)
-    sweep_dir = None
-    for name in os.listdir(root):
-        if name.lower() == "sweep":
-            sweep_dir = os.path.join(root, name)
-            break
-    if not sweep_dir or not os.path.isdir(sweep_dir):
-        # 没有 sweep：回退为 anchor-only
-        return build_model_from_calib_in_memory(calib)
-
-    auds = list_audio(sweep_dir)
-    if not auds:
-        return build_model_from_calib_in_memory(calib)
-    wav_path = auds[0]
-    awa_path = find_awa(sweep_dir)
-    session_awadb = parse_awa_la(awa_path) if awa_path else float("nan")
-
-    # 读音频 + 绝对刻度（整段）
-    x_raw, fs0 = read_audio_mono(wav_path, target_fs=fs, trim_head_sec=0.0, trim_tail_sec=0.0, highpass_hz=0.0, for_slm_like=True)
-    f1, f2 = band_edges_from_centers(centers, n_per_oct, grid=band_grid)
-    # 绝对刻度：用整段重建 LAeq 与 .AWA 对齐
-    def laeq_from_signal(x: np.ndarray, fs: int) -> float:
-        f, Pxx = signal.welch(x, fs=fs, window='hann', nperseg=8192, noverlap=4096,
-                              detrend='constant', return_onesided=True, scaling='spectrum')
-        df = np.diff(f); df = np.append(df, df[-1] if df.size else 0.0)
-        Wa = 10.0**(a_weight_db(f)/10.0)
-        E = float(np.sum(Pxx * Wa * df))
-        return 10.0*np.log10(max(E,1e-30)/(P0**2))
-    la_full_raw = laeq_from_signal(x_raw, fs0)
-    E_scale = 1.0
-    if np.isfinite(session_awadb):
-        delta_db = float(session_awadb - la_full_raw)
-        E_scale = 10.0 ** (delta_db / 10.0)
-
-    # 截断 + 高通
-    x, fs1 = read_audio_mono(wav_path, target_fs=fs, trim_head_sec=trim_head_sec, trim_tail_sec=trim_tail_sec, highpass_hz=highpass_hz, for_slm_like=False)
-    # 帧级带能量
-    E_A_frames, _ = bands_time_energy_A(x, fs1, centers, n_per_oct, frame_sec, hop_ratio, grid=band_grid)
-    if E_scale != 1.0:
-        E_A_frames *= E_scale
-    K, T = E_A_frames.shape if E_A_frames.ndim == 2 else (centers.size, 0)
-    if T <= 2:
-        # 过短，回退
-        return build_model_from_calib_in_memory(calib)
-
-    # 帧级 LA 与去环境
-    LA_frames = db10_from_energy(np.sum(E_A_frames, axis=0))
-    LA_env_ref = la_env_calib  # 采用 calib 的环境基线
-    LA_envsub = LA_frames - LA_env_ref
-
-    # 头尾对齐估计会话偏移 Δ_session（与 calib_model 对齐）
-    def frames_from_secs(sec: float) -> int:
-        hop = frame_sec * (1.0 - hop_ratio) if frame_sec > 0 else 0.0
-        return max(1, int(round(sec / max(hop, 1e-6))))
-    head_n = frames_from_secs(head_align_sec)
-    tail_n = frames_from_secs(tail_align_sec)
-    deltas = []
-    if calib_model and head_n > 0:
-        head_med = float(np.median(LA_envsub[:min(T, head_n)]))
-        if np.isfinite(rpm_min):
-            deltas.append(head_med - float(_eval_pchip_local(calib_model, rpm_min)))
-    if calib_model and tail_n > 0:
-        tail_med = float(np.median(LA_envsub[max(0, T-tail_n):T]))
-        if np.isfinite(rpm_max):
-            deltas.append(tail_med - float(_eval_pchip_local(calib_model, rpm_max)))
-    delta_session = float(np.median(np.array(deltas, float))) if deltas else 0.0
-
-    # RPM 反演（仅 LA 通道；后续可加阶次融合）
-    def invert_rpm_from_laeq(la_db: float, rpm_min: float, rpm_max: float, step: float=1.0) -> float:
-        xs = np.arange(rpm_min, rpm_max+1e-9, max(0.5, step))
-        ys = np.array([_eval_pchip_local(calib_model, float(x)) for x in xs], float)
-        i = int(np.argmin(np.abs(ys - la_db)))
-        return float(xs[i])
-    R_hat = np.zeros((T,), float)
-    for t in range(T):
-        la_t = float(LA_envsub[t] - delta_session)
-        R_hat[t] = invert_rpm_from_laeq(la_t, rpm_min, rpm_max, step=1.0)
-
-    # 平滑 + 导数限幅
-    hop = frame_sec * (1.0 - hop_ratio) if frame_sec > 0 else 0.0
-    R_smooth = R_hat.copy()
-    if T >= 5:
-        # 简单中值 + 3点 Savitzky-Golay 替代（低复杂度）
-        from collections import deque
-        buf = deque(maxlen=5)
-        tmp = np.zeros_like(R_hat)
-        for i in range(T):
-            buf.append(R_hat[i])
-            tmp[i] = np.median(np.array(list(buf)))
-        R_smooth = tmp
-    # 导数限幅
-    max_step = max_rpm_deriv * max(hop, 1e-6)
-    for i in range(1, T):
-        dr = R_smooth[i] - R_smooth[i-1]
-        if abs(dr) > max_step:
-            R_smooth[i] = R_smooth[i-1] + np.sign(dr) * max_step
-
-    # 稳态筛选
-    stable_mask = np.ones((T,), bool)
-    if stable_only and T >= 2:
-        dR = np.zeros((T,), float); dR[1:] = np.diff(R_smooth) / max(hop, 1e-6)
-        dLA = np.zeros((T,), float); dLA[1:] = np.diff(LA_frames) / max(hop, 1e-6)
-        stable_mask = (np.abs(dR) <= max_rpm_deriv) & (np.abs(dLA) <= max_la_deriv)
-
-    # RPM 分箱（固定中心）+ 软赋权（三角核）
-    edges = np.arange(rpm_min, rpm_max + rpm_bin, rpm_bin, dtype=float)
-    if edges.size < 2:
-        edges = np.array([rpm_min, rpm_max], float)
-    ctrs = (edges[:-1] + edges[1:]) / 2.0
-    halfw = rpm_bin  # 三角核半宽=一个 bin
-    def tri_w(x, c):
-        d = abs(x - c); return max(0.0, 1.0 - d/halfw)
-
-    # 带级环境基线（来自 calib）
-    E_env_band = np.maximum(E_envA_band, 0.0)
-
-    # 聚合：每个 bin、每个频带的加权统计（中位）-> 扣环境 -> dB
-    K = centers.size
-    L_A_band_nodes: List[List[float]] = [[] for _ in range(K)]
-    counts_per_bin: List[int] = []
-    for c in ctrs:
-        idx = np.arange(T)
-        ws = np.array([tri_w(R_smooth[t], c) if (not stable_only or stable_mask[t]) else 0.0 for t in idx], float)
-        good = np.where(ws > 0)[0]
-        counts_per_bin.append(int(good.size))
-        if good.size == 0:
-            for k in range(K):
-                L_A_band_nodes[k].append(float("nan"))
-            continue
-        # 带能量加权中位
-        E_sel = E_A_frames[:, good]  # (K, N)
-        w_sel = ws[good]             # (N,)
-        # 规范化权重
-        if np.sum(w_sel) <= 0:
-            for k in range(K):
-                L_A_band_nodes[k].append(float("nan"))
-            continue
-        # 对每带计算“加权中位”（用重复法近似）
-        rep_max = 50
-        for k in range(K):
-            arr = E_sel[k, :]
-            # SNR 门限（保守）：与带级环境比较
-            m_keep = (arr > sweep_snr_ratio_min * E_env_band[k])
-            arr = arr[m_keep]; w2 = w_sel[m_keep]
-            if arr.size == 0:
-                L_A_band_nodes[k].append(float("nan")); continue
-            # 近似加权中位：按权重复制，限制复制倍数
-            w_norm = w2 / max(np.sum(w2), 1e-30)
-            reps = np.maximum(1, np.minimum(rep_max, np.round(w_norm * rep_max))).astype(int)
-            arr_rep = np.repeat(arr, reps)
-            E_stat = float(np.median(arr_rep)) if arr_rep.size > 0 else float(np.median(arr))
-            E_stat = max(0.0, E_stat - E_env_band[k])
-            L_A_band_nodes[k].append(float(10.0 * math.log10(max(E_stat/(P0**2), 1e-30))))
-
-    # 每带 PCHIP（非单调）
-    band_models: List[Optional[Dict[str, Any]]] = []
-    for k in range(K):
-        ys = np.array(L_A_band_nodes[k], float)
-        xs = ctrs.copy()
-        msk = np.isfinite(ys)
-        if np.sum(msk) < 2:
-            band_models.append(None)
-        else:
-            mdl = _build_pchip_anchor(xs[msk].tolist(), ys[msk].tolist(), nonneg=False)
-            band_models.append(mdl)
-
-    # 谐波：从 sweep 学习 L_h(R)
-    harmonics = _build_harmonic_models_from_nodes(centers=centers, n_per_oct=n_per_oct,
-                                                  rpm_nodes=ctrs.tolist(), per_frame_bandE=E_A_frames, per_frame_rpm=R_smooth,
-                                                  n_blade=n_blade, h_max=None,
-                                                  baseline_win_bands=hb_win, kernel_sigma_bands=hb_sigma)
-
-    # Δ_pchip（诊断/可选闭合）
-    corr_pchip: Optional[Dict[str, Any]] = None
-    try:
-        if calib_model and isinstance(calib_model, dict):
-            delta_list: List[float] = []
-            for r in ctrs:
-                # 合成基线 + 谐波（能量域）
-                E_sum = 0.0
-                # 基线
-                for mdl in band_models:
-                    if mdl and isinstance(mdl, dict):
-                        y_db = float(_eval_pchip_local(mdl, float(r)))
-                        E_sum += (P0**2) * (10.0 ** (y_db / 10.0))
-                # 谐波
-                if harmonics and harmonics.get("n_blade", 0) > 0:
-                    f1, f2 = band_edges_from_centers(centers, n_per_oct, grid="iec-decimal")
-                    sigma_b = float((harmonics.get("kernel") or {}).get("sigma_bands", hb_sigma))
-                    topk = int((harmonics.get("kernel") or {}).get("topk", 3))
-                    bpf = harmonics["n_blade"] * (float(r) / 60.0)
-                    for item in (harmonics.get("models") or []):
-                        mdlh = item.get("amp_pchip_db"); h = int(item.get("h", 0) or 0)
-                        if h <= 0 or not mdlh: continue
-                        Lh = float(_eval_pchip_local(mdlh, float(r)))
-                        if not np.isfinite(Lh): continue
-                        Eh = (P0**2) * (10.0 ** (Lh/10.0))
-                        f_line = h * bpf
-                        for k, w in _distribute_line_to_bands(f_line, centers, f1, f2, sigma_bands=sigma_b, topk=topk):
-                            E_sum += Eh * w
-                la_synth = 10.0 * math.log10(max(E_sum/(P0**2), 1e-30))
-                la_tgt = float(_eval_pchip_local(calib_model, float(r)))
-                delta_list.append(la_tgt - la_synth)
-            corr_pchip = _build_pchip_anchor(ctrs.tolist(), delta_list, nonneg=False)
-    except Exception:
-        corr_pchip = None
-
-    out_model = {
-        "version": "rpm_spectral_from_sweep_v1",
-        "centers_hz": centers.tolist(),
-        "rpm_min": float(rpm_min), "rpm_max": float(rpm_max),
-        "rpm_bin": float(rpm_bin),
-        "rpm_grid_centers": ctrs.tolist(),
-        "counts_per_bin": counts_per_bin,
-        "calibration": {
-            "laeq_env_db": la_env_calib,
-            "session_env_db": la_env_calib,
-            "session_delta_db": float(delta_session),
-            "session_awa_db": float(session_awadb) if np.isfinite(session_awadb) else None,
-            "energy_scale": float(E_scale),
-            "calib_model": calib_model,
-            "rpm_peak": float(rpm_max),
-            "rpm_peak_tol": 50.0,
-            "n_per_oct": int(n_per_oct),
-            "env_source": "calib",
-            "harmonics": harmonics,
-            "laeq_correction_db_pchip": corr_pchip,
-            "laeq_correction_note": "Optional slow closure Δ(R) learned from sweep bins.",
-            "closure_mode": str(closure_mode or "none")
-        },
-        "band_models_pchip": band_models
-    }
-    return out_model
-
-# ---------------- 统一入口 ----------------
 def run_calibration_and_model(root_dir: str,
                               params: Dict[str, Any],
                               out_dir: Optional[str]=None,
                               model_id: Optional[int] = None,
                               condition_id: Optional[int] = None) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     calib, per_rpm_rows = calibrate_from_points_in_memory(root_dir, params)
-
-    # 如果存在 sweep/，用长录音增强频谱模型；否则回退 anchor-only
-    has_sweep = os.path.isdir(os.path.join(os.path.abspath(root_dir), "sweep"))
-    try:
-        if has_sweep:
-            model = build_model_from_calib_with_sweep_in_memory(root_dir, calib, params)
-        else:
-            model = build_model_from_calib_in_memory(calib,
-                                                     min_points_per_band=int(params.get('min_points_per_band', 1)),
-                                                     single_point_policy=str(params.get('single_point_policy', 'flat')),
-                                                     rpm_peak=None,
-                                                     rpm_peak_tol=float(params.get('rpm_peak_tol', 50.0)),
-                                                     model_id=model_id, condition_id=condition_id)
-    except Exception:
-        # 回退
-        model = build_model_from_calib_in_memory(calib,
-                                                 min_points_per_band=int(params.get('min_points_per_band', 1)),
-                                                 single_point_policy=str(params.get('single_point_policy', 'flat')),
-                                                 rpm_peak=None,
-                                                 rpm_peak_tol=float(params.get('rpm_peak_tol', 50.0)),
-                                                 model_id=model_id, condition_id=condition_id)
-
+    model = build_model_from_calib_in_memory(calib,
+                                             min_points_per_band=int(params.get('min_points_per_band', 1)),
+                                             single_point_policy=str(params.get('single_point_policy', 'flat')),
+                                             rpm_peak=None,
+                                             rpm_peak_tol=float(params.get('rpm_peak_tol', 50.0)),
+                                             model_id=model_id, condition_id=condition_id)
     if out_dir:
         try:
             os.makedirs(out_dir, exist_ok=True)
@@ -1290,11 +915,11 @@ def run_calibration_and_model(root_dir: str,
             pass
     return model, per_rpm_rows
 
-# ---------------- 推理辅助：按模型生成频带谱（含谐波；闭合可选） ----------------
+# ---------------- 推理辅助：按模型生成频带谱（含谐波与总量闭合） ----------------
 def predict_spectrum_db_with_harmonics(model: Dict[str, Any], rpm: float) -> Tuple[List[Optional[float]], float]:
     """
-    返回：每频带 dB 列表（None 表示无效），以及总 LAeq dB。
-    基线频带 → 谐波注入；闭合模式可选（默认 none，避免抖动；如需平衡总量，用 pchip 慢闭合）。
+    返回：校正后的每频带 dB 列表（None 表示无效），以及总 LAeq dB。
+    基线频带 → 谐波注入 → 动态总量闭合 Δ=LA_fit−LA_synth（确保任意 RPM 精确对齐）。
     """
     if not model or not isinstance(model, dict):
         return [], float("nan")
@@ -1336,19 +961,20 @@ def predict_spectrum_db_with_harmonics(model: Dict[str, Any], rpm: float) -> Tup
             for k, w in _distribute_line_to_bands(f_line, centers, f1, f2, sigma_bands=sigma_b, topk=topk):
                 Es[k] += Eh * w
 
-    # 3) 可选：总量闭合
+    # 3) 动态总量闭合（严格对齐拟合曲线）
     la_now = 10.0 * math.log10(max(float(np.sum(Es)) / (P0**2), 1e-30))
-    mode = str(calib.get("closure_mode", "none")).lower()
-    if mode == "pchip" and isinstance(calib.get("laeq_correction_db_pchip"), dict):
+    la_fit = None
+    if calib.get("calib_model"):
+        la_fit = float(_eval_pchip_local(calib["calib_model"], float(rpm)))
+    if la_fit is not None and np.isfinite(la_fit):
+        delta = la_fit - la_now
+        Es *= (10.0 ** (delta / 10.0))
+        la_now = la_fit
+    elif isinstance(calib.get("laeq_correction_db_pchip"), dict):
+        # 回退：若没有 calib_model，仅用预存 Δ 曲线近似闭合
         delta = float(_eval_pchip_local(calib["laeq_correction_db_pchip"], float(rpm)))
         Es *= (10.0 ** (delta / 10.0))
         la_now = 10.0 * math.log10(max(float(np.sum(Es)) / (P0**2), 1e-30))
-    elif mode == "dynamic" and calib.get("calib_model"):
-        la_fit = float(_eval_pchip_local(calib["calib_model"], float(rpm)))
-        if np.isfinite(la_fit):
-            delta = la_fit - la_now
-            Es *= (10.0 ** (delta / 10.0))
-            la_now = la_fit
 
     # 4) 输出 dB 频带
     out_db: List[Optional[float]] = []

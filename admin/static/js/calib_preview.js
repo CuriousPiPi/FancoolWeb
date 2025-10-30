@@ -25,6 +25,7 @@
     return h00*y0 + h10*m0 + h01*y1 + h11*m1;
   }
 
+  // 基线频带 dB → dB 列表（可能含 null）
   function spectrumAtRPMRaw(model, rpm){
     const freqs=model.centers_hz||[], bands=model.band_models_pchip||[];
     const out=new Array(freqs.length);
@@ -40,10 +41,43 @@
     return out;
   }
 
+  // n/倍频程相关
+  function bandsPerDecadeFromNpo(npo){
+    return Math.round((npo*10.0)/3.0);
+  }
+  function bandEdgesFromCenters(centers, npo){
+    const bpd=bandsPerDecadeFromNpo(npo);
+    const g = Math.pow(10, 1.0/(2.0*bpd));
+    const f1=[], f2=[];
+    for(const c of centers){
+      f1.push(c/g); f2.push(c*g);
+    }
+    return {f1, f2};
+  }
+
+  // 谐波注入：将单条线谱能量分配到若干邻带（对数频率高斯核）
+  function distributeLineToBands(fLine, centers, f1, f2, sigmaBands=0.25, topk=3){
+    if(!(fLine>0)) return [];
+    const logC = centers.map(c=>Math.log(Math.max(c,1e-30)));
+    const t = Math.log(Math.max(fLine,1e-30));
+    const w = logC.map((lc,i)=> (fLine>=f1[i] && fLine<=f2[i]) ? Math.exp(-0.5*Math.pow((t-lc)/Math.max(1e-6,sigmaBands),2)) : 0.0);
+    const idx = Array.from(w.map((v,i)=>[v,i])).sort((a,b)=>b[0]-a[0]).slice(0, Math.max(1, topk)).map(x=>x[1]);
+    let sum=0; for(const i of idx) sum += w[i];
+    if(sum<=0) return [];
+    return idx.map(i=>[i, w[i]/sum]);
+  }
+
   function levelFromSpectrum(points){
     let s=0;
     for(const [,y] of points){ if(y!=null && Number.isFinite(y)) s+=Math.pow(10,y/10); }
     return s>0 ? 10*Math.log10(s) : null;
+  }
+
+  function laeqFromCalibModel(model, rpm){
+    const cm = model?.calibration?.calib_model;
+    if(!cm) return null;
+    const v = evalPchip(cm, rpm);
+    return Number.isFinite(v) ? v : null;
   }
 
   function formatHz(v){
@@ -60,49 +94,59 @@
       <div class="panel" style="margin-top:10px;">
         <h4 style="margin:0 0 8px;">频谱预览</h4>
         <div id="calibChart" style="width:100%; height:320px;"></div>
-        <div style="display:flex; gap:8px; align-items:center; margin-top:8px;">
+        <div style="display:flex; gap:8px; align-items:center; margin-top:8px; flex-wrap:wrap;">
           <label for="calibRpmInput">RPM</label>
           <input id="calibRpmInput" type="number" step="1" style="width:120px;" />
-          <input id="calibRpmRange" type="range" style="flex:1 1 auto;" />
-          <input id="calibDBA" type="text" readonly style="width:160px;" placeholder="dBA" />
+          <input id="calibRpmRange" type="range" style="flex:1 1 auto; min-width:200px;" />
+          <div style="display:flex; gap:6px; align-items:center;">
+            <label for="calibDBA" style="white-space:nowrap;">合成LAeq</label>
+            <input id="calibDBA" type="text" readonly style="width:120px;" placeholder="dBA(合成)" />
+          </div>
+          <div style="display:flex; gap:6px; align-items:center;">
+            <label for="calibDBAFit" style="white-space:nowrap;">拟合LAeq</label>
+            <input id="calibDBAFit" type="text" readonly style="width:120px;" placeholder="dBA(拟合)" />
+          </div>
+          <div style="display:flex; gap:6px; align-items:center;">
+            <label for="calibDBADiff" style="white-space:nowrap;">Δ</label>
+            <input id="calibDBADiff" type="text" readonly style="width:90px;" placeholder="Δ dB" />
+          </div>
         </div>
       </div>
     `;
   }
 
-CalibPreview.show = async function({ mount, batchId }){
-  const container = (typeof mount==='string')? document.querySelector(mount) : mount;
-  if(!container) throw new Error('mount container not found');
-  if(!batchId) throw new Error('batchId required');
+  CalibPreview.show = async function({ mount, batchId }){
+    const container = (typeof mount==='string')? document.querySelector(mount) : mount;
+    if(!container) throw new Error('mount container not found');
+    if(!batchId) throw new Error('batchId required');
 
-  buildUI(container);
-  const res = await fetch(`/admin/api/calib/preview?batch_id=${encodeURIComponent(batchId)}`);
-  const j = await res.json();
-  if(!j.success) throw new Error(j.error_message||'预览数据拉取失败');
+    buildUI(container);
+    const res = await fetch(`/admin/api/calib/preview?batch_id=${encodeURIComponent(batchId)}`);
+    const j = await res.json();
+    if(!j.success) throw new Error(j.error_message||'预览数据拉取失败');
 
-  const model = j.data.model || {};
-  await loadECharts();
-  const el = document.getElementById('calibChart');
+    const model = j.data.model || {};
+    await loadECharts();
+    const el = document.getElementById('calibChart');
 
-  // 关键：排查空图
-  const centers = model.centers_hz || [];
-  const bands   = model.band_models_pchip || [];
-  const anyBand = bands.some(p => p && Array.isArray(p.x) && p.x.length>0);
-  if (!centers.length || !anyBand){
-    console.warn('[calib preview] empty model. centers_hz len =', centers.length,
-                 'bands valid =', bands.filter(p=>p&&Array.isArray(p.x)&&p.x.length>0).length,
-                 'rpm_range =', model.rpm_min, model.rpm_max,
-                 'note: check env/ & Rxxxx structure, AWA LAeq parse, and snr_ratio_min param');
-    el.innerHTML = '';
-    const warn = document.createElement('div');
-    warn.className = 'hint';
-    warn.style.marginTop = '8px';
-    warn.textContent = '频谱模型为空：请检查 zip 是否包含 env/ 与 Rxxxx 目录及 .AWA，或尝试调低 snr_ratio_min（当前参数可能过严）。';
-    el.parentNode.appendChild(warn);
-    return;
-  }
+    // 关键：排查空图
+    const centers = model.centers_hz || [];
+    const bands   = model.band_models_pchip || [];
+    const anyBand = bands.some(p => p && Array.isArray(p.x) && p.x.length>0);
+    if (!centers.length || !anyBand){
+      console.warn('[calib preview] empty model. centers_hz len =', centers.length,
+                   'bands valid =', bands.filter(p=>p&&Array.isArray(p.x)&&p.x.length>0).length,
+                   'rpm_range =', model.rpm_min, model.rpm_max);
+      el.innerHTML = '';
+      const warn = document.createElement('div');
+      warn.className = 'hint';
+      warn.style.marginTop = '8px';
+      warn.textContent = '频谱模型为空：请检查 env/ 与 Rxxxx 目录及 .AWA，或尝试调低 snr_ratio_min。';
+      el.parentNode.appendChild(warn);
+      return;
+    }
 
-  const ec = echarts.init(el, null, { renderer: 'canvas', devicePixelRatio: window.devicePixelRatio||1 });
+    const ec = echarts.init(el, null, { renderer: 'canvas', devicePixelRatio: window.devicePixelRatio||1 });
 
     let yMaxGlobal = 100;
     {
@@ -118,8 +162,7 @@ CalibPreview.show = async function({ mount, batchId }){
     }
 
     // 轴范围
-    const freqs = model.centers_hz || [];
-    const xMin = freqs[0] ?? 20, xMax = freqs[freqs.length-1] ?? 20000;
+    const xMin = centers[0] ?? 20, xMax = centers[centers.length-1] ?? 20000;
     // RPM 范围
     const rpmMin = model.rpm_min ?? (model.calibration?.calib_model?.x0 ?? 1500);
     const rpmMax = model.rpm_max ?? (model.calibration?.calib_model?.x1 ?? 4500);
@@ -127,28 +170,55 @@ CalibPreview.show = async function({ mount, batchId }){
     const rpmInput = document.getElementById('calibRpmInput');
     const rpmRange = document.getElementById('calibRpmRange');
     const dbaOut = document.getElementById('calibDBA');
+    const dbaFitOut = document.getElementById('calibDBAFit');
+    const dbaDiffOut = document.getElementById('calibDBADiff');
+
     rpmInput.min = Math.floor(rpmMin); rpmInput.max = Math.ceil(rpmMax); rpmInput.step='1';
     rpmRange.min = rpmInput.min; rpmRange.max = rpmInput.max; rpmRange.step='1';
 
-    // 2) 解决初始渲染收缩成一条线：绑定 ResizeObserver，并在多帧触发 resize
-    (function attachAutoResize() {
-      try {
-        const ro = new ResizeObserver(() => { ec && ec.resize(); });
-        ro.observe(el);
-        if (el.parentElement) ro.observe(el.parentElement);
-      } catch(e) { /* 某些旧浏览器无 ResizeObserver 时忽略 */ }
-      const kick = () => { ec && ec.resize(); };
-      requestAnimationFrame(kick);
-      setTimeout(kick, 50);
-      setTimeout(kick, 200);
-      window.addEventListener('orientationchange', kick);
-      window.addEventListener('pageshow', kick);
-    })();
+    // 预计算带边
+    const npo = model?.calibration?.n_per_oct || 12;
+    const {f1, f2} = bandEdgesFromCenters(centers, npo);
 
-    // 3) render(rpm) 中固定 y 轴范围：min=0，max 使用 yMaxGlobal（不随滑块变化）
     function render(rpm){
-      const spec = spectrumAtRPMRaw(model, rpm).map(([f,y])=>[f, (y!=null? Math.max(0,y): null)]);
-      const valid = spec.filter(([,y])=>y!=null);
+      // 1) 基线（dB → 能量）
+      const specRaw = spectrumAtRPMRaw(model, rpm);
+      const Es = specRaw.map(([,y]) => (y!=null && Number.isFinite(y)) ? Math.pow(10, y/10) : 0.0); // 以 P0^2 为 1
+
+      // 2) 谐波注入
+      const harm = model?.calibration?.harmonics || {};
+      if (harm && harm.n_blade>0) {
+        const nBlade = Number(harm.n_blade)||0;
+        const sigmaB = Number(harm?.kernel?.sigma_bands)||0.25;
+        const topk = Number(harm?.kernel?.topk)||3;
+        const bpf = nBlade * (Number(rpm)/60.0);
+        for (const item of (harm.models||[])) {
+          const mdl = item?.amp_pchip_db; const h = Number(item?.h)||0;
+          if (!mdl || !h) continue;
+          const Lh = evalPchip(mdl, Number(rpm));
+          if (!Number.isFinite(Lh)) continue;
+          const Eh = Math.pow(10, Lh/10); // 仍以 P0^2 为 1
+          const fLine = h * bpf;
+          for (const [k,w] of distributeLineToBands(fLine, centers, f1, f2, sigmaB, topk)) {
+            Es[k] += Eh * w;
+          }
+        }
+      }
+
+      // 3) 动态闭合（精准对齐拟合 LAeq）
+      const laSynth = (Es.reduce((a,b)=>a+b,0) > 0) ? 10*Math.log10(Es.reduce((a,b)=>a+b,0)) : null;
+      const laFit = laeqFromCalibModel(model, rpm);
+      let delta = 0;
+      if (laSynth!=null && laFit!=null) {
+        delta = laFit - laSynth;
+      }
+      const scale = Math.pow(10, delta/10);
+      const specClosed = specRaw.map(([f,y], i) => {
+        const E = Es[i]*scale;
+        return [f, (E>0 ? 10*Math.log10(E) : null)];
+      });
+
+      const valid = specClosed.filter(([,y])=>y!=null);
       const opt = {
         backgroundColor:'transparent', animation:false,
         title:{ text:`Spectrum @ ${Math.round(rpm)} RPM`, left:'center', top:6 },
@@ -157,9 +227,9 @@ CalibPreview.show = async function({ mount, batchId }){
           type:'log', logBase:10, min:xMin, max:xMax, name:'Hz', nameLocation:'middle', nameGap:28,
           axisLabel:{ formatter:(v)=>formatHz(v) }, minorTick:{show:true}, minorSplitLine:{show:true}
         },
-        yAxis:{ type:'value', min:0, max:yMaxGlobal, name:'dB' }, // 固定纵轴上限
+        yAxis:{ type:'value', min:0, max:yMaxGlobal, name:'dB' },
         series:[
-          { name:'spectrum', type:'line', showSymbol:false, connectNulls:true, lineStyle:{ width:2.0, color:'#2563eb' }, data: spec },
+          { name:'spectrum', type:'line', showSymbol:false, connectNulls:true, lineStyle:{ width:2.0, color:'#2563eb' }, data: specClosed },
           { name:'points', type:'scatter', symbolSize:4, itemStyle:{ color:'#2563eb' }, data: valid }
         ],
         tooltip:{
@@ -167,10 +237,15 @@ CalibPreview.show = async function({ mount, batchId }){
           formatter:(p)=>{ const pt = Array.isArray(p)? p.find(x=>x.seriesName==='spectrum'):p; if(!pt) return ''; const f=pt.value?.[0], y=pt.value?.[1]; return `${formatHz(f)} Hz<br/>${(y!=null)? y.toFixed(2) : '-' } dB`; }
         }
       };
-      ec.setOption(opt, true);
-      ec.resize(); // 防止第一次 setOption 后仍未铺满
-      const la = levelFromSpectrum(spec);
-      dbaOut.value = (la!=null)? `${la.toFixed(2)} dBA` : '-';
+      const laSynthClosed = levelFromSpectrum(specClosed);
+      dbaOut.value   = (laSynthClosed!=null)? `${laSynthClosed.toFixed(2)} dBA` : '-';
+      dbaFitOut.value = (laFit!=null)? `${laFit.toFixed(2)} dBA` : '-';
+      const diff = (laSynthClosed!=null && laFit!=null)? (laSynthClosed - laFit) : null;
+      dbaDiffOut.value = (diff!=null)? `${(diff>=0?'+':'')}${diff.toFixed(2)} dB` : '-';
+      dbaDiffOut.style.color = (diff!=null && Math.abs(diff)>0.1) ? '#b91c1c' : '';
+
+      const ec = echarts.getInstanceByDom(document.getElementById('calibChart'));
+      ec.setOption(opt, true); ec.resize();
     }
 
     function setRPM(v){
@@ -180,12 +255,21 @@ CalibPreview.show = async function({ mount, batchId }){
       render(rpm);
     }
 
+    // 自适应 resize
+    (function attachAutoResize() {
+      const el = document.getElementById('calibChart');
+      try { const ro = new ResizeObserver(() => { const ec = echarts.getInstanceByDom(el); ec && ec.resize(); }); ro.observe(el); if (el.parentElement) ro.observe(el.parentElement); } catch(e) {}
+      const kick = () => { const ec = echarts.getInstanceByDom(el); ec && ec.resize(); };
+      requestAnimationFrame(kick); setTimeout(kick, 50); setTimeout(kick, 200);
+      window.addEventListener('orientationchange', kick); window.addEventListener('pageshow', kick);
+      window.addEventListener('resize', kick, { passive:true });
+    })();
+
     rpmInput.addEventListener('input', ()=> setRPM(rpmInput.value));
     rpmInput.addEventListener('change', ()=> setRPM(rpmInput.value));
     rpmRange.addEventListener('input', ()=> setRPM(rpmRange.value));
 
     setRPM(Math.round((rpmMin+rpmMax)/2));
-    window.addEventListener('resize', ()=> ec && ec.resize(), { passive:true });
   };
 
   window.CalibPreview = CalibPreview;
