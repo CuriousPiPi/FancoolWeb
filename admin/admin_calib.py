@@ -19,12 +19,16 @@ from sqlalchemy import text
 try:
     from app.curves import spectrum_cache
     from app.curves.pchip_cache import curve_cache_dir
+    # 复用统一实现：默认参数与模型 hash
+    from app.curves.spectrum_builder import load_default_params as sb_load_default_params, _calc_model_hash as sb_calc_model_hash
 except Exception:
     CURVES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '../app/curves'))
     if CURVES_DIR not in sys.path:
         sys.path.append(CURVES_DIR)
     import spectrum_cache  # type: ignore
     from pchip_cache import curve_cache_dir  # type: ignore
+    # 回退导入（同目录）
+    from spectrum_builder import load_default_params as sb_load_default_params, _calc_model_hash as sb_calc_model_hash  # type: ignore
 
 calib_admin_bp = Blueprint('calib_admin', __name__)
 
@@ -203,33 +207,12 @@ def _scan_extracted(root_dir: str) -> Tuple[List[Dict[str, Any]], str]:
     triples.sort()
     return files, _sha1_str('\n'.join(triples))
 
-def _load_params() -> Dict[str, Any]:
-    try:
-        with _engine().begin() as conn:
-            row = conn.execute(text("SELECT params_json FROM calibration_params WHERE is_default=1 ORDER BY updated_at DESC LIMIT 1")).fetchone()
-            if row:
-                val = row._mapping.get('params_json')
-                if isinstance(val, dict): return val
-                if isinstance(val, str) and val.strip():
-                    try: return json.loads(val)
-                    except Exception: pass
-    except Exception: pass
-    env_json = os.getenv('CALIB_PARAMS_JSON')
-    if env_json:
-        try: return json.loads(env_json)
-        except Exception: pass
-    return {
-        "env_agg_per_frame": 40, "env_agg_per_band": 30, "env_mad_pre_band": True, "env_smooth_bands": 0,
-        "meas_agg_per_frame": 40, "meas_agg_per_band": 100, "meas_mad_pre_band": True, "mad_tau": 3.0,
-        "snr_ratio_min": 1.0, "trim_head_sec": 0.5, "trim_tail_sec": 0.5, "highpass_hz": 20,
-        "n_per_oct": 24, "fmin_hz": 20, "fmax_hz": 20000, "frame_sec": 0.5, "hop_sec": 0.25,
-        "band_grid": "iec-decimal", "perfile_median": False
-    }
-
 def _run_inproc_and_collect(work_dir: str, params: Dict[str, Any], model_id: int, condition_id: int) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    CURVES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '../app'))
+    if CURVES_DIR not in sys.path:
+        sys.path.append(CURVES_DIR)
     from audio_calib.pipeline import run_calibration_and_model as _rcm
-    run_calibration_and_model = _rcm
-    model, rows = run_calibration_and_model(work_dir, params, out_dir=None, model_id=model_id, condition_id=condition_id)
+    model, rows = _rcm(work_dir, params, out_dir=None, model_id=model_id, condition_id=condition_id)
     return model, rows
 
 @calib_admin_bp.post('/admin/api/calib/upload_zip')
@@ -307,8 +290,8 @@ def api_calib_upload_zip():
                           b.condition_id, c.condition_name_zh,
                           b.perf_batch_id, b.created_at
                         FROM perf_audio_binding b
-                        LEFT JOIN fan_model m ON m.model_id = b.model_id
-                        LEFT JOIN working_condition c ON c.condition_id = b.condition_id
+                        LEFT JOIN fan_model m ON m.model_id
+                        LEFT JOIN working_condition c ON c.condition_id
                         WHERE b.audio_batch_id = :ab
                         ORDER BY b.created_at DESC
                     """), {'ab': exist_abid}).fetchall()
@@ -358,7 +341,7 @@ def api_calib_upload_zip():
         pass
 
     # 首次上传音频：照常运行一次 pipeline，并写入 audio_batch / calib_run / report
-    params = _load_params()
+    params = sb_load_default_params()
     param_hash = hashlib.sha1(json.dumps(params, sort_keys=True, separators=(',',':')).encode('utf-8')).hexdigest()
 
     try:
@@ -413,12 +396,8 @@ def _insert_audio_files(conn, batch_id: str, files: List[Dict[str, Any]]):
             VALUES (:bid,:rpm,:tp,:rp,:sz,:sh)
         """), {'bid': batch_id, 'rpm': int(f['rpm']), 'tp': f['file_type'], 'rp': f['rel_path'], 'sz': int(f['size_bytes']), 'sh': f['sha256']})
 
-def _calc_model_hash(data_hash: str, param_hash: str, code_ver: str|None) -> str:
-    s = f"dh={data_hash}|ph={param_hash}|cv={code_ver or ''}"
-    return hashlib.sha1(s.encode('utf-8')).hexdigest()
-
 def _insert_calib_run(conn, *, batch_id: str, params_json: Dict[str, Any], param_hash: str, data_hash: str, preview_model_json: Dict[str, Any] | None) -> int:
-    model_hash = _calc_model_hash(data_hash, param_hash, CODE_VERSION or None)
+    model_hash = sb_calc_model_hash(data_hash, param_hash, CODE_VERSION or None)
     conn.execute(text("""
         INSERT INTO calib_run (batch_id, param_hash, params_json, data_hash, model_hash, code_version, status, preview_model_json, created_at, finished_at)
         VALUES (:bid,:ph,:pj,:dh,:mh,:ver,'done',NULL, NOW(), NOW())
@@ -566,7 +545,7 @@ def api_calib_preview():
         mid = int(row._mapping['model_id']); cid = int(row._mapping['condition_id'])
 
     try:
-        params = _load_params()
+        params = sb_load_default_params()
         model_json, _rows = _run_inproc_and_collect(base_path, params, mid, cid)
     except Exception as e:
         return resp_err('CALIB_FAIL', f'预览生成失败: {e}', 500)
@@ -750,7 +729,7 @@ def api_bind_model_to_perf():
         })
 
     # 预热：读取当前默认参数，计算 param_hash/code_version
-    params = _load_params()
+    params = sb_load_default_params()
     param_hash = hashlib.sha1(json.dumps(params, sort_keys=True, separators=(',',':')).encode('utf-8')).hexdigest()
     code_ver = CODE_VERSION or ''
 

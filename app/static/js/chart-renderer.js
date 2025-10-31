@@ -290,10 +290,20 @@ function mount(rootEl) {
     document.documentElement.setAttribute('data-theme', initialTheme);
   }
 
-  // 首次挂载时渲染空数据状态（沿用 initialTheme）
+  // 修改点：只有在“没有任何选中项”时才渲染空态，避免切换视图时闪一下空占位
   if (!chart) return;
-  const emptyPayload = { chartData: { series: [] }, theme: initialTheme };
-  render(emptyPayload);
+  let hasSelection = false;
+  try {
+    hasSelection = !!(window.LocalState
+      && typeof window.LocalState.getSelectionPairs === 'function'
+      && window.LocalState.getSelectionPairs().length > 0);
+  } catch(_) {}
+
+  if (!hasSelection) {
+    const emptyPayload = { chartData: { series: [] }, theme: initialTheme };
+    render(emptyPayload);
+  }
+  // 如果有选中项，不渲染空态，占位，等待 refreshChartFromLocal 带来真实数据
 }
 
 function setTheme(theme) {
@@ -808,8 +818,8 @@ function setTheme(theme) {
         <div class="switch-container" id="xAxisSwitchContainer">
           <div class="switch-track" id="xAxisSwitchTrack">
             <div class="switch-slider" id="xAxisSwitchSlider">
-              <!--<span class="switch-label switch-label-right">转速</span>-->
-              <!--<span class="switch-label switch-label-left">噪音</span>-->
+              <span class="switch-label switch-label-right">转速</span>
+              <span class="switch-label switch-label-left">噪音</span>
             </div>
           </div>
         </div>`;

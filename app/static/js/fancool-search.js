@@ -772,15 +772,32 @@ function initModelCascade(){
 
         const addedSummary = window.LocalState.addPairs(pairs);
         has.toast && window.hideLoading('op');
+
         if (addedSummary.added>0){
-          has.toast && window.showSuccess(`新增 ${addedSummary.added} 组`);
+          // 成功提示：若在频谱视图且有重建中的 key，则不弹成功提示
+          const addedKeys = (addedSummary.addedDetails || []).map(d => `${d.model_id}_${d.condition_id}`);
+          if (typeof window.scheduleConditionalSuccessToast === 'function') {
+            window.scheduleConditionalSuccessToast(addedKeys, `新增 ${addedSummary.added} 组`);
+          } else {
+            has.toast && window.showSuccess(`新增 ${addedSummary.added} 组`);
+          }
+
           if (typeof window.rebuildSelectedFans === 'function') window.rebuildSelectedFans(window.LocalState.getSelected());
           if (typeof window.ensureLikeStatusBatch === 'function')
             window.ensureLikeStatusBatch(addedSummary.addedDetails.map(d => ({ model_id: d.model_id, condition_id: d.condition_id })));
           window.__APP?.features?.recentlyRemoved?.rebuild?.(window.LocalState.getRecentlyRemoved());
           typeof window.syncQuickActionButtons === 'function' && window.syncQuickActionButtons();
           typeof window.applySidebarColors === 'function' && window.applySidebarColors();
-          typeof window.refreshChartFromLocal === 'function' && window.refreshChartFromLocal(false);
+
+          // 关键修改：改为按“当前视图”刷新（频谱视图下会拉取 /api/spectrum-models 并渲染频谱）
+          if (typeof window.refreshActiveChartFromLocalDebounced === 'function') {
+            window.refreshActiveChartFromLocalDebounced(false);
+          } else if (typeof window.refreshActiveChartFromLocal === 'function') {
+            window.refreshActiveChartFromLocal(false);
+          } else if (typeof window.refreshChartFromLocal === 'function') {
+            window.refreshChartFromLocal(false);
+          }
+
           window.__APP?.sidebar?.maybeAutoOpenSidebarOnAdd && window.__APP.sidebar.maybeAutoOpenSidebarOnAdd();
         } else {
           has.toast && window.showInfo('全部已存在，无新增');

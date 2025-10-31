@@ -8,6 +8,38 @@ const PERIODIC_VERIFY_INTERVAL_MS = 3 * 60 * 1000;    // 3 分钟后台触发一
 const LIKE_FULL_FETCH_THRESHOLD = 20;
 let lastSpectrumData = null;
 
+// 新增：频谱状态缓存 + 轮询定时器（防重复提示与轻量轮询）
+const SpectrumStatus = {
+  map: new Map(), // key -> 'ok'|'missing'|'rebuilding'
+  set(key, status) { const prev = this.map.get(key); this.map.set(key, status); return prev; },
+  get(key) { return this.map.get(key); },
+  clear(){ this.map.clear(); }
+};
+let spectrumRebuildPollTimer = null;
+
+window.SpectrumStatus = SpectrumStatus;
+
+// 新增：条件式成功提示（仅当“当前视图=频谱视图”且这些 key 不在重建中，才弹成功提示）
+function scheduleConditionalSuccessToast(keys, message){
+  try {
+    const active = window.ChartHostManager?.getActive?.() || 'curves';
+    // 非频谱视图：直接提示
+    if (active !== 'spectrum') { showSuccess(message); return; }
+
+    // 频谱视图：延迟少许等待 /api/spectrum-models 回来并更新 SpectrumStatus
+    setTimeout(() => {
+      const hasRebuild = Array.isArray(keys) && keys.some(k => window.SpectrumStatus?.get(k) === 'rebuilding');
+      if (!hasRebuild) showSuccess(message); // 没有重建，才提示“已添加/已恢复”
+    }, 350);
+  } catch(_){
+    // 任意异常兜底正常提示，避免静默
+    showSuccess(message);
+  }
+}
+// 导出给其它模块使用
+window.scheduleConditionalSuccessToast = scheduleConditionalSuccessToast;
+
+
 /* 在最前阶段就写入上限标签，避免闪烁 */
 (function initMaxItemsLabel(){
   function apply(){
@@ -1494,7 +1526,8 @@ const quickRemove = safeClosest(e.target, '.js-list-remove');
         window.refreshActiveChartFromLocalDebounced(false);   // 改这里
 
         hideLoading('op');
-        showSuccess(`新增 ${addedSummary.added} 组`);
+        const addedKeys = (addedSummary.addedDetails || []).map(d => `${d.model_id}_${d.condition_id}`);
+        scheduleConditionalSuccessToast(addedKeys, `新增 ${addedSummary.added} 组`);
         window.__APP.sidebar.maybeAutoOpenSidebarOnAdd && window.__APP.sidebar.maybeAutoOpenSidebarOnAdd();
 
         const addType = btn.dataset.addType || '';
@@ -2408,21 +2441,24 @@ async function logNewPairs(addedDetails, source = 'unknown') {
   await window.Analytics.logQueryPairs(source, pairs);
 }
 
-// 替换 refreshSpectrumDynamicFromLocal：补充 missing 提示 + 保持“频谱视图立即可见”
+// 用下面版本替换现有的 refreshSpectrumDynamicFromLocal 函数
 async function refreshSpectrumDynamicFromLocal(showToast=false){
   const pairs = LocalState.getSelectionPairs();
   const theme = currentThemeStr();
 
+  // 没有选中 → 空态渲染 + 清状态
   if (!pairs.length) {
     lastSpectrumData = { modelsByKey: {} };
+    SpectrumStatus.clear();
     const payload = { chartData: lastSpectrumData, theme, chartBg: getChartBg() };
     window.ChartHostManager?.render?.(payload);
     window.SpectrumRenderer?.render?.({ chartData: lastSpectrumData, theme });
+    if (spectrumRebuildPollTimer){ clearTimeout(spectrumRebuildPollTimer); spectrumRebuildPollTimer = null; }
     return;
   }
 
   try {
-    // 预取显示元信息，供 legend 与缺失提示
+    // 预取显示元信息（用于提示文案/legend）
     const metaItems = await fetchMetaForPairs(pairs);
     if (metaItems?.length) DisplayCache.setFromMeta(metaItems);
 
@@ -2434,11 +2470,15 @@ async function refreshSpectrumDynamicFromLocal(showToast=false){
     const n = normalizeApiResponse(j);
     if (!n.ok){ showError(n.error_message || '获取频谱模型失败'); return; }
 
+    // 1) 组装可渲染数据
     const modelsByKey = {};
-    for (const item of (n.data.models || [])) {
+    const okKeys = new Set();
+    for (const item of (n.data?.models || [])) {
       const key = `${item.model_id}_${item.condition_id}`;
+      okKeys.add(key);
       const info = DisplayCache.get(item.model_id, item.condition_id) || {};
       const name = `${info.brand||''} ${info.model||''} - ${info.condition||''}`.trim() || key;
+
       modelsByKey[key] = {
         name,
         color: ColorManager.getColor(key),
@@ -2449,32 +2489,70 @@ async function refreshSpectrumDynamicFromLocal(showToast=false){
       };
     }
 
-    // 缺失项提示
+    // 2) 状态提示（仅在“状态变化”时提示一次）
     const missing = Array.isArray(n.data?.missing) ? n.data.missing : [];
+    const rebuilding = Array.isArray(n.data?.rebuilding) ? n.data.rebuilding : [];
+
+    // 更新 OK 状态（不提示）
+    okKeys.forEach(k => SpectrumStatus.set(k, 'ok'));
+
+    // missing 提示（仅状态变化）
     if (missing.length > 0) {
-      if (missing.length === 1) {
-        const miss = missing[0];
-        const meta = DisplayCache.get(miss.model_id, miss.condition_id);
-        if (meta) {
-          showInfo(`该组数据尚无噪音频谱：${meta.brand} ${meta.model} - ${meta.condition}`);
+      const changedList = [];
+      for (const miss of missing) {
+        const key = `${miss.model_id}_${miss.condition_id}`;
+        const prev = SpectrumStatus.set(key, 'missing');
+        if (prev !== 'missing') changedList.push(miss);
+      }
+      if (changedList.length > 0) {
+        if (changedList.length === 1) {
+          const miss = changedList[0];
+          const meta = DisplayCache.get(miss.model_id, miss.condition_id);
+          if (meta) showInfo(`该组数据尚无噪音频谱：${meta.brand} ${meta.model} - ${meta.condition}`);
+          else showInfo('该组数据尚无噪音频谱');
         } else {
-          showInfo('该组数据尚无噪音频谱');
+          showInfo(`${changedList.length} 组数据尚无噪音频谱`);
         }
-      } else {
-        showInfo(`${missing.length} 组数据尚无噪音频谱`);
       }
     }
 
+    // rebuilding 提示（仅状态变化）
+    let needPoll = false;
+    if (rebuilding.length > 0) {
+      let changedCount = 0;
+      for (const rb of rebuilding) {
+        const key = `${rb.model_id}_${rb.condition_id}`;
+        const prev = SpectrumStatus.set(key, 'rebuilding');
+        if (prev !== 'rebuilding') changedCount++;
+      }
+      if (changedCount > 0) {
+        const msg = (changedCount === 1) ? '频谱生成中，请稍后…' : `${changedCount} 组频谱正在生成，请稍后…`;
+        // 固定 id，避免叠加重复；autoClose=5000ms
+        createToast(msg, 'info', { id: 'spectrum_rebuilding', autoClose: 5000 });
+      }
+      needPoll = true;
+    }
+
+    // 3) 渲染
     lastSpectrumData = { modelsByKey };
     const payload = { chartData: lastSpectrumData, theme, chartBg: getChartBg() };
     window.ChartHostManager?.render?.(payload);
-
-    // 当前视图为频谱 → 直接渲染，确保“添加后无需切换即可显示”
     if ((window.ChartHostManager?.getActive?.() || 'curves') === 'spectrum') {
       window.SpectrumRenderer?.render?.({ chartData: lastSpectrumData, theme });
     }
-
     if (showToast) showSuccess('已加载频谱模型');
+
+    // 4) 轮询（如果仍有正在重建的 pair）
+    if (needPoll) {
+      if (spectrumRebuildPollTimer) clearTimeout(spectrumRebuildPollTimer);
+      spectrumRebuildPollTimer = setTimeout(() => {
+        // 继续用同一函数自我刷新；提示由状态变化控制，不会重复弹
+        refreshSpectrumDynamicFromLocal(false);
+      }, 3000);
+    } else if (spectrumRebuildPollTimer) {
+      clearTimeout(spectrumRebuildPollTimer);
+      spectrumRebuildPollTimer = null;
+    }
   } catch(e){
     showError('频谱模型请求异常: '+e.message);
   }

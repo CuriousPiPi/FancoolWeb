@@ -101,7 +101,13 @@ function rebuild(list){
       const result = window.LocalState?.restoreKey?.(fanKey);
       if (result && result.ok){
         try { await (window.logNewPairs?.([ result.item ], 'recover') || Promise.resolve()); } catch(_){}
-        if (typeof window.showSuccess === 'function') window.showSuccess('已恢复');
+        if (typeof window.scheduleConditionalSuccessToast === 'function') {
+          const k = `${result.item.model_id}_${result.item.condition_id}`;
+          window.scheduleConditionalSuccessToast([k], '已恢复');
+        } else if (typeof window.showSuccess === 'function') {
+          // 兜底：若新函数不可用，仍保持原行为
+          window.showSuccess('已恢复');
+        }
 
         if (typeof window.rebuildSelectedFans === 'function') window.rebuildSelectedFans(window.LocalState?.getSelected?.());
         if (typeof window.ensureLikeStatusBatch === 'function') window.ensureLikeStatusBatch([{ model_id: result.item.model_id, condition_id: result.item.condition_id }]);

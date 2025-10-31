@@ -15,9 +15,14 @@ from flask import Flask, request, render_template, session, jsonify, g, make_res
 from sqlalchemy import create_engine, text
 from user_agents import parse as parse_ua
 from werkzeug.middleware.proxy_fix import ProxyFix
-from curves.spectrum_cache import load as load_spectrum  # 放在文件顶部其他 import 之后
 
+from curves.spectrum_cache import load as load_spectrum  # 放在文件顶部其他 import 之后
 from curves.pchip_cache import get_or_build_pchip, eval_pchip
+from curves import spectrum_cache
+from curves.spectrum_builder import load_default_params, compute_param_hash, schedule_rebuild
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+CODE_VERSION = os.getenv('CODE_VERSION', '')
 
 # =========================================
 # App / Config
@@ -26,31 +31,17 @@ from logging.config import dictConfig
 
 dictConfig({
     'version': 1,
-    'disable_existing_loggers': False,  # 不屏蔽第三方库，但我们会单独降级它们
-    'formatters': {
-        'default': {
-            'format': '[%(asctime)s] %(levelname)s in %(name)s: %(message)s',
-        },
-    },
-    'handlers': {
-        'wsgi': {
-            'class': 'logging.StreamHandler',
-            'stream': 'ext://sys.stdout',
-            'formatter': 'default',
-        },
-    },
-    # 根 logger：WARNING（抑制 INFO/DEBUG）
-    'root': {
-        'level': 'WARNING',
-        'handlers': ['wsgi']
-    },
+    'disable_existing_loggers': False,
+    'formatters': { 'default': { 'format': '[%(asctime)s] %(levelname)s in %(name)s: %(message)s' } },
+    'handlers': { 'wsgi': { 'class': 'logging.StreamHandler', 'stream': 'ext://sys.stdout', 'formatter': 'default' } },
+    'root': { 'level': 'WARNING', 'handlers': ['wsgi'] },
     'loggers': {
-        # Flask/werkzeug 的请求日志
         'werkzeug': {'level': 'WARNING', 'propagate': True},
-        # SQLAlchemy 引擎与连接池（避免打印 SQL/连接池 INFO）
         'sqlalchemy.engine': {'level': 'WARNING', 'propagate': False},
         'sqlalchemy.pool': {'level': 'WARNING', 'propagate': False},
-        # 如果有其他 noisy 的库，也可在此降级
+        # 新增：打开我们模块的 INFO 级别日志，便于排查
+        'curves.spectrum_builder': {'level': 'INFO', 'propagate': True},
+        'fancoolserver.spectrum': {'level': 'INFO', 'propagate': True}
     }
 })
 
@@ -58,7 +49,9 @@ app = Flask(__name__)
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 app.secret_key = os.getenv('APP_SECRET', 'replace-me-in-prod')
 app.config['SESSION_COOKIE_SECURE'] = os.getenv('SESSION_COOKIE_SECURE', '0') == '1'
-app.logger.setLevel('WARNING')
+app.logger.setLevel('INFO')
+
+slog = logging.getLogger('fancoolserver.spectrum')
 
 #app.config['TEMPLATES_AUTO_RELOAD'] = True      #生产环境注释这行
 #app.jinja_env.auto_reload = True                #生产环境注释这行
@@ -1450,13 +1443,13 @@ def api_recent_updates():
 @app.post('/api/spectrum-models')
 def api_spectrum_models():
     """
-    返回频谱动态模型的必要字段，供前端本地插值：
-      - centers_hz
-      - band_models_pchip（每频带的 PCHIP：x, y, m, x0, x1）
-      - rpm_min / rpm_max（若无则从 calibration.calib_model.x0/x1 兜底）
-      - calibration（仅保留 rpm_peak 等必要信息）
-      - anchor_presence
-    不返回调试用途的模型摘要/信息浮层字段。
+    修改要点：
+      - 对每个 (model_id, condition_id) 先校验磁盘缓存 meta 与当前 param_hash/code_version/audio_data_hash 是否一致；
+      - 若一致：返回瘦身后的 model（原行为）；
+      - 若不一致：检查 perf_audio_binding 是否存在绑定音频：
+          * 若无绑定：将该 pair 标记为 missing（客户端展示“该组数据暂无噪声频谱”）
+          * 若有绑定：触发异步重建 schedule_rebuild(...)；短等待 5 秒尝试获取结果，超时则把该 pair 标记为 rebuilding（客户端展示“频谱重建中，请稍后再试”）
+      - 不把 meta 返回给前端（按要求）。
     """
     try:
         data = request.get_json(force=True, silent=True) or {}
@@ -1471,43 +1464,121 @@ def api_spectrum_models():
             if t in seen: continue
             seen.add(t); uniq.append(t)
         if not uniq:
-            return resp_ok({'models': [], 'missing': []})
+            return resp_ok({'models': [], 'missing': [], 'rebuilding': []})
 
-        models = []
-        missing = []
+        params = load_default_params()
+        param_hash = compute_param_hash(params)
+        code_ver = CODE_VERSION or ''
+
+        models, missing, rebuilding = [], [], []
+        eng = engine
+
         for mid, cid in uniq:
-            j = load_spectrum(mid, cid)
-            if not j or not isinstance(j, dict):
-                missing.append({'model_id': mid, 'condition_id': cid})
+            # 尝试读取现有缓存
+            j = spectrum_cache.load(mid, cid)
+            cur_meta = (j.get('meta') if isinstance(j, dict) else {}) or {}
+            cur_model_raw = (j.get('model') if isinstance(j, dict) else {}) or {}
+            slog.info("[/api/spectrum-models] pair=(%s,%s) cache_exists=%s", mid, cid, bool(j))
+
+            # 查绑定
+            with eng.begin() as conn:
+                row = conn.execute(text("""
+                    SELECT audio_batch_id, audio_data_hash, perf_batch_id
+                    FROM perf_audio_binding
+                    WHERE model_id=:m AND condition_id=:c
+                    ORDER BY created_at DESC LIMIT 1
+                """), {'m': mid, 'c': cid}).fetchone()
+                binding = row._mapping if row else None
+            if not binding:
+                slog.info("  no binding found → missing(no_audio_bound)")
+            else:
+                slog.info("  binding found: audio_batch_id=%s perf_batch_id=%s", binding.get('audio_batch_id'), binding.get('perf_batch_id'))
+
+            # 一致性校验
+            cached_ok = False
+            if cur_meta:
+                meta_param = str(cur_meta.get('param_hash') or '')
+                meta_code = str(cur_meta.get('code_version') or '')
+                meta_audio = str(cur_meta.get('audio_data_hash') or '')
+                bind_audio = (binding.get('audio_data_hash') or '') if binding else ''
+                expected_audio_hash = bind_audio or meta_audio
+                cached_ok = (meta_param == param_hash and meta_code == code_ver and meta_audio == expected_audio_hash and bool(cur_model_raw))
+                slog.info("  check cache: meta_param=%s cur_param=%s meta_code=%s cur_code=%s meta_audio=%s expect_audio=%s -> ok=%s",
+                          meta_param, param_hash, meta_code, code_ver, meta_audio, expected_audio_hash, cached_ok)
+
+            if cached_ok:
+                # 瘦身输出
+                m = cur_model_raw
+                calib = m.get('calibration') or {}
+                calib_model = calib.get('calib_model') or {}
+                slim = {
+                    'version': m.get('version'),
+                    'centers_hz': m.get('centers_hz') or m.get('freq_hz') or m.get('freq') or [],
+                    'band_models_pchip': m.get('band_models_pchip') or [],
+                    'rpm_min': m.get('rpm_min') or calib_model.get('x0'),
+                    'rpm_max': m.get('rpm_max') or calib_model.get('x1'),
+                    'calibration': {
+                        'rpm_peak': calib.get('rpm_peak'),
+                        'rpm_peak_tol': calib.get('rpm_peak_tol'),
+                        'session_delta_db': calib.get('session_delta_db'),
+                    },
+                    'anchor_presence': m.get('anchor_presence') or {}
+                }
+                models.append({'key': f'{mid}_{cid}', 'model_id': mid, 'condition_id': cid, 'model': slim, 'type': j.get('type') or 'spectrum_v2'})
                 continue
 
-            m = (j.get('model') or {})
-            calib = m.get('calibration') or {}
-            calib_model = calib.get('calib_model') or {}
+            # 缓存不一致 → 重建或提示无绑定
+            if not binding:
+                missing.append({'model_id': mid, 'condition_id': cid, 'reason': 'no_audio_bound'})
+                continue
 
-            slim = {
-                'version': m.get('version'),
-                'centers_hz': m.get('centers_hz') or m.get('freq_hz') or m.get('freq') or [],
-                'band_models_pchip': m.get('band_models_pchip') or [],
-                'rpm_min': m.get('rpm_min') or calib_model.get('x0'),
-                'rpm_max': m.get('rpm_max') or calib_model.get('x1'),
-                'calibration': {
-                    'rpm_peak': calib.get('rpm_peak'),
-                    'rpm_peak_tol': calib.get('rpm_peak_tol'),
-                    'session_delta_db': calib.get('session_delta_db'),
-                },
-                'anchor_presence': m.get('anchor_presence') or {}
-            }
+            audio_batch_id = binding.get('audio_batch_id')
+            with eng.begin() as conn:
+                ab_row = conn.execute(text("SELECT base_path FROM audio_batch WHERE batch_id=:ab LIMIT 1"), {'ab': audio_batch_id}).fetchone()
+                base_path = ab_row._mapping.get('base_path') if ab_row else None
 
-            models.append({
-                'key': f'{mid}_{cid}',
-                'model_id': mid,
-                'condition_id': cid,
-                'model': slim,
-                'type': j.get('type') or 'spectrum_v2'
-            })
+            if not base_path:
+                slog.warning("  binding exists but audio base_path missing (batch_id=%s)", audio_batch_id)
+                missing.append({'model_id': mid, 'condition_id': cid, 'reason': 'audio_missing_on_disk'})
+                continue
 
-        return resp_ok({'models': models, 'missing': missing})
+            # 异步重建
+            slog.info("  scheduling rebuild mid=%s cid=%s batch=%s base_path=%s", mid, cid, audio_batch_id, base_path)
+            fut = schedule_rebuild(mid, cid, audio_batch_id, base_path, params, binding.get('perf_batch_id'))
+
+            # 快路径（最多 0.2 秒）：极少数很快完成的任务直接返回模型；否则立即标记 rebuilding
+            try:
+                res = fut.result(timeout=0.2)
+                slog.info("  rebuild quick result: %s", res)
+                if res and res.get('ok'):
+                    j2 = spectrum_cache.load(mid, cid) or {}
+                    m = (j2.get('model') or {})
+                    calib = m.get('calibration') or {}
+                    calib_model = calib.get('calib_model') or {}
+                    slim = {
+                        'version': m.get('version'),
+                        'centers_hz': m.get('centers_hz') or m.get('freq_hz') or m.get('freq') or [],
+                        'band_models_pchip': m.get('band_models_pchip') or [],
+                        'rpm_min': m.get('rpm_min') or calib_model.get('x0'),
+                        'rpm_max': m.get('rpm_max') or calib_model.get('x1'),
+                        'calibration': {
+                            'rpm_peak': calib.get('rpm_peak'),
+                            'rpm_peak_tol': calib.get('rpm_peak_tol'),
+                            'session_delta_db': calib.get('session_delta_db'),
+                        },
+                        'anchor_presence': m.get('anchor_presence') or {}
+                    }
+                    models.append({'key': f'{mid}_{cid}', 'model_id': mid, 'condition_id': cid, 'model': slim, 'type': j2.get('type') or 'spectrum_v2'})
+                else:
+                    rebuilding.append({'model_id': mid, 'condition_id': cid})
+            except FuturesTimeoutError:
+                slog.info("  rebuild queued (no wait) → mark rebuilding")
+                rebuilding.append({'model_id': mid, 'condition_id': cid})
+            except Exception as ex:
+                slog.exception("  rebuild scheduling/result error: %s", ex)
+                rebuilding.append({'model_id': mid, 'condition_id': cid})
+
+        return resp_ok({'models': models, 'missing': missing, 'rebuilding': rebuilding})
     except Exception as e:
         app.logger.exception(e)
         return resp_err('INTERNAL_ERROR', f'频谱模型接口异常: {e}', 500)
@@ -1518,4 +1589,4 @@ def api_spectrum_models():
 # =========================================
 if __name__ == '__main__':
     app.logger.setLevel(logging.INFO)
-    app.run(host='0.0.0.0', port=5001, debug=False, use_reloader=False)
+    app.run(host='0.0.0.0', port=5001, debug=True, use_reloader=False)
