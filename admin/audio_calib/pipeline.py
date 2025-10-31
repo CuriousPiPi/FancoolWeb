@@ -814,9 +814,9 @@ def build_model_from_calib_with_sweep_in_memory(root_dir: str,
     auto_widen_factor  = float(params.get('auto_widen_factor', 1.5))
 
     # 低频跨带均值平滑（仅影响“后处理谱”）
-    lowfreq_mean_smooth_below_hz = float(params.get('lowfreq_mean_smooth_below_hz', 100.0))
+    lowfreq_mean_smooth_below_hz = float(params.get('lowfreq_mean_smooth_below_hz', 60.0))
     lowfreq_mean_min_points      = int(params.get('lowfreq_mean_min_points', 16))
-    lowfreq_mean_max_span_bands  = int(params.get('lowfreq_mean_max_span_bands', 48))
+    lowfreq_mean_max_span_bands  = int(params.get('lowfreq_mean_max_span_bands', 32))
 
     # 分箱内“帧级下分位”与“环境能量地板”
     sweep_bin_qf_percent = float(params.get('sweep_bin_qf_percent', 60.0))

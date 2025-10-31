@@ -227,22 +227,8 @@ def _load_params() -> Dict[str, Any]:
     }
 
 def _run_inproc_and_collect(work_dir: str, params: Dict[str, Any], model_id: int, condition_id: int) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    try:
-        from admin.audio_calib.pipeline_old import run_calibration_and_model as _rcm
-        run_calibration_and_model = _rcm
-    except Exception:
-        try:
-            from .audio_calib.pipeline_old import run_calibration_and_model as _rcm
-            run_calibration_and_model = _rcm
-        except Exception:
-            audio_dir = os.path.join(APP_DIR, 'audio_calib')
-            import importlib.util
-            spec = importlib.util.spec_from_file_location("audio_calib_pipeline", os.path.join(audio_dir, "pipeline.py"))
-            if not spec or not spec.loader:
-                raise ImportError("cannot load audio_calib/pipeline.py")
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-            run_calibration_and_model = getattr(mod, 'run_calibration_and_model')
+    from audio_calib.pipeline import run_calibration_and_model as _rcm
+    run_calibration_and_model = _rcm
     model, rows = run_calibration_and_model(work_dir, params, out_dir=None, model_id=model_id, condition_id=condition_id)
     return model, rows
 
