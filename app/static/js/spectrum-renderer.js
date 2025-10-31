@@ -384,7 +384,7 @@ function updateRailLayout(t){
       };
     });
 
-    const titleText = `噪音频谱（dB/Hz） @ ${Math.round(dynRpm)} RPM`;
+    const titleText = `A 计权频带声级（dB） @ ${Math.round(dynRpm)} RPM`;
     const { grid, legend, titleTop } = buildLegendAndGrid(series, t, titleText);
 
     const opt = {
@@ -428,7 +428,7 @@ function updateRailLayout(t){
       },
       yAxis:[
         {
-          type:'value', name:'幅值(dB)', min:0, max:yMax,
+          type:'value', name:'声级(dB)', min:0, max:yMax,
           nameTextStyle:{ color:t.axisName, fontWeight:600, fontFamily:t.fontFamily },
           axisLabel:{ color:t.axisLabel, fontSize:12, fontFamily:t.fontFamily },
           axisLine:{ lineStyle:{ color:t.axisLine } },

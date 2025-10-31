@@ -841,10 +841,10 @@ def build_model_from_calib_in_memory(calib: Dict[str, Any],
 
     # 2) 谐波注入模型（参数可由环境变量调节）
     try:
-        n_blade_env = os.getenv("FAN_BLADE_COUNT", "7").strip()
-        n_blade = int(n_blade_env) if n_blade_env else 7
+        n_blade_env = os.getenv("FAN_BLADE_COUNT", "0").strip()
+        n_blade = int(n_blade_env) if n_blade_env else 0
     except Exception:
-        n_blade = 7
+        n_blade = 0
     try:
         hb_win = int(os.getenv("HARMONICS_BASELINE_WIN_BANDS", "3"))
     except Exception:
