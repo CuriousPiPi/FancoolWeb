@@ -141,7 +141,7 @@
 .fit-bubble{
   position: fixed !important;
   min-width: 320px;          /* 保底 */
-  max-width: min(480px, 92vw);
+  max-width: min(560px, 92vw);
   z-index: 220 !important;   /* 层级：低于 overlay 侧栏(300)，高于指针(200)、X轴(210) */
   visibility: hidden;
   max-height: 60vh;

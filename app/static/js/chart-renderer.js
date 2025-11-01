@@ -13,9 +13,14 @@
   let isFs = false;
 
   function getCssTransitionMs(){
-    // 改为复用 RendererBase 工具
-    return (window.RendererBase && RendererBase.utils.getCssTransitionMs())
-      || 300;
+    try {
+      const raw = getComputedStyle(document.documentElement).getPropertyValue('--transition-speed').trim();
+      if (!raw) return 300;
+      if (raw.endsWith('ms')) return Math.max(0, parseFloat(raw));
+      if (raw.endsWith('s'))  return Math.max(0, parseFloat(raw) * 1000);
+      const n = parseFloat(raw);
+      return Number.isFinite(n) ? n : 300;
+    } catch(_) { return 300; }
   }
   // NEW: 追踪 root 的几何变化（位置/尺寸），用于在容器“移动但不改变尺寸”时重放置拟合气泡
   let __lastRootRect = { left:0, top:0, width:0, height:0 };
@@ -290,20 +295,10 @@ function mount(rootEl) {
     document.documentElement.setAttribute('data-theme', initialTheme);
   }
 
-  // 修改点：只有在“没有任何选中项”时才渲染空态，避免切换视图时闪一下空占位
+  // 首次挂载时渲染空数据状态（沿用 initialTheme）
   if (!chart) return;
-  let hasSelection = false;
-  try {
-    hasSelection = !!(window.LocalState
-      && typeof window.LocalState.getSelectionPairs === 'function'
-      && window.LocalState.getSelectionPairs().length > 0);
-  } catch(_) {}
-
-  if (!hasSelection) {
-    const emptyPayload = { chartData: { series: [] }, theme: initialTheme };
-    render(emptyPayload);
-  }
-  // 如果有选中项，不渲染空态，占位，等待 refreshChartFromLocal 带来真实数据
+  const emptyPayload = { chartData: { series: [] }, theme: initialTheme };
+  render(emptyPayload);
 }
 
 function setTheme(theme) {
@@ -385,21 +380,29 @@ function setTheme(theme) {
   }
 
   function tokens(theme) {
-    // 改为复用 RendererBase 工具
-    return (window.RendererBase && RendererBase.utils.tokens(theme))
-      || {
-        fontFamily:'system-ui,-apple-system,"Segoe UI","Helvetica Neue","Microsoft YaHei",Arial,sans-serif',
-        axisLabel:'#4b5563', axisName:'#6b7280', axisLine:'#e5e7eb',
-        gridLine:'rgba(0,0,0,0.08)', tooltipBg:'rgba(255,255,255,0.98)',
-        tooltipBorder:'#e5e7eb', tooltipText:'#1f2937', tooltipShadow:'0 6px 20px rgba(0,0,0,0.12)',
-        pagerIcon:'#2563eb'
-      };
+    const dark = (theme||'').toLowerCase()==='dark';
+    return {
+      fontFamily:'system-ui,-apple-system,"Segoe UI","Helvetica Neue","Microsoft YaHei",Arial,sans-serif',
+      axisLabel: dark ? '#d1d5db' : '#4b5563',
+      axisName:  dark ? '#9ca3af' : '#6b7280',
+      axisLine:  dark ? '#374151' : '#e5e7eb',
+      gridLine:  dark ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.08)',
+      tooltipBg: dark ? 'var(--bg-bubble)' : 'rgba(255,255,255,0.98)',
+      tooltipBorder: dark ? '#374151' : '#e5e7eb',
+      tooltipText: dark ? '#f3f4f6' : '#1f2937',
+      tooltipShadow: dark ? '0 6px 20px rgba(0,0,0,0.35)' : '0 6px 20px rgba(0,0,0,0.12)',
+      pagerIcon: dark ? '#93c5fd' : '#2563eb'
+    };
   }
 
   function measureText(text, size, weight, family){
-    // 改为复用 RendererBase 工具
-    return (window.RendererBase && RendererBase.utils.measureText(text, size, weight, family))
-      || { width: 0, height: Number(size||14) };
+    const ctx = __textMeasureCtx;
+    ctx.font = `${String(weight||400)} ${Number(size||14)}px ${family||'sans-serif'}`;
+    const m = ctx.measureText(text || '');
+    const width = m.width || 0;
+    const ascent = (typeof m.actualBoundingBoxAscent === 'number') ? m.actualBoundingBoxAscent : size * 0.8;
+    const descent = (typeof m.actualBoundingBoxDescent === 'number') ? m.actualBoundingBoxDescent : size * 0.2;
+    return { width, height: ascent + descent };
   }
 
   const TITLE_GLUE = '  -  ';
@@ -505,8 +508,8 @@ function setTheme(theme) {
   }
 
   function getExportBg() {
-    // 改为复用 RendererBase 工具
-    return (window.RendererBase && RendererBase.utils.getExportBg()) || '#ffffff';
+    const bgBody = getComputedStyle(document.body).backgroundColor;
+    return bgBody && bgBody !== 'rgba(0, 0, 0, 0)' ? bgBody : '#ffffff';
   }
 
   function buildOption(payload) {
@@ -520,7 +523,8 @@ function setTheme(theme) {
     const bgNormal = isFs ? exportBg : 'transparent';
     const transitionMs = getCssTransitionMs();
 
-    if (!sList.length || (!showRawCurves && !showFitCurves)) {
+    // 改动：仅根据是否有数据判断“空状态”，不再受外部按钮控制
+    if (!sList.length) {
       toggleFitUI(false);
       return { 
         __empty:true,
@@ -566,24 +570,21 @@ function setTheme(theme) {
       return `{m1|${left||name}}`;
     }
 
-    // ========== 关键变更开始 ==========
+    // ========== 关键变更开始（保持与现有布局计算一致） ==========
     const isN = isNarrow;
 
-    // 估算“legend 实际占用宽度”（图标 + 间距 + 文本最长行），用于计算 grid.right
     let legendItemTextMaxW = 0;
     if (!isN) {
       const l1Size=13, l1Weight=600;
       const l2Size=11, l2Weight=500;
-      // Create a single offscreen canvas context for text measurement
       const canvas = document.createElement('canvas');
       const ctx = canvas.getContext('2d');
-      // Precompute font strings
       const l1Font = `${l1Weight} ${l1Size}px ${t.fontFamily}`;
       const l2Font = `${l2Weight} ${l2Size}px ${t.fontFamily}`;
       sList.forEach(s=>{
         const brand = s.brand || s.brand_name_zh || s.brand_name || '';
         const model = s.model || s.model_name || '';
-        const condition = s.condition_name_zh || s.condition || '';
+        const condition = s.condition || s.condition_name_zh || '';
         const line1 = [brand, model].filter(Boolean).join(' ') || (s.name || '');
         const line2 = condition || '';
         ctx.font = l1Font;
@@ -597,20 +598,16 @@ function setTheme(theme) {
       });
     }
 
-    // legend 图标与文字的间距估值
     const iconW = 18;
     const iconTextGap = 8;
-    const safety = 12; // 轻微安全冗余，避免测量误差
+    const safety = 12;
     const legendComputedW = !isN ? (iconW + iconTextGap + legendItemTextMaxW + safety) : 0;
 
-    // 桌面：legend 仍用 right 定位。绘图区右边距 = max(180, legend.right + legendComputedW + 10)
-    // 其中 10 为“绘图区右边”到“legend 左边”的固定间距
     const legendRightDesktop = 20; 
     const gridRightDesktop = !isN
       ? Math.max(180, legendRightDesktop + legendComputedW + 10)
-      : 20; // 窄屏仍保留原 20
+      : 20;
 
-    // 窄屏 bottom：在原有“随条目数增加”的基础上，不小于 80px
     const narrowBottomAuto = Math.min(320, 50 + (sList.length || 1) * 22);
     const gridBottom = isN ? Math.max(140, narrowBottomAuto) : 40;
     // ========== 关键变更结束 ==========
@@ -628,7 +625,7 @@ function setTheme(theme) {
     } : {
       type: 'scroll',
       orient: 'vertical',
-      right: legendRightDesktop,       // 仍用 right 定位
+      right: legendRightDesktop,
       top: gridTop,
       bottom: 10,
       itemWidth: 18, itemHeight: 10, itemGap: 16, align: 'auto',
@@ -645,7 +642,8 @@ function setTheme(theme) {
     } catch(_){}
 
     const finalSeries = [];
-    if (showRawCurves) built.series.forEach(s => finalSeries.push(s));
+    // 改动：原生曲线始终参与绘制（不再由外部控件控制）
+    built.series.forEach(s => finalSeries.push(s));
 
     if (showFitCurves) {
       ensureFitModels(sList, xMode);
@@ -695,7 +693,7 @@ function setTheme(theme) {
         title: !!document.fullscreenElement ? '退出全屏' : '全屏查看',
         icon: !!document.fullscreenElement
           ? 'path://M3 7v7h7M3 14l7-7M21 17v-7h-7M21 10l-7 7'
-          : 'path://M3 10v-7h7M3 3l7 7M21 14v7h-7M21 21l-7-7',
+          : 'path://M3 10v-7h7M3 3l7 7M21 14v7-7M21 21l-7-7',
         onclick: () => toggleFullscreen()
       }
     } : {
@@ -707,7 +705,7 @@ function setTheme(theme) {
         title: !!document.fullscreenElement ? '退出全屏' : '全屏查看',
         icon: !!document.fullscreenElement
           ? 'path://M3 7v7h7M3 14l7-7M21 17v-7h-7M21 10l-7 7'
-          : 'path://M3 10v-7h7M3 3l7 7M21 14v7h-7M21 21l-7-7',
+          : 'path://M3 10v-7h7M3 3l7 7M21 14v7-7M21 21l-7-7',
         onclick: () => toggleFullscreen()
       }
     };
@@ -723,11 +721,10 @@ function setTheme(theme) {
       animationDurationUpdate: transitionMs,
       animationEasingUpdate: 'cubicOut',
 
-      // 关键：右边距/底边距按新规则
       grid:{ left:40, right: gridRightDesktop, top: gridTop, bottom: gridBottom },
 
       title: { text: titleText, left: 'center', top: titleTop,
-        textStyle: { color: t.axisLabel, fontSize: 20, fontWeight: 600, fontFamily: t.fontFamily } },
+        textStyle: { color: t.axisLabel, fontSize: 20, fontWeight: 600, fontFamily:t.fontFamily } },
 
       legend: legendCfg,
 
@@ -979,44 +976,31 @@ function setTheme(theme) {
   }
 
   function ensureFitUI(){
-    // 拟合开关按钮（窄屏也显示）
+    // 仅保留“趋势拟合曲线”按钮，移除 ECHARTS 原生曲线按钮
     let btns = getById('fitButtons');
     if (!btns){
       btns = document.createElement('div');
       btns.id = 'fitButtons';
       btns.className = 'fit-buttons';
       btns.innerHTML = `
-        <button class="btn" id="btnRaw">ECHARTS<br>曲线</button>
         <button class="btn" id="btnFit">${FIT_ALGO_NAME}<br>曲线</button>
       `;
       appendToRoot(btns);
-      const btnRaw = btns.querySelector('#btnRaw');
+
       const btnFit = btns.querySelector('#btnFit');
       function syncButtons(){
-        btnRaw.classList.toggle('active', showRawCurves);
         btnFit.classList.toggle('active', showFitCurves);
       }
-      function ensureAtLeastOne(onWhich){
-        if (!showRawCurves && !showFitCurves){
-          if (onWhich === 'raw') showFitCurves = true; else showRawCurves = true;
-        }
-      }
-      btnRaw.addEventListener('click', ()=>{
-        showRawCurves = !showRawCurves;
-        ensureAtLeastOne('raw');
-        syncButtons();
-        if (lastPayload) render(lastPayload);
-        requestAnimationFrame(placeFitUI);
-      });
+
       btnFit.addEventListener('click', ()=>{
         showFitCurves = !showFitCurves;
-        ensureAtLeastOne('fit');
         // 切换后重置气泡位置
         bubbleUserMoved = false; bubblePos.left = null; bubblePos.top = null;
         syncButtons();
         if (lastPayload) render(lastPayload);
         requestAnimationFrame(placeFitUI);
       });
+
       syncButtons();
     }
 
@@ -1038,7 +1022,6 @@ function setTheme(theme) {
         <div id="fitBubbleRows"></div>
         <div class="hint">按系列可见性（Legend）过滤，按风量从大到小排序</div>
       `;
-      // 关键：挂到 body，避免任何图表容器 overflow 剪裁
       document.body.appendChild(bubble);
       bubble.style.position = 'fixed';
 
@@ -1390,40 +1373,63 @@ function setTheme(theme) {
     sList.forEach(s => {
       const visible = (selMap[s.name] !== false);
       if (!visible) return;
-      const model = fitModelsCache[mode].get(s.name);
-      if (!model) return;
 
-      const dom0 = Math.min(model.x0, model.x1);
-      const dom1 = Math.max(model.x0, model.x1);
+      // 主曲线：X -> airflow
+      const model = fitModelsCache[mode].get(s.name);
+      // 辅助曲线：rpm -> dB 或 noise -> rpm
+      const crossModel = (s && s.pchip)
+        ? (mode === 'rpm' ? s.pchip?.rpm_to_noise_db : s.pchip?.noise_to_rpm)
+        : null;
+
       let y = NaN;
-      if (x >= dom0 && x <= dom1) y = evalPchipJS(model, x);
-      items.push({ name: s.name, color: s.color, y });
+      if (model && model.x0 != null && model.x1 != null) {
+        const dom0 = Math.min(model.x0, model.x1);
+        const dom1 = Math.max(model.x0, model.x1);
+        if (x >= dom0 && x <= dom1) y = evalPchipJS(model, x);
+      }
+
+      let crossVal = NaN;
+      if (crossModel && crossModel.x0 != null && crossModel.x1 != null) {
+        const c0 = Math.min(crossModel.x0, crossModel.x1);
+        const c1 = Math.max(crossModel.x0, crossModel.x1);
+        if (x >= c0 && x <= c1) crossVal = evalPchipJS(crossModel, x);
+      }
+
+      items.push({ name: s.name, color: s.color, y, cross: crossVal });
     });
 
-    const fmt = (v)=> Math.round(v);
+    const fmtCFM = (v)=> Math.round(v);
     const withVal = items.filter(it => Number.isFinite(it.y)).sort((a,b)=> b.y - a.y);
     const noVal   = items.filter(it => !Number.isFinite(it.y));
 
     const base = (withVal.length && withVal[0].y > 0) ? withVal[0].y : 0;
     const pctVal = (v)=> (Number.isFinite(v) && base > 0) ? Math.round((v / base) * 100) : null;
 
-    const valTexts = items.map(it => Number.isFinite(it.y) ? `${fmt(it.y)} CFM` : '-');
+    const valTexts = items.map(it => Number.isFinite(it.y) ? `${fmtCFM(it.y)} CFM` : '-');
     const maxValChars = valTexts.reduce((m,s)=>Math.max(m, s.length), 1);
     const pctWidthCh = 6;
 
+    const crossUnit = (mode === 'rpm') ? 'dB' : 'RPM';
+    const crossFmt  = (v)=> (mode === 'rpm') ? Number(v).toFixed(1) : String(Math.round(Number(v)));
+
     const ordered = withVal.concat(noVal);
     rowsEl.innerHTML = ordered.map(it => {
-      const has = Number.isFinite(it.y);
-      const valText = has ? `${fmt(it.y)} CFM` : '-';
-      const pct = has ? pctVal(it.y) : null;
+      const hasY = Number.isFinite(it.y);
+      const valText = hasY ? `${fmtCFM(it.y)} CFM` : '-';
+      const pct = hasY ? pctVal(it.y) : null;
       const pctText = (pct==null) ? '-' : `(${pct}%)`;
+
+      const hasCross = Number.isFinite(it.cross);
+      const crossText = hasCross ? `${crossFmt(it.cross)} ${crossUnit}` : '-';
+
       return `
         <div class="row">
           <span class="dot" style="background:${it.color}"></span>
           <span>${it.name}</span>
-          <span style="margin-left:auto; display:inline-flex; align-items:center; gap:8px;">
+          <span style="margin-left:auto; display:inline-flex; align-items:center; gap:10px;">
             <span style="min-width:${maxValChars}ch; text-align:right; font-weight:800; font-variant-numeric:tabular-nums;">${valText}</span>
             <span style="width:${pctWidthCh}ch; text-align:right; font-variant-numeric:tabular-nums;">${pctText}</span>
+            <span style="color:var(--text-muted); font-variant-numeric:tabular-nums;">${crossText}</span>
           </span>
         </div>
       `;
@@ -1433,9 +1439,10 @@ function setTheme(theme) {
   function ensureFitModels(sList, xMode){
     const models = fitModelsCache[xMode];
     sList.forEach(s => {
-      const ph = s && s.pchip ? (
-        xMode === 'noise_db' ? s.pchip.noise_to_airflow : s.pchip.rpm_to_airflow
-      ) : null;
+      const ph = s && s.pchip
+        ? (xMode === 'noise_db' ? s.pchip.noise_to_airflow : s.pchip.rpm_to_airflow)
+        : null;
+
       if (ph && Array.isArray(ph.x) && Array.isArray(ph.y) && Array.isArray(ph.m) && ph.x0 != null && ph.x1 != null) {
         models.set(s.name, ph);
       } else {
