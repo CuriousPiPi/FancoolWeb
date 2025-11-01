@@ -1433,7 +1433,9 @@ function setTheme(theme) {
   function ensureFitModels(sList, xMode){
     const models = fitModelsCache[xMode];
     sList.forEach(s => {
-      const ph = s && s.pchip ? (xMode === 'noise_db' ? s.pchip.noise_db : s.pchip.rpm) : null;
+      const ph = s && s.pchip ? (
+        xMode === 'noise_db' ? s.pchip.noise_to_airflow : s.pchip.rpm_to_airflow
+      ) : null;
       if (ph && Array.isArray(ph.x) && Array.isArray(ph.y) && Array.isArray(ph.m) && ph.x0 != null && ph.x1 != null) {
         models.set(s.name, ph);
       } else {

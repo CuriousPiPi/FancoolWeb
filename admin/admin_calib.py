@@ -11,6 +11,7 @@ import subprocess
 import sys
 from typing import Dict, Any, List, Tuple
 from datetime import datetime
+import time
 
 from flask import Blueprint, request, current_app, jsonify, make_response, session
 from sqlalchemy import text
@@ -31,6 +32,17 @@ except Exception:
     from spectrum_builder import load_default_params as sb_load_default_params, _calc_model_hash as sb_calc_model_hash  # type: ignore
 
 calib_admin_bp = Blueprint('calib_admin', __name__)
+
+def _log(stage: str, **kw):
+    """
+    统一轻量日志：INFO 级别，用于关键阶段标记。
+    用法：_log('preview:start', batch_id=batch_id)
+    """
+    try:
+        current_app.logger.info("[calib] %s | %s", stage, json.dumps(kw, ensure_ascii=False, default=str))
+    except Exception:
+        # 兜底：即使 JSON 序列化失败也不要中断
+        current_app.logger.info("[calib] %s | %s", stage, kw)
 
 # 新增：统一获取当前管理员标识（优先 login_name）
 def _admin_actor():
@@ -290,8 +302,8 @@ def api_calib_upload_zip():
                           b.condition_id, c.condition_name_zh,
                           b.perf_batch_id, b.created_at
                         FROM perf_audio_binding b
-                        LEFT JOIN fan_model m ON m.model_id
-                        LEFT JOIN working_condition c ON c.condition_id
+                        LEFT JOIN fan_model m ON m.model_id = b.model_id
+                        LEFT JOIN working_condition c ON c.condition_id = b.condition_id
                         WHERE b.audio_batch_id = :ab
                         ORDER BY b.created_at DESC
                     """), {'ab': exist_abid}).fetchall()
@@ -529,6 +541,7 @@ def api_calib_preview():
     batch_id = (request.args.get('batch_id') or '').strip()
     if not batch_id:
         return resp_err('INVALID_INPUT', '缺少 batch_id')
+    _log('preview:start', batch_id=batch_id)
 
     with _engine().begin() as conn:
         row = conn.execute(text("""
@@ -540,14 +553,20 @@ def api_calib_preview():
             LIMIT 1
         """), {'bid': batch_id}).fetchone()
         if not row:
+            _log('preview:calib_run_missing', batch_id=batch_id)
             return resp_err('NOT_FOUND', '预览数据不存在', 404)
         base_path = row._mapping.get('base_path')
         mid = int(row._mapping['model_id']); cid = int(row._mapping['condition_id'])
+    _log('preview:resolved_base', base_path=base_path, model_id=mid, condition_id=cid, base_exists=os.path.isdir(base_path))
 
     try:
         params = sb_load_default_params()
+        t0 = time.time()
+        _log('pipeline:start', where='preview', base_path=base_path, model_id=mid, condition_id=cid, code_version=CODE_VERSION)
         model_json, _rows = _run_inproc_and_collect(base_path, params, mid, cid)
+        _log('pipeline:done', where='preview', ms=int((time.time()-t0)*1000), rows=len(_rows or []))
     except Exception as e:
+        current_app.logger.exception('[calib] preview:build_fail')
         return resp_err('CALIB_FAIL', f'预览生成失败: {e}', 500)
 
     return resp_ok({
@@ -628,15 +647,17 @@ def api_admin_calib_rpm_noise():
         if not rid:
             return resp_err('INVALID_INPUT', '请提供 run_id 或 audio_batch_id', 400)
 
-        rows = conn.execute(text("""
-            SELECT rpm, la_post_env_db
-            FROM calib_report_item
-            WHERE run_id=:rid AND rpm IS NOT NULL AND rpm > 0 AND la_post_env_db IS NOT NULL
-            ORDER BY rpm
-        """), {'rid': rid}).fetchall()
+        with _engine().begin() as conn:
+            rows = conn.execute(text("""
+                SELECT rpm, la_post_env_db
+                FROM calib_report_item
+                WHERE run_id=:rid AND rpm IS NOT NULL AND rpm > 0 AND la_post_env_db IS NOT NULL
+                ORDER BY rpm
+            """), {'rid': rid}).fetchall()
 
-    items = [{'rpm': int(r._mapping['rpm']), 'noise_db': float(r._mapping['la_post_env_db'])} for r in rows or []]
-    return resp_ok({'items': items, 'run_id': rid})
+        items = [{'rpm': int(r._mapping['rpm']), 'noise_db': float(r._mapping['la_post_env_db'])} for r in rows or []]
+        _log('rpm_noise:result', run_id=rid, count=len(items))
+        return resp_ok({'items': items, 'run_id': rid})
 
 @calib_admin_bp.post('/admin/api/calib/bind-model')
 def api_bind_model_to_perf():
@@ -763,9 +784,9 @@ def api_bind_model_to_perf():
                     'cache_path': out_path,
                     'reused_model': True
                 }, message='绑定成功（频谱缓存已更新元数据，无需重建）')
-            except Exception:
-                # 忽略失败，继续走重建
-                pass
+            except Exception as e:
+                # 明确返回错误，避免静默成功
+                return resp_err('CACHE_SAVE_FAIL', f'频谱缓存更新失败: {e}', 500)
 
     # 重建（音频 + 当前默认参数）
     try:
@@ -786,23 +807,19 @@ def api_bind_model_to_perf():
         )
         out_path = saved.get('path')
         ok_ids = bool(out_path and os.path.isfile(out_path))
+        if not ok_ids:
+            return resp_err('CACHE_SAVE_FAIL', '频谱缓存落盘失败', 500)
         return resp_ok({
             'perf_batch_id': perf_batch_id,
             'audio_batch_id': audio_batch_id,
             'audio_data_hash': audio_data_hash,
-            'cache_saved': True if ok_ids else False,
+            'cache_saved': True,
             'cache_dir': os.path.abspath(curve_cache_dir()),
             'cache_path': out_path
-        }, message='绑定成功' + ('' if ok_ids else '（频谱缓存落盘失败，可后续重试）'))
+        }, message='绑定成功')
     except Exception as e:
-        return resp_ok({
-            'perf_batch_id': perf_batch_id,
-            'audio_batch_id': audio_batch_id,
-            'audio_data_hash': audio_data_hash,
-            'cache_saved': False,
-            'cache_dir': os.path.abspath(curve_cache_dir()),
-            'error': str(e)
-        }, message='绑定成功（频谱缓存落盘失败，可后续重试）')
+        # 失败时返回错误，促使前端明确告警（避免“成功但未落盘”）
+        return resp_err('PIPELINE_OR_SAVE_FAIL', f'频谱模型重建/落盘失败: {e}', 500)
 
 @calib_admin_bp.get('/admin/api/calib/cache/inspect')
 def api_calib_cache_inspect():

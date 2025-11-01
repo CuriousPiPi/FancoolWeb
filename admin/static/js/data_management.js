@@ -1094,6 +1094,7 @@ function drawScatter(canvas, pairs, xLabel, yLabel){
 
 // 提交按钮：提交前强制校验“更新描述”，并随请求提交 description 字段
 perfSubmitBtn.addEventListener('click', async ()=>{
+  console.info('[UI] perfSubmit clicked', { mode, mid: parseInt(upModelId.value||'0',10), cid: parseInt(upConditionSelect.value||'0',10) });
   perfSubmitMsg.textContent=''; perfSubmitMsg.className='';
   const mid=parseInt(upModelId.value||'0',10), cid=parseInt(upConditionSelect.value||'0',10);
   if(mid<=0 || cid<=0){ perfSubmitMsg.className='err'; perfSubmitMsg.textContent='请先完整选择品牌/型号/工况'; return; }
@@ -1213,6 +1214,38 @@ perfSubmitBtn.addEventListener('click', async ()=>{
         perfSubmitMsg.className='ok';
         perfSubmitMsg.textContent=`编辑提交成功，更新 ${rowsChanged} 行`;
         previewReady=false; perfSubmitBtn.textContent='预览';
+
+        // 新增：编辑模式下也进行绑定与预热频谱（使用当前组 key 或活动组）
+        try {
+          const abid = (typeof window.lastCalibBatchId === 'string' && window.lastCalibBatchId.trim())
+            ? window.lastCalibBatchId.trim()
+            : null;
+          const perfBatchId = currentGroupKey || activeGroupKey || null;
+          if (abid && perfBatchId) {
+            const resp = await fetch('/admin/api/calib/bind-model', {
+              method:'POST',
+              headers:{'Content-Type':'application/json'},
+              body: JSON.stringify({ model_id: mid, condition_id: cid, perf_batch_id: perfBatchId, audio_batch_id: abid })
+            });
+            const jb = await resp.json().catch(()=>({success:false}));
+            if (!jb.success) {
+              let extra = '';
+              const binds = jb.meta && Array.isArray(jb.meta.bindings) ? jb.meta.bindings : [];
+              if (binds.length) {
+                const pairs = binds.map(b => `${b.model_name || `mid=${b.model_id}`} - ${b.condition_name_zh || `cid=${b.condition_id}`}`).join('；');
+                extra = `（已绑定：${pairs}）`;
+              }
+              console.warn('bind-model (edit) failed:', jb.error_message || '', extra);
+              const msgEl = document.querySelector('#perfSubmitMsg');
+              if (msgEl) {
+                msgEl.className = 'warn';
+                msgEl.textContent = (msgEl.textContent ? msgEl.textContent + '；' : '') + `绑定音频失败：${jb.error_message || '请稍后重试'}${extra}`;
+              }
+            }
+          }
+        } catch(e) {
+          console.warn('bind-model (edit) failed:', e);
+        }
       } else {
         perfSubmitMsg.className='err'; perfSubmitMsg.textContent=j.error_message||'提交失败';
       }
@@ -2180,6 +2213,11 @@ file.addEventListener('change', async ()=>{
     const j = await r.json();
     if(!j.success){ alert(j.error_message||'上传失败'); return; }
 
+    if (j.data && j.data.batch_id) {
+        console.info('[UI] preview start', { batchId: j.data.batch_id });
+        ensureCalibPreview(j.data.batch_id);
+      }
+
     window.lastCalibBatchId = j.data.batch_id || null;
     window.lastCalibRunId = j.data.run_id ?? null;
     window.lastCalibModelHash = j.data.model_hash ?? null;
@@ -2329,8 +2367,11 @@ file.addEventListener('change', async ()=>{
   anchorBox.appendChild(file);
 }
 
+// 预览挂载时打印日志
 async function ensureCalibPreview(batchId){
   try{
+    console.info('[UI] ensureCalibPreview called', { batchId });
+
     // 在预览区下方插入容器
     let mount = document.getElementById('calibPreviewMount');
     if(!mount){
@@ -2339,21 +2380,30 @@ async function ensureCalibPreview(batchId){
       const anchor = document.getElementById('previewArea') || document.querySelector('#panel-upload');
       anchor && anchor.appendChild(mount);
     }
+
     // 动态加载 calib_preview.js（只加载一次）
     if(!window.CalibPreview){
       await new Promise((resolve, reject)=>{
         const s = document.createElement('script');
-        s.src = '/static/js/calib_preview.js'; s.async = true; s.onload=()=>resolve(); s.onerror=()=>reject(new Error('calib_preview.js load failed'));
+        s.src = '/static/js/calib_preview.js';
+        s.async = true;
+        s.onload=()=>resolve();
+        s.onerror=()=>reject(new Error('calib_preview.js load failed'));
         document.head.appendChild(s);
       });
     }
+
     if(window.CalibPreview){
+      console.info('[UI] CalibPreview.show', { mount: '#calibPreviewMount', batchId });
       window.CalibPreview.show({ mount: '#calibPreviewMount', batchId });
+    } else {
+      console.warn('[UI] CalibPreview not available after load');
     }
   }catch(e){
     console.warn('calib preview mount failed:', e);
   }
 }
+
 
 // 简易选择器：当 mid+cid 下存在多个已绑定模型时，允许手动选择其一进行回填/预览
 async function chooseExistingBinding(items){

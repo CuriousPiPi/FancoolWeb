@@ -5,10 +5,10 @@ import hashlib
 import threading
 from collections import OrderedDict
 from datetime import datetime
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Tuple
 
 # =========================
-# 配置（通过环境变量可调）
+# 环境参数（兼容原逻辑）
 # =========================
 
 _ALPHA = {
@@ -19,38 +19,26 @@ _TAU = {
     "rpm": float(os.getenv("CURVE_TENSION_TAU_RPM", "0.0")),
     "noise_db": float(os.getenv("CURVE_TENSION_TAU_NOISE", "0.0")),
 }
-
-def _env_monotone_enable(axis: str) -> bool:
-    ax = _axis_norm(axis)
-    if ax == "rpm":
-        key = "CURVE_MONOTONE_ENABLE_RPM"
-        default = "1"
-    elif ax == "noise_db":
-        key = "CURVE_MONOTONE_ENABLE_NOISE"
-        default = "1"
-    else:
-        key = f"CURVE_MONOTONE_ENABLE_{ax.upper()}"
-        default = "1"
-    return (os.getenv(key, default) or "").strip() in ("1", "true", "True", "YES", "yes")
-
-def _env_node_lock(axis: str) -> bool:
-    ax = _axis_norm(axis)
-    if ax == "rpm":
-        key = "CURVE_NODE_LOCK_RPM"
-        default = "0"
-    elif ax == "noise_db":
-        key = "CURVE_NODE_LOCK_NOISE"
-        default = "0"
-    else:
-        key = f"CURVE_NODE_LOCK_{ax.upper()}"
-        default = "0"
-    return (os.getenv(key, default) or "").strip() in ("1", "true", "True", "YES", "yes")
+_CODE_VERSION = os.getenv("CODE_VERSION", "")  # 纳入统一 env-key 用于失效
 
 def reload_curve_params_from_env():
+    # 仅支持运行中刷新平滑/张力（与旧逻辑一致）；内存 LRU 门限须重启生效
     _ALPHA["rpm"]         = float(os.getenv("CURVE_SMOOTH_ALPHA_RPM",         str(_ALPHA["rpm"])))
     _ALPHA["noise_db"]    = float(os.getenv("CURVE_SMOOTH_ALPHA_NOISE",       str(_ALPHA["noise_db"])))
     _TAU["rpm"]           = float(os.getenv("CURVE_TENSION_TAU_RPM",          str(_TAU["rpm"])))
     _TAU["noise_db"]      = float(os.getenv("CURVE_TENSION_TAU_NOISE",        str(_TAU["noise_db"])))
+
+def _axis_norm(axis: str) -> str:
+    return "noise_db" if axis == "noise" else axis
+
+def _env_bool(name: str, default: str = "1") -> bool:
+    return (os.getenv(name, default) or "").strip() in ("1", "true", "True", "YES", "yes")
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)))
+    except Exception:
+        return default
 
 def _env_alpha_for_axis(axis: str) -> float:
     ax = _axis_norm(axis)
@@ -62,34 +50,21 @@ def _env_tau_for_axis(axis: str) -> float:
     val = float(_TAU.get(ax, 0.0))
     return max(0.0, min(1.0, val))
 
-def _axis_norm(axis: str) -> str:
-    if axis == "noise":
-        return "noise_db"
-    return axis
+def _env_monotone_enable(axis: str) -> bool:
+    ax = _axis_norm(axis)
+    key = "CURVE_MONOTONE_ENABLE_RPM" if ax == "rpm" else "CURVE_MONOTONE_ENABLE_NOISE"
+    default = "1"
+    return _env_bool(key, default)
+
+def _env_node_lock(axis: str) -> bool:
+    ax = _axis_norm(axis)
+    key = "CURVE_NODE_LOCK_RPM" if ax == "rpm" else "CURVE_NODE_LOCK_NOISE"
+    return _env_bool(key, "0")
 
 def curve_cache_dir() -> str:
     d = os.getenv("CURVE_CACHE_DIR", "./curve_cache")
     os.makedirs(d, exist_ok=True)
     return d
-
-def _abs_cache_dir() -> str:
-    try:
-        return os.path.abspath(curve_cache_dir())
-    except Exception:
-        return curve_cache_dir()
-
-def _env_bool(name: str, default: str = "1") -> bool:
-    return (os.getenv(name, default) or "").strip() in ("1", "true", "True", "YES", "yes")
-
-def _env_int(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except Exception:
-        return default
-
-def _env_samples_n() -> int:
-    n = _env_int("CURVE_CACHE_SAMPLES_N", 0)
-    return max(0, min(2001, n))
 
 def _env_inmem_enable() -> bool:
     return _env_bool("CURVE_CACHE_INMEM_ENABLE", "1")
@@ -98,6 +73,7 @@ def _env_inmem_max_models() -> int:
     return max(0, _env_int("CURVE_CACHE_INMEM_MAX_MODELS", 2000))
 
 def _env_inmem_max_points() -> int:
+    # 兼容旧默认 200000；如你之前设 150000 也会生效
     return max(0, _env_int("CURVE_CACHE_INMEM_MAX_POINTS", 200000))
 
 def _env_inmem_admit_hits() -> int:
@@ -105,6 +81,10 @@ def _env_inmem_admit_hits() -> int:
 
 def _env_inmem_hits_window() -> int:
     return max(512, _env_int("CURVE_CACHE_INMEM_HITS_WINDOW", 4096))
+
+# =========================
+# In-Mem LRU（兼容旧逻辑）
+# =========================
 
 class _InMemLRU:
     def __init__(self, max_models: int, max_points: int):
@@ -115,7 +95,18 @@ class _InMemLRU:
         self._points_sum = 0
 
     def _weight(self, model: Dict[str, Any]) -> int:
+        """按样条节点数估重；四合一模型统计 4 条曲线的点数总和。"""
         try:
+            if not model: return 0
+            if model.get("type") == "perf_pchip_v1":
+                p = (model.get("pchip") or {})
+                total = 0
+                for k in ("rpm_to_airflow","rpm_to_noise_db","noise_to_rpm","noise_to_airflow"):
+                    m = p.get(k)
+                    if m and isinstance(m, dict):
+                        total += int(len(m.get("x") or []))
+                return total
+            # 兜底：当存入的是单条 pchip（不推荐），按其 x 长度估重
             return int(len(model.get("x", []) or []))
         except Exception:
             return 0
@@ -142,18 +133,11 @@ class _InMemLRU:
                 k, v = self._map.popitem(last=False)
                 self._points_sum -= self._weight(v)
 
-    def stats(self) -> Dict[str, int]:
-        with self._lock:
-            return {"size": len(self._map), "points": self._points_sum}
-
 _INMEM = _InMemLRU(_env_inmem_max_models(), _env_inmem_max_points()) if _env_inmem_enable() else None
 _ADMIT_HITS = _env_inmem_admit_hits()
 _HITS_WINDOW = _env_inmem_hits_window()
 _HITS: Dict[str, int] = {}
 _HITS_LOCK = threading.Lock()
-
-def _inmem_key(model_id: int, condition_id: int, axis: str, raw_hash: str) -> str:
-    return f"{int(model_id)}|{int(condition_id)}|{_axis_norm(axis)}|{raw_hash}"
 
 def _note_hit(key: str) -> int:
     if not _INMEM or _ADMIT_HITS <= 1:
@@ -169,10 +153,49 @@ def _note_hit(key: str) -> int:
                     break
         return cnt
 
+# =========================
+# 通用散列与轴向 PCHIP 构建
+# =========================
+
 def raw_points_hash(xs: List[float], ys: List[float]) -> str:
+    """仍保留（内部用），对 (x,y) 对的顺序无关散列。"""
     pairs = sorted([(float(x), float(y)) for x, y in zip(xs, ys)])
     buf = ";".join(f"{x:.6f}|{y:.6f}" for x, y in pairs)
     return hashlib.sha1(buf.encode("utf-8")).hexdigest()
+
+def raw_triples_hash(rpm: List[float], airflow: List[float], noise: List[float]) -> str:
+    """对三轴点的顺序无关散列，None 以 'null' 表示，统一到 6 位小数。"""
+    triples: List[Tuple[str,str,str]] = []
+    n = min(len(airflow or []), max(len(rpm or []), len(noise or [])))
+    for i in range(n):
+        def norm(v):
+            if v is None: return "null"
+            try:
+                f = float(v)
+                if not math.isfinite(f): return "null"
+                return f"{f:.6f}"
+            except Exception:
+                return "null"
+        triples.append((norm(rpm[i] if i < len(rpm) else None),
+                        norm(airflow[i] if i < len(airflow) else None),
+                        norm(noise[i] if i < len(noise) else None)))
+    triples.sort()
+    buf = ";".join("|".join(t) for t in triples)
+    return hashlib.sha1(buf.encode("utf-8")).hexdigest()
+
+def _ols_linear(xs: List[float], ys: List[float]) -> tuple[float, float]:
+    n = len(xs)
+    if n == 0:
+        return (0.0, 0.0)
+    sx = sum(xs); sy = sum(ys)
+    sxx = sum(x*x for x in xs)
+    sxy = sum(x*y for x, y in zip(xs, ys))
+    denom = n * sxx - sx * sx
+    if abs(denom) < 1e-12:
+        return (sy / n if n else 0.0, 0.0)
+    b = (n * sxy - sx * sy) / denom
+    a = (sy - b * sx) / n
+    return (a, b)
 
 def _pava_isotonic_non_decreasing(ys: List[float]) -> List[float]:
     n = len(ys)
@@ -214,8 +237,7 @@ def _pava_isotonic_non_decreasing(ys: List[float]) -> List[float]:
     if len(out) >= n:
         return out[:n]
     else:
-        out.extend([out[-1]] * (n - len(out))
-        )
+        out.extend([out[-1]] * (n - len(out)))
         return out
 
 def _pchip_slopes_fritsch_carlson(xs: List[float], ys: List[float]) -> List[float]:
@@ -244,65 +266,13 @@ def _pchip_slopes_fritsch_carlson(xs: List[float], ys: List[float]) -> List[floa
                 t = 3.0 / math.sqrt(s)
                 m[i] = t * a * delta[i]
                 m[i + 1] = t * b * delta[i]
-        if m[i] < 0:
-            m[i] = 0.0
-        if m[i + 1] < 0:
-            m[i + 1] = 0.0
+        if _env_monotone_enable("rpm") or _env_monotone_enable("noise_db"):
+            # 单调模式不允许负斜率
+            if m[i] < 0:
+                m[i] = 0.0
+            if m[i + 1] < 0:
+                m[i + 1] = 0.0
     return m
-
-def eval_pchip(model: Dict[str, Any], x: float) -> float:
-    xs = model["x"]
-    ys = model["y"]
-    ms = model["m"]
-    n = len(xs)
-    if n == 0:
-        return float("nan")
-    if n == 1:
-        return ys[0]
-    if x <= xs[0]:
-        x = xs[0]
-    if x >= xs[-1]:
-        x = xs[-1]
-    lo, hi = 0, n - 2
-    i = 0
-    while lo <= hi:
-        mid = (lo + hi) // 2
-        if xs[mid] <= x <= xs[mid + 1]:
-            i = mid
-            break
-        if x < xs[mid]:
-            hi = mid - 1
-        else:
-            lo = mid + 1
-    else:
-        i = max(0, min(n - 2, lo))
-    x0 = xs[i]
-    x1 = xs[i + 1]
-    h = x1 - x0
-    t = (x - x0) / h if h != 0 else 0.0
-    y0 = ys[i]
-    y1 = ys[i + 1]
-    m0 = ms[i] * h
-    m1 = ms[i + 1] * h
-    h00 = (2 * t**3 - 3 * t**2 + 1)
-    h10 = (t**3 - 2 * t**2 + t)
-    h01 = (-2 * t**3 + 3 * t**2)
-    h11 = (t**3 - t**2)
-    return h00 * y0 + h10 * m0 + h01 * y1 + h11 * m1
-
-def _ols_linear(xs: List[float], ys: List[float]) -> tuple[float, float]:
-    n = len(xs)
-    if n == 0:
-        return (0.0, 0.0)
-    sx = sum(xs); sy = sum(ys)
-    sxx = sum(x*x for x in xs)
-    sxy = sum(x*y for x, y in zip(xs, ys))
-    denom = n * sxx - sx * sx
-    if abs(denom) < 1e-12:
-        return (sy / n if n else 0.0, 0.0)
-    b = (n * sxy - sx * sy) / denom
-    a = (sy - b * sx) / n
-    return (a, b)
 
 def _blend_nodes_with_trend(xs: List[float], ys_mono: List[float], axis: str) -> List[float]:
     alpha = _env_alpha_for_axis(axis)
@@ -319,6 +289,7 @@ def _scale_slopes(m: List[float], axis: str) -> List[float]:
     return [(1.0 - tau) * v for v in m]
 
 def build_pchip_model_with_opts(xs_in: List[float], ys_in: List[float], axis: str) -> Optional[Dict[str, Any]]:
+    """统一轴向 PCHIP 构建：保留旧的平滑/张力/单调/节点锁定语义。"""
     pairs = []
     for x, y in zip(xs_in, ys_in):
         try:
@@ -352,133 +323,192 @@ def build_pchip_model_with_opts(xs_in: List[float], ys_in: List[float], axis: st
     else:
         ys_mono = ys[:]
     ys_target = _blend_nodes_with_trend(xs, ys_mono, ax)
-
     m = _pchip_slopes_fritsch_carlson(xs, ys_target)
     m = _scale_slopes(m, ax)
 
     return {"x": xs, "y": ys_target, "m": m, "x0": xs[0], "x1": xs[-1]}
 
-def _model_cache_path(model_id: int, condition_id: int, axis: str) -> str:
-    return os.path.join(curve_cache_dir(), f"{int(model_id)}_{int(condition_id)}_{_axis_norm(axis)}.json")
+def eval_pchip(model: Dict[str, Any], x: float) -> float:
+    xs = model["x"]; ys = model["y"]; ms = model["m"]
+    n = len(xs)
+    if n == 0:
+        return float("nan")
+    if n == 1:
+        return ys[0]
+    if x <= xs[0]:
+        x = xs[0]
+    if x >= xs[-1]:
+        x = xs[-1]
+    lo, hi = 0, n - 2
+    i = 0
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        if xs[mid] <= x <= xs[mid + 1]:
+            i = mid; break
+        if x < xs[mid]:
+            hi = mid - 1
+        else:
+            lo = mid + 1
+    else:
+        i = max(0, min(n - 2, lo))
+    x0 = xs[i]; x1 = xs[i + 1]
+    h = x1 - x0
+    t = (x - x0) / h if h != 0 else 0.0
+    y0 = ys[i]; y1 = ys[i + 1]
+    m0 = ms[i] * h; m1 = ms[i + 1] * h
+    h00 = (2 * t**3 - 3 * t**2 + 1)
+    h10 = (t**3 - 2 * t**2 + t)
+    h01 = (-2 * t**3 + 3 * t**2)
+    h11 = (t**3 - t**2)
+    return h00 * y0 + h10 * m0 + h01 * y1 + h11 * m1
 
-def delete_cached_model(model_id: int, condition_id: int, axis: str) -> bool:
-    axis = _axis_norm(axis)
-    ok = True
-    p = _model_cache_path(model_id, condition_id, axis)
+# =========================
+# 四合一模型：落盘/加载/构建/失效
+# =========================
+
+def _unified_path(model_id: int, condition_id: int) -> str:
+    return os.path.join(curve_cache_dir(), f"perf_{int(model_id)}_{int(condition_id)}.json")
+
+def _env_key_for_perf() -> str:
+    # 将影响拟合的环境参数和代码版本纳入统一 env-key
+    ek = "|".join([
+        f"alpha_rpm={_env_alpha_for_axis('rpm'):.6f}",
+        f"alpha_noise={_env_alpha_for_axis('noise_db'):.6f}",
+        f"tau_rpm={_env_tau_for_axis('rpm'):.6f}",
+        f"tau_noise={_env_tau_for_axis('noise_db'):.6f}",
+        f"mono_rpm={int(_env_monotone_enable('rpm'))}",
+        f"mono_noise={int(_env_monotone_enable('noise_db'))}",
+        f"lock_rpm={int(_env_node_lock('rpm'))}",
+        f"lock_noise={int(_env_node_lock('noise_db'))}",
+        f"code={_CODE_VERSION}",
+    ])
+    return ek
+
+def save_unified_perf_model(model_id: int, condition_id: int, models: dict, *, data_hash: str, env_key: str) -> str:
+    payload = {
+        "type": "perf_pchip_v1",
+        "model_id": int(model_id),
+        "condition_id": int(condition_id),
+        "pchip": {
+            "rpm_to_airflow": models.get("rpm_to_airflow"),
+            "rpm_to_noise_db": models.get("rpm_to_noise_db"),
+            "noise_to_rpm": models.get("noise_to_rpm"),
+            "noise_to_airflow": models.get("noise_to_airflow"),
+        },
+        "meta": {
+            "data_hash": data_hash,
+            "env_key": env_key,
+            "code_version": _CODE_VERSION,
+            "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+    }
+    p = _unified_path(model_id, condition_id)
+    # 原子替换写入，避免并发读到半成品
+    import tempfile
+    d = os.path.dirname(p)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="perf_", suffix=".json", dir=d)
     try:
-        if os.path.exists(p):
-            os.remove(p)
-    except Exception:
-        ok = False
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.replace(tmp, p)
+    finally:
+        try:
+            os.remove(tmp)
+        except Exception:
+            pass
+    return p
 
-    try:
-        if _INMEM:
-            prefix = f"{int(model_id)}|{int(condition_id)}|{axis}|"
-            for k in list(_INMEM._map.keys()):
-                if k.startswith(prefix):
-                    m = _INMEM._map.pop(k, None)
-                    if m is not None:
-                        _INMEM._points_sum -= _INMEM._weight(m)
-    except Exception:
-        ok = False
-    return ok
-
-def _load_cached_model_if_valid(model_id: int, condition_id: int, axis: str, xs: List[float], ys: List[float]):
-    p = _model_cache_path(model_id, condition_id, axis)
-    if not os.path.exists(p):
+def load_unified_perf_model(model_id: int, condition_id: int) -> dict | None:
+    p = _unified_path(model_id, condition_id)
+    if not os.path.isfile(p):
         return None
     try:
         with open(p, "r", encoding="utf-8") as f:
             data = json.load(f)
-        expect = _compose_cache_key(xs, ys, axis)
         if not isinstance(data, dict):
             return None
-        if data.get("type") != "pchip_v1":
+        if data.get("type") != "perf_pchip_v1":
             return None
-        req = ("x", "y", "m", "x0", "x1", "axis")
-        if any(k not in data for k in req):
-            return None
-        if data.get("raw_hash") != expect:
+        if "pchip" not in data or "meta" not in data:
             return None
         return data
     except Exception:
         return None
 
-def _sample_model(model: Dict[str, Any], n: int) -> Dict[str, list]:
-    if not model or n <= 0:
-        return {"x": [], "y": []}
-    x0 = float(model["x0"]); x1 = float(model["x1"])
-    if x1 <= x0:
-        return {"x": [], "y": []}
-    if n == 1:
-        grid = [x0]
-    elif n == 2:
-        grid = [x0, x1]
-    else:
-        step = (x1 - x0) / (n - 1)
-        grid = [x0 + step * i for i in range(n)]
-    yv = [float(eval_pchip(model, x)) for x in grid]
-    return {"x": grid, "y": yv}
+def _inmem_key_unified(model_id: int, condition_id: int, data_hash: str, env_key: str) -> str:
+    return f"{int(model_id)}|{int(condition_id)}|perf|{data_hash}|{env_key}"
 
-def _save_cached_model(model: Dict[str, Any], model_id: int, condition_id: int, axis: str, raw_hash: str):
-    model_out = dict(model)
-    model_out["type"] = "pchip_v1"
-    model_out["raw_hash"] = raw_hash
-    model_out["axis"] = _axis_norm(axis)
-    model_out["meta"] = {
-        "model_id": int(model_id),
-        "condition_id": int(condition_id),
-        "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
-    }
-    n = _env_samples_n()
-    if n > 0:
-        samples = _sample_model(model, n)
-        model_out["samples"] = {"n": n, **samples}
+def _collect_valid_xy(xs: List[float], ys: List[float]) -> Tuple[List[float], List[float]]:
+    outx: List[float] = []
+    outy: List[float] = []
+    for x, y in zip(xs or [], ys or []):
+        try:
+            xf = float(x) if x is not None else None
+            yf = float(y) if y is not None else None
+        except Exception:
+            continue
+        if xf is None or yf is None:
+            continue
+        if not (math.isfinite(xf) and math.isfinite(yf)):
+            continue
+        outx.append(xf); outy.append(yf)
+    return outx, outy
 
-    p = _model_cache_path(model_id, condition_id, axis)
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(model_out, f, ensure_ascii=False)
+def get_or_build_unified_perf_model(model_id: int, condition_id: int,
+                                    rpm: List[float], airflow: List[float], noise: List[float]) -> Optional[Dict[str, Any]]:
+    """
+    四合一模型唯一入口：
+      - 依据三轴原始点计算 data_hash
+      - 组成 env_key（含平滑/张力/单调/节点锁定/代码版本）
+      - 先查内存 LRU；再查磁盘；任一命中且 meta 匹配则直接返回
+      - 否则重建四条曲线并落盘 + 进入 LRU
+    """
+    data_hash = raw_triples_hash(rpm or [], airflow or [], noise or [])
+    env_key = _env_key_for_perf()
+    ikey = _inmem_key_unified(model_id, condition_id, data_hash, env_key)
 
-def _compose_cache_key(xs: List[float], ys: List[float], axis: str) -> str:
-    base = raw_points_hash(xs, ys)
-    ax = _axis_norm(axis)
-    alpha = _env_alpha_for_axis(ax)
-    tau = _env_tau_for_axis(ax)
-    s = f"{base}|axis={ax}|alpha={alpha:.6f}|tau={tau:.6f}|monotone={int(_env_monotone_enable(ax))}|lock={int(_env_node_lock(ax))}"
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()
-
-def get_or_build_pchip(model_id: int, condition_id: int, axis: str, xs: List[float], ys: List[float]) -> Optional[Dict[str, Any]]:
-    axis = _axis_norm(axis)
-    expect_key = _compose_cache_key(xs, ys, axis)
-
-    ikey = _inmem_key(model_id, condition_id, axis, expect_key)
     if _INMEM:
         m = _INMEM.get(ikey)
         if m is not None:
             _note_hit(ikey)
             return m
 
-    cached = _load_cached_model_if_valid(model_id, condition_id, axis, xs, ys)
+    cached = load_unified_perf_model(model_id, condition_id)
     if cached:
-        if _INMEM and _note_hit(ikey) >= _ADMIT_HITS:
-            _INMEM.put(ikey, cached)
-        return cached
+        meta = cached.get("meta") or {}
+        if meta.get("data_hash") == data_hash and meta.get("env_key") == env_key:
+            if _INMEM and _note_hit(ikey) >= _ADMIT_HITS:
+                _INMEM.put(ikey, cached)
+            return cached
 
-    p = _model_cache_path(model_id, condition_id, axis)
-    model = build_pchip_model_with_opts(xs, ys, axis)
-    if not model:
-        if os.path.exists(p):
-            try:
-                os.remove(p)
-            except Exception:
-                pass
-        return None
+    # 现算
+    x_rpm_air, y_rpm_air = _collect_valid_xy(rpm, airflow)
+    x_rpm_nz,  y_rpm_nz  = _collect_valid_xy(rpm, noise)
+    x_nz_rpm,  y_nz_rpm  = _collect_valid_xy(noise, rpm)
+    x_nz_air,  y_nz_air  = _collect_valid_xy(noise, airflow)
 
-    _save_cached_model(model, model_id, condition_id, axis, expect_key)
-    model["type"] = "pchip_v1"
-    model["axis"] = axis
-    model["raw_hash"] = expect_key
+    pack = {
+        "rpm_to_airflow":   build_pchip_model_with_opts(x_rpm_air, y_rpm_air, axis="rpm")       if x_rpm_air and y_rpm_air else None,
+        "rpm_to_noise_db":  build_pchip_model_with_opts(x_rpm_nz,  y_rpm_nz,  axis="rpm")       if x_rpm_nz and y_rpm_nz   else None,
+        "noise_to_rpm":     build_pchip_model_with_opts(x_nz_rpm,  y_nz_rpm,  axis="noise_db")  if x_nz_rpm and y_nz_rpm   else None,
+        "noise_to_airflow": build_pchip_model_with_opts(x_nz_air,  y_nz_air,  axis="noise_db")  if x_nz_air and y_nz_air   else None,
+    }
 
+    # 落盘
+    save_unified_perf_model(model_id, condition_id, pack, data_hash=data_hash, env_key=env_key)
+    out = {
+        "type": "perf_pchip_v1",
+        "model_id": int(model_id),
+        "condition_id": int(condition_id),
+        "pchip": pack,
+        "meta": {
+            "data_hash": data_hash,
+            "env_key": env_key,
+            "code_version": _CODE_VERSION,
+            "created_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+        }
+    }
     if _INMEM and _note_hit(ikey) >= _ADMIT_HITS:
-        _INMEM.put(ikey, model)
-    return model
+        _INMEM.put(ikey, out)
+    return out

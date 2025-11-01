@@ -17,9 +17,9 @@ from user_agents import parse as parse_ua
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from curves.spectrum_cache import load as load_spectrum  # 放在文件顶部其他 import 之后
-from curves.pchip_cache import get_or_build_pchip, eval_pchip
+from curves.pchip_cache import get_or_build_unified_perf_model, eval_pchip
 from curves import spectrum_cache
-from curves.spectrum_builder import load_default_params, compute_param_hash, schedule_rebuild
+from curves.spectrum_builder import load_default_params, compute_param_hash, schedule_rebuild, build_performance_pchips
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 
 CODE_VERSION = os.getenv('CODE_VERSION', '')
@@ -498,69 +498,67 @@ def _effective_value_for_series(series_rows: list, model_id: int, condition_id: 
     """
     输入：某个 (model_id, condition_id) 的所有行记录（含 rpm, noise_db, airflow）
     输出：effective_x, effective_airflow, source ('raw'|'fit'), axis ('rpm'|'noise_db')
-    规则：
-      - 未限制：取原始最大风量的点（raw）
-      - 有限制：
-         * 若 limit < min_x → 丢弃该条目（不显示）
-         * 若存在 x==limit 的原始点 → raw
-         * 若 limit >= max_x → 取 max_x 的原始点 → raw
-         * 否则（位于域内且无原始点）→ 拟合值（fit, PCHIP）
+    新版：拟合一律使用四合一模型（噪音轴用 noise_to_airflow；转速轴用 rpm_to_airflow）
     """
     ax = 'noise_db' if axis == 'noise' else axis
-    xs, ys, rpm_list = [], [], []
+    rpm, noise, airflow = [], [], []
     for r in series_rows:
-        x = r[ax]
-        y = r['airflow']
-        rpm = r['rpm']
+        rpm.append(r.get('rpm'))
+        noise.append(r.get('noise_db'))
+        airflow.append(r.get('airflow'))
+    # 统一模型（含缓存/失效/重建）
+    unified = get_or_build_unified_perf_model(model_id, condition_id, rpm, airflow, noise) or {}
+    p = (unified.get('pchip') or {})
+    mdl_fit = p.get('noise_to_airflow') if ax == 'noise_db' else p.get('rpm_to_airflow')
+
+    # 抽取有效原始点（用于“原始优先”和边界/落在原始点判断）
+    xs, ys = [], []
+    src_x_arr = noise if ax == 'noise_db' else rpm
+    for x, y in zip(src_x_arr or [], airflow or []):
         try:
             xf = float(x) if x is not None else None
             yf = float(y) if y is not None else None
         except Exception:
             continue
-        if xf is None or not math.isfinite(xf) or yf is None or not math.isfinite(yf):
-            continue
-        xs.append(xf); ys.append(yf); rpm_list.append(float(rpm) if r['rpm'] is not None else None)
+        if xf is None or yf is None: continue
+        if not (math.isfinite(xf) and math.isfinite(yf)): continue
+        xs.append(xf); ys.append(yf)
     if not xs:
         return None
-
     x_min, x_max = min(xs), max(xs)
 
-    # 未限制：取 y 最大的原始点
+    # 未限制：取原始最大风量的点
     if limit_value is None:
         idx = max(range(len(ys)), key=lambda i: ys[i])
         eff_x = xs[idx]
         eff_y = ys[idx]
         return {'effective_x': eff_x, 'effective_airflow': eff_y, 'effective_source': 'raw', 'effective_axis': ax,
-                'effective_rpm_at_point': rpm_list[idx]}
+                'effective_rpm_at_point': None}
 
-    # 有限制：若限制值小于所有原始点的最小 x → 丢弃
     lv = float(limit_value)
     if lv < x_min - 1e-9:
         return None
-
-    # 若 limit >= max_x → 取 max_x 原始点
     if lv >= x_max - 1e-9:
         idxs = [i for i, x in enumerate(xs) if abs(x - x_max) < 1e-9]
         best = max(idxs, key=lambda i: ys[i])
         return {'effective_x': xs[best], 'effective_airflow': ys[best], 'effective_source': 'raw', 'effective_axis': ax,
-                'effective_rpm_at_point': rpm_list[best]}
+                'effective_rpm_at_point': None}
 
-    # 若存在原始点恰好等于 limit（整型 RPM 直接匹配，噪音允许 0.05 容差）
+    # 若存在原始点恰好等于 limit（噪音允许 0.05 容差）
     tol = 0.05 if ax == 'noise_db' else 0.0
     for i, x in enumerate(xs):
         if (tol == 0.0 and x == lv) or (tol > 0.0 and abs(x - lv) <= tol):
             return {'effective_x': x, 'effective_airflow': ys[i], 'effective_source': 'raw', 'effective_axis': ax,
-                    'effective_rpm_at_point': rpm_list[i]}
+                    'effective_rpm_at_point': None}
 
-    # 位于域内且无原始点 → PCHIP 拟合
-    model = get_or_build_pchip(model_id, condition_id, ax, xs, ys)
-    if not model:
+    # 位于域内且无原始点 → 使用四合一 PCHIP 拟合
+    if not (mdl_fit and isinstance(mdl_fit, dict)):
         # 回退：取最接近 limit 的原始点
         j = min(range(len(xs)), key=lambda i: abs(xs[i] - lv))
         return {'effective_x': xs[j], 'effective_airflow': ys[j], 'effective_source': 'raw', 'effective_axis': ax,
-                'effective_rpm_at_point': rpm_list[j]}
-    lx = max(model['x0'], min(lv, model['x1']))
-    eff_y = eval_pchip(model, lx)
+                'effective_rpm_at_point': None}
+    lx = max(float(mdl_fit.get('x0') or lv), min(lv, float(mdl_fit.get('x1') or lv)))
+    eff_y = eval_pchip(mdl_fit, lx)
     return {'effective_x': lx, 'effective_airflow': float(eff_y), 'effective_source': 'fit', 'effective_axis': ax,
             'effective_rpm_at_point': None}
 
@@ -957,53 +955,29 @@ def api_curves():
 
         bucket = get_curves_for_pairs(uniq)
         series = []
-        missing = []  # 新增：记录在库中不存在的 pair
+        missing = []
 
-        def _thin_model(m: dict | None) -> dict | None:
-            if not m or not isinstance(m, dict):
-                return None
-            return {
-                'type': m.get('type', 'pchip_v1'),
-                'axis': m.get('axis'),
-                'x': m.get('x') or [],
-                'y': m.get('y') or [],
-                'm': m.get('m') or [],
-                'x0': m.get('x0'),
-                'x1': m.get('x1'),
-            }
+        # 直接构建四合一模型（内部含失效判断）
+        perf_map = build_performance_pchips(uniq)
 
-        def _collect_axis_points(b: dict, axis_key: str) -> tuple[list[float], list[float]]:
-            xs, ys = [], []
-            x_arr = b.get(axis_key) or []
-            y_arr = b.get('airflow') or []
-            n = min(len(x_arr), len(y_arr))
-            for i in range(n):
-                x = x_arr[i]
-                y = y_arr[i]
+        def _to_placeholder_array(arr):
+            out = []
+            for v in (arr or []):
                 try:
-                    xf = float(x) if x is not None else None
-                    yf = float(y) if y is not None else None
+                    if v is None:
+                        out.append(-1.0)
+                    else:
+                        fv = float(v)
+                        out.append(-1.0 if math.isnan(fv) else fv)
                 except Exception:
-                    continue
-                if xf is None or yf is None:
-                    continue
-                if not (math.isfinite(xf) and math.isfinite(yf)):
-                    continue
-                xs.append(xf)
-                ys.append(yf)
-            return xs, ys
+                    out.append(-1.0)
+            return out
 
-        # 新增：对不存在的 pair 主动清理缓存，返回 missing
         wanted_keys = {f"{m}_{c}": (m, c) for (m, c) in uniq}
         existing_keys = set(bucket.keys())
         for key, (mid, cid) in wanted_keys.items():
             if key not in existing_keys:
                 missing.append({'model_id': mid, 'condition_id': cid})
-                try:
-                    pchip_cache.delete_cached_model(mid, cid, 'rpm')
-                    pchip_cache.delete_cached_model(mid, cid, 'noise_db')
-                except Exception:
-                    pass  # 日志已在 deleteCached 内部记录
 
         for mid, cid in uniq:
             k = f"{mid}_{cid}"
@@ -1012,36 +986,8 @@ def api_curves():
                 continue
             info = b['info']
 
-            # 构建/读取 PCHIP 模型（两个轴各一份）
-            rpm_xs, rpm_ys = _collect_axis_points(b, 'rpm')
-            noise_xs, noise_ys = _collect_axis_points(b, 'noise_db')
-
-            # 新增：如果某轴已无点，清理该轴缓存
-            if not rpm_xs:
-                try: pchip_cache.delete_cached_model(info['model_id'], info['condition_id'], 'rpm')
-                except Exception: pass
-            if not noise_xs:
-                try: pchip_cache.delete_cached_model(info['model_id'], info['condition_id'], 'noise_db')
-                except Exception: pass
-
-            rpm_model = get_or_build_pchip(info['model_id'], info['condition_id'], 'rpm', rpm_xs, rpm_ys) if rpm_xs else None
-            noise_model = get_or_build_pchip(info['model_id'], info['condition_id'], 'noise_db', noise_xs, noise_ys) if noise_xs else None
-
-            def _to_placeholder_array(arr):
-                out = []
-                for v in (arr or []):
-                    try:
-                        if v is None:
-                            out.append(-1.0)
-                        else:
-                            fv = float(v)
-                            if math.isnan(fv):
-                                out.append(-1.0)
-                            else:
-                                out.append(fv)
-                    except Exception:
-                        out.append(-1.0)
-                return out
+            perf = perf_map.get(k) or {}
+            pset = (perf.get('pchip') or {})
 
             series.append(dict(
                 key=k,
@@ -1054,7 +1000,11 @@ def api_curves():
                 rpm=_to_placeholder_array(b['rpm']),
                 noise_db=_to_placeholder_array(b['noise_db']),
                 airflow=b['airflow'],
-                pchip={'rpm': _thin_model(rpm_model), 'noise_db': _thin_model(noise_model)
+                pchip={
+                    'rpm_to_airflow':   pset.get('rpm_to_airflow'),
+                    'rpm_to_noise_db':  pset.get('rpm_to_noise_db'),
+                    'noise_to_rpm':     pset.get('noise_to_rpm'),
+                    'noise_to_airflow': pset.get('noise_to_airflow')
                 }
             ))
         return resp_ok({'series': series, 'missing': missing})

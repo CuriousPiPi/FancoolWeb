@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Tuple, Optional
 import numpy as np
 import soundfile as sf
 from scipy import signal
+from app.curves.pchip_cache import eval_pchip as pchip_eval
 
 # 依赖 app/curves/pchip_cache
 try:
@@ -899,7 +900,7 @@ def build_model_from_calib_with_sweep_in_memory(root_dir: str,
 
     # 反演辅助
     def _E_sub_fit_from_R(R: float) -> float:
-        la_envsub = float(_eval_pchip_local(calib_model, float(R))) if calib_model else float('nan')
+        la_envsub = float(pchip_eval(calib_model, float(R))) if calib_model else float('nan')
         return (P0**2) * (10.0 ** (la_envsub / 10.0)) if np.isfinite(la_envsub) else float('nan')
     def LAabs_fit(R: float) -> float:
         E_sub = _E_sub_fit_from_R(R)
@@ -1141,7 +1142,7 @@ def build_model_from_calib_with_sweep_in_memory(root_dir: str,
                 E_sum = 0.0
                 for mdl in band_models:
                     if mdl and isinstance(mdl, dict):
-                        y_db = float(_eval_pchip_local(mdl, float(r)))
+                        y_db = float(pchip_eval(mdl, float(r)))
                         E_sum += (P0**2) * (10.0 ** (y_db / 10.0))
                 if harmonics and harmonics.get("n_blade", 0) > 0:
                     f1, f2 = band_edges_from_centers(centers, n_per_oct, grid="iec-decimal")
@@ -1151,13 +1152,13 @@ def build_model_from_calib_with_sweep_in_memory(root_dir: str,
                     for item in (harmonics.get("models") or []):
                         mdlh = item.get("amp_pchip_db"); h = int(item.get("h", 0) or 0)
                         if h <= 0 or not mdlh: continue
-                        Lh = float(_eval_pchip_local(mdlh, float(r)))
+                        Lh = float(pchip_eval(mdlh, float(r)))
                         if not np.isfinite(Lh): continue
                         Eh = (P0**2) * (10.0 ** (Lh/10.0))
                         for k, w in _distribute_line_to_bands(h*bpf, centers, f1, f2, sigma_bands=sigma_b, topk=topk):
                             E_sum += Eh * w
                 la_synth = 10.0 * math.log10(max(E_sum/(P0**2), 1e-30))
-                la_tgt = float(_eval_pchip_local(calib_model, float(r)))
+                la_tgt = float(pchip_eval(calib_model, float(r)))
                 delta_list.append(la_tgt - la_synth)
             corr_pchip = _build_pchip_anchor(ctrs.tolist(), delta_list, nonneg=False)
     except Exception:
@@ -1351,7 +1352,7 @@ def predict_spectrum_db_with_harmonics(model: Dict[str, Any], rpm: float) -> Tup
     Es = np.zeros((centers.size,), dtype=float)
     for i, mdl in enumerate(bands):
         if mdl and isinstance(mdl, dict):
-            y = float(_eval_pchip_local(mdl, float(rpm)))
+            y = float(pchip_eval(mdl, float(rpm)))
             Es[i] = (P0**2) * (10.0 ** (y / 10.0))
         else:
             Es[i] = 0.0
@@ -1369,16 +1370,14 @@ def predict_spectrum_db_with_harmonics(model: Dict[str, Any], rpm: float) -> Tup
             if h <= 0 or not mdl or not isinstance(mdl, dict):
                 continue
             f_line = h * bpf
-            Lh_db = float(_eval_pchip_local(mdl, float(rpm)))
+            Lh_db = float(pchip_eval(mdl, float(rpm)))
             if not np.isfinite(Lh_db):
                 continue
             Eh = (P0**2) * (10.0 ** (Lh_db / 10.0))
             for k, w in _distribute_line_to_bands(f_line, centers, f1, f2, sigma_bands=sigma_b, topk=topk):
                 Es[k] += Eh * w
 
-    # 频带基线已为闭合后，默认不再二次闭合
     la_now = 10.0 * math.log10(max(float(np.sum(Es)) / (P0**2), 1e-30))
-
     out_db: List[Optional[float]] = []
     for i in range(centers.size):
         E = float(Es[i])
@@ -1474,7 +1473,7 @@ def _apply_closure_bake_to_bands(band_models: List[Optional[Dict[str, Any]]],
             out.append(mdl); continue
         ys_new: List[float] = []
         for x, y in zip(xs, ys):
-            d = float(_eval_pchip_local(delta_pchip, float(x)))
+            d = float(pchip_eval(delta_pchip, float(x)))
             ys_new.append(float(y) + (d if np.isfinite(d) else 0.0))
         baked = _build_pchip_anchor([float(v) for v in xs], ys_new, nonneg=False)
         out.append(baked)

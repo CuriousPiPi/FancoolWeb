@@ -20,9 +20,17 @@ app.secret_key = os.getenv('APP_SECRET', 'replace-me-in-prod')  # 与前台保�
 app.register_blueprint(data_mgmt_bp)
 app.logger.setLevel('INFO')
 
+# 调整：支持环境变量控制日志级别（默认 INFO）
+_log_level = os.getenv('ADMIN_LOG_LEVEL', 'INFO').upper()
+try:
+    import logging
+    app.logger.setLevel(getattr(logging, _log_level, logging.INFO))
+except Exception:
+    app.logger.setLevel('INFO')
+
 app.register_blueprint(calib_admin_bp)
 
-# 新增：启动时打印路由表（开发用）
+# 新增：启动时打印路由表和日志级别
 def _dump_routes(_app: Flask):
     try:
         lines = []
@@ -30,6 +38,7 @@ def _dump_routes(_app: Flask):
             methods = ','.join(sorted([m for m in rule.methods if m not in ('HEAD','OPTIONS')]))
             lines.append(f"{methods:10s} {rule.rule}  -> {rule.endpoint}")
         _app.logger.info("Registered routes:\n" + "\n".join(lines))
+        _app.logger.info(f"Admin logger level: {_log_level}")
     except Exception:
         pass
 

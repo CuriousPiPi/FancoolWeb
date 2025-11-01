@@ -2,6 +2,7 @@
 """
 curves.spectrum_builder
 - 面向前台接口的异步频谱重建调度与落盘
+- 曲线侧：四合一 PCHIP 统一构建/缓存（rpm/noise 两轴的四条映射）
 """
 from __future__ import annotations
 import os
@@ -9,36 +10,34 @@ import json
 import hashlib
 import threading
 import time
-import logging   # 新增日志
+import logging
 from datetime import datetime
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 from concurrent.futures import ThreadPoolExecutor, Future
 
-from sqlalchemy import create_engine, text
-
-try:
-    from . import spectrum_cache
-    from .pchip_cache import curve_cache_dir
-except Exception:
-    import sys
-    CURVES_DIR = os.path.abspath(os.path.dirname(__file__))
-    if CURVES_DIR not in sys.path:
-        sys.path.append(CURVES_DIR)
-    import spectrum_cache  # type: ignore
-    from pchip_cache import curve_cache_dir  # type: ignore
-
+# 修复：portalocker 可选依赖 + 标志
 try:
     import portalocker  # type: ignore
     _HAS_PORTALOCKER = True
 except Exception:
+    portalocker = None  # type: ignore
     _HAS_PORTALOCKER = False
 
-log = logging.getLogger('curves.spectrum_builder')  # 新增：模块日志
+from sqlalchemy import create_engine, text
+from . import spectrum_cache
+from .pchip_cache import curve_cache_dir
+from .pchip_cache import eval_pchip as _pchip_eval
+from .pchip_cache import get_or_build_unified_perf_model
+
+log = logging.getLogger('curves.spectrum_builder')
 
 FANDB_DSN = os.getenv('FANDB_DSN', 'mysql+pymysql://localreader:12345678@127.0.0.1/FANDB?charset=utf8mb4')
 _engine = create_engine(FANDB_DSN, pool_pre_ping=True, pool_recycle=1800, future=True)
 CODE_VERSION = os.getenv('CODE_VERSION', '')
 
+# =========================
+# 参数与哈希
+# =========================
 def load_default_params() -> Dict[str, Any]:
     """
     仅从数据库读取默认校准参数；不再提供环境变量或内置默认值的回退。
@@ -71,6 +70,9 @@ def _calc_model_hash(data_hash: str, param_hash: str, code_ver: Optional[str]) -
     s = f"dh={data_hash}|ph={param_hash}|cv={code_ver or ''}"
     return hashlib.sha1(s.encode('utf-8')).hexdigest()
 
+# =========================
+# 进程/文件锁（跨进程）
+# =========================
 _LOCK_TIMEOUT_DB = int(os.getenv('CURVE_LOCK_DB_TIMEOUT_SEC', '5'))
 
 def _db_get_lock(key: str, timeout: int) -> bool:
@@ -157,6 +159,9 @@ class _CrossProcessLock:
             self._file_lock_ctx.__exit__(exc_type, exc_val, exc_tb)
             self._file_lock_ctx = None
 
+# =========================
+# Pipeline 调度与缓存写入
+# =========================
 def _run_pipeline_and_collect(work_dir: str, params: Dict[str, Any], model_id: int, condition_id: int) -> Tuple[Dict[str, Any], list[Dict[str, Any]]]:
     """
     优先从项目根目录 pipeline.py 导入 run_calibration_and_model；
@@ -340,3 +345,93 @@ def schedule_rebuild(model_id: int, condition_id: int, audio_batch_id: str, base
         fut.add_done_callback(_cleanup)
 
         return fut
+
+# =========================
+# 公用：PCHIP 评估薄封装
+# =========================
+def eval_pchip_model(model: Optional[Dict[str, Any]], x: float) -> float:
+    """
+    统一 PCHIP 评估（替代任何本地实现），失败时返回 NaN
+    """
+    if not model or not isinstance(model, dict):
+        return float('nan')
+    try:
+        return float(_pchip_eval(model, float(x)))
+    except Exception:
+        return float('nan')
+
+# =========================
+# 曲线侧：从 general_view 三元组构建四条轴向 PCHIP
+# =========================
+def _collect_perf_rows(pairs: List[Tuple[int, int]]) -> Dict[str, dict]:
+    """
+    读取 general_view 中的三元组：
+      model_id, condition_id, rpm, airflow (airflow_cfm), noise_db
+    仅保留数值有效的点。
+    返回：key -> { model_id, condition_id, rpm[], airflow[], noise[] }
+    """
+    out: Dict[str, dict] = {}
+    if not pairs:
+        return out
+    conds, params = [], {}
+    for i, (m, c) in enumerate(pairs, start=1):
+        conds.append(f"(:m{i}, :c{i})")
+        params[f"m{i}"] = int(m)
+        params[f"c{i}"] = int(c)
+
+    sql = f"""
+      SELECT model_id, condition_id, rpm, airflow_cfm AS airflow, noise_db
+      FROM general_view
+      WHERE (model_id, condition_id) IN ({",".join(conds)})
+      ORDER BY model_id, condition_id, rpm
+    """
+    with _engine.begin() as conn:
+        rows = conn.execute(text(sql), params).fetchall()
+
+    for r in rows or []:
+        mp = r._mapping
+        mid = int(mp['model_id']); cid = int(mp['condition_id'])
+        k = f"{mid}_{cid}"
+        b = out.setdefault(k, {'model_id': mid, 'condition_id': cid, 'rpm': [], 'airflow': [], 'noise': []})
+        rpm = mp.get('rpm'); airflow = mp.get('airflow'); noise = mp.get('noise_db')
+        try:
+            af = float(airflow) if airflow is not None else None
+            nz = float(noise) if noise is not None else None
+            rp = float(rpm) if rpm is not None else None
+        except Exception:
+            continue
+        if af is None or not (af == af):  # 过滤 NaN airflow
+            continue
+        if (rp is None) and (nz is None):
+            continue
+        b['rpm'].append(rp)
+        b['airflow'].append(af)
+        b['noise'].append(nz)
+    return out
+
+def build_performance_pchips(pairs: List[Tuple[int, int]]) -> Dict[str, Dict[str, Any]]:
+    """
+    为每个 (model_id, condition_id) 构建四条轴向 PCHIP（唯一来源）：
+      - 继承旧逻辑：基于 general_view 三轴点 + 环境参数 组成 data_hash/env_key，一致则命中缓存，否则重建并落盘。
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    bucket = _collect_perf_rows(pairs)
+    for k, b in bucket.items():
+        mid = int(b['model_id']); cid = int(b['condition_id'])
+        rpm: List[float] = [float(v) for v in b.get('rpm') or [] if v is not None]
+        air: List[float] = [float(v) for v in b.get('airflow') or [] if v is not None]
+        noi: List[float] = [float(v) for v in b.get('noise') or [] if v is not None]
+
+        unified = get_or_build_unified_perf_model(mid, cid, rpm, air, noi) or {}
+        pset = (unified.get('pchip') or {})
+        out[k] = {
+            'model_id': mid,
+            'condition_id': cid,
+            'pchip': {
+                'rpm_to_airflow':   pset.get('rpm_to_airflow'),
+                'rpm_to_noise_db':  pset.get('rpm_to_noise_db'),
+                'noise_to_rpm':     pset.get('noise_to_rpm'),
+                'noise_to_airflow': pset.get('noise_to_airflow')
+            }
+        }
+    return out
