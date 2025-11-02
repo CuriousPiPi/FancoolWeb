@@ -11,7 +11,7 @@
   --shadow-strong:0 8px 24px rgba(0,0,0,0.18);
   --fit-handle-w: 16px;
   --fit-handle-h: 24px;
-  --fit-hitbox:   36px;
+  --fit-hitbox:   36px;  /* 透明命中区一边尺寸（桌面） */
 }
 [data-theme="dark"]{
   --bg-bubble:#1f293700;
@@ -26,23 +26,16 @@
   --shadow-strong:0 8px 24px rgba(0,0,0,0.45);
 }
 
-/* 频谱模式：强制隐藏曲线专属交互（防止鼠标事件又显示） */
-[data-chart-mode="spectrum"] #fitButtons,
-[data-chart-mode="spectrum"] #fitBubble,
-[data-chart-mode="spectrum"] #fitPointer,
-[data-chart-mode="spectrum"] .chart-xaxis-overlay {
-  display: none !important;
-  visibility: hidden !important;
-}
+/* 明确允许锚定（若全局样式曾关闭） */
+#chartRoot, #spectrumHost { overflow-anchor: auto; }
 
-/* 非频谱模式：隐藏频谱的 RPM 水平滑块（如仍存在旧控件） */
-:root:not([data-chart-mode="spectrum"]) [data-role="spectrum-rpm-controls"]{
-  display: none !important;
-}
+/* x轴切换与拟合 UI 样式保持不变 ... */
 
-/* 非频谱模式：隐藏频谱竖直 RPM 导轨 */
-:root:not([data-chart-mode="spectrum"]) .spr-rail{
-  display: none !important;
+/* 频谱容器高度过渡 */
+#spectrumHost {
+  height: 0;
+  overflow: hidden;
+  transition: height var(--transition-speed-bg, .35s) ease;
 }
 
  /*x轴切换开关*/
@@ -141,7 +134,7 @@
 .fit-bubble{
   position: fixed !important;
   min-width: 320px;          /* 保底 */
-  max-width: min(560px, 92vw);
+  max-width: min(480px, 92vw);
   z-index: 220 !important;   /* 层级：低于 overlay 侧栏(300)，高于指针(200)、X轴(210) */
   visibility: hidden;
   max-height: 60vh;
@@ -186,7 +179,7 @@
   width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-bottom: 9px solid var(--accent);
 }
 
-/* 透明命中区扩大 */
+/* 给把手增加透明“扩大命中区”——提高易点中性，不改变外观 */
 .fit-pointer .handle::before{
   content: "";
   position: absolute;
@@ -203,4 +196,9 @@
   position:absolute; z-index:2147483643; font-size:11px; color: var(--text-); pointer-events:none; user-select:none; white-space:nowrap;
 }
 
-
+/* 新增：频谱容器基础过渡（用高度动画驱动容器向下/向上过渡） */
+#spectrumHost {
+  height: 0;                    /* 初始收起 */
+  overflow: hidden;             /* 防止内容外溢 */
+  transition: height var(--transition-speed-bg, .35s) ease;
+}

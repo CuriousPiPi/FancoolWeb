@@ -1378,3 +1378,12 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
   border-color: var(--border-color) !important;
   color: var(--text-primary) !important;
 }
+
+/* 新增：频谱展开时让图表容器自适应高度，并解除内部 100% 高度限制 */
+[data-chart-mode="spectrum"] .fc-chart-container {
+  height: auto !important;
+}
+[data-chart-mode="spectrum"] #chartRoot,
+[data-chart-mode="spectrum"] #chartHost {
+  height: auto !important;
+}

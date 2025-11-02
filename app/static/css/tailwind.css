@@ -216,6 +216,9 @@
   .static {
     position: static;
   }
+  .sticky {
+    position: sticky;
+  }
   .z-10 {
     z-index: 10;
   }

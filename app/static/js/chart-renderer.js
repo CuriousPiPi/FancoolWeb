@@ -12,6 +12,48 @@
   let lastIsNarrow = null;
   let isFs = false;
 
+  let baseMainChartHeight = null;
+  let __spectrumFollowRaf = null;
+
+  let spectrumRoot = null;
+  let spectrumInner = null;
+  let spectrumChart = null;
+  let spectrumEnabled = false;
+  let lastSpectrumOption = null;
+  const spectrumModelCache = new Map();
+  const SPECTRUM_X_MIN = 20;
+  const SPECTRUM_X_MAX = 20000;
+  let __spectrumRaf = null;
+
+  let spectrumFirstShowDone = false;
+
+  // 目标高度：取主图可见高的一半，最小 140px
+function getTargetSpectrumHeight(){
+  const mainH =
+    (root && root.getBoundingClientRect ? root.getBoundingClientRect().height : 0) ||
+    (chart && chart.getHeight && chart.getHeight()) || 600;
+  return Math.max(140, Math.round(mainH / 2));
+}
+
+    // 新增：滚动容器与底部判断/矫正
+  function getScrollEl(){
+    return document.scrollingElement || document.documentElement || document.body;
+  }
+  function isAtPageBottom(slackPx = 6){
+    const se = getScrollEl();
+    const bottomGap = (se.scrollHeight - (se.scrollTop + se.clientHeight));
+    return bottomGap <= Math.max(0, slackPx|0);
+  }
+  function preserveBottomBy(deltaPx){
+    const d = Math.max(0, Math.round(deltaPx) || 0);
+    if (!d) return;
+    try {
+      const se = getScrollEl();
+      se.scrollTop += d;
+    } catch(_) {}
+  }
+
+
   function getCssTransitionMs(){
     try {
       const raw = getComputedStyle(document.documentElement).getPropertyValue('--transition-speed').trim();
@@ -186,77 +228,91 @@
     }, { passive:true });
   }
 
-  function bindChartListeners(){
-    chart.on('legendselectchanged', () => { if (showFitCurves) refreshFitBubble(); });
-    chart.on('dataZoom', () => {
-      clampXQueryIntoVisibleRange();
+// 替换整个函数：bindChartListeners（同步频谱图与主图 Legend 选择）
+function bindChartListeners(){
+  chart.on('legendselectchanged', () => {
+    if (showFitCurves) refreshFitBubble();
+    // 频谱图：跟随主图 Legend 筛选
+    if (spectrumEnabled && spectrumChart) {
+      buildAndSetSpectrumOption(); // 不重新取数，只按可见性重建
+    }
+  });
+  chart.on('dataZoom', () => {
+    clampXQueryIntoVisibleRange();
+    repaintPointer();
+    if (showFitCurves) refreshFitBubble();
+  });
+}
+
+// 替换整个函数：onWindowResize（保持频谱图半高并沿用左右边距）
+function onWindowResize(){
+  if (!chart) return;
+  const nowNarrow = layoutIsNarrow();
+  if (lastIsNarrow === null) lastIsNarrow = nowNarrow;
+
+  // NEW: 窗口 resize 期间也跟踪 root 几何漂移（例如响应式 reflow）
+  maybeStartRootPosWatch(900);
+
+  if (nowNarrow !== lastIsNarrow) {
+    lastIsNarrow = nowNarrow;
+    if (lastPayload) render(lastPayload); else chart.resize();
+  } else {
+    chart.resize();
+    if (lastOption) {
+      const { x, y, visible } = computePrefixCenter(lastOption);
+      placeAxisOverlayAt(x, y, visible && !lastOption.__empty);
+      placeFitUI();
       repaintPointer();
-      if (showFitCurves) refreshFitBubble();
-    });
-  }
-
-  function onWindowResize(){
-    if (!chart) return;
-    const nowNarrow = layoutIsNarrow();
-    if (lastIsNarrow === null) lastIsNarrow = nowNarrow;
-
-    // NEW: 窗口 resize 期间也跟踪 root 几何漂移（例如响应式 reflow）
-    maybeStartRootPosWatch(900);
-
-    if (nowNarrow !== lastIsNarrow) {
-      lastIsNarrow = nowNarrow;
-      if (lastPayload) render(lastPayload); else chart.resize();
-    } else {
-      chart.resize();
-      if (lastOption) {
-        const { x, y, visible } = computePrefixCenter(lastOption);
-        placeAxisOverlayAt(x, y, visible && !lastOption.__empty);
-        placeFitUI();
-        repaintPointer();
-      }
     }
   }
 
+  // 同步频谱布局
+  updateSpectrumLayout();
+}
+
   let __chartRO = null;
-  function installChartResizeObserver(){
-    if (__chartRO || !root || typeof ResizeObserver === 'undefined') return;
-    __chartRO = new ResizeObserver(entries => {
-      for (const entry of entries) {
-        const cr = entry.contentRect || {};
-        if (chart && cr.width > 0 && cr.height > 0) {
-          // NEW: 容器尺寸变化 → 启动短暂的几何跟踪，覆盖“移动 + 尺寸变动”的过渡阶段
-          primeRootRect();
-          maybeStartRootPosWatch(900);
+// 替换整个函数：installChartResizeObserver（联动频谱布局）
+function installChartResizeObserver(){
+  if (__chartRO || !root || typeof ResizeObserver === 'undefined') return;
+  __chartRO = new ResizeObserver(entries => {
+    for (const entry of entries) {
+      const cr = entry.contentRect || {};
+      if (chart && cr.width > 0 && cr.height > 0) {
+        // NEW: 容器尺寸变化 → 启动短暂的几何跟踪，覆盖“移动 + 尺寸变动”的过渡阶段
+        primeRootRect();
+        maybeStartRootPosWatch(900);
 
-          // 当容器宽度变化导致“窄/宽布局”跨阈值时，重建 option（让 legend 立即切换布局）
-          const nowNarrow = layoutIsNarrow();
-          if (lastIsNarrow === null) lastIsNarrow = nowNarrow;
-          if (nowNarrow !== lastIsNarrow) {
-            lastIsNarrow = nowNarrow;
-            try {
-              if (lastPayload) { render(lastPayload); }
-              else { chart.resize(); }
-            } catch(_){}
-            // render() 会自行调用 placeFitUI / repaintPointer / 更新 overlay，无需继续执行后续分支
-            continue;
-          }
-
-          // 未跨阈值：保持原有轻量刷新路径
-          try { chart.resize(); } catch(_){}
+        // 当容器宽度变化导致“窄/宽布局”跨阈值时，重建 option（让 legend 立即切换布局）
+        const nowNarrow = layoutIsNarrow();
+        if (lastIsNarrow === null) lastIsNarrow = nowNarrow;
+        if (nowNarrow !== lastIsNarrow) {
+          lastIsNarrow = nowNarrow;
           try {
-            if (lastOption) {
-              const { x, y, visible } = computePrefixCenter(lastOption);
-              placeAxisOverlayAt(x, y, visible && !lastOption.__empty);
-            }
-            placeFitUI();
-            repaintPointer();
-            updateAxisSwitchPosition({ force: true, animate: false });
+            if (lastPayload) { render(lastPayload); }
+            else { chart.resize(); }
           } catch(_){}
+          // render() 会自行调用 placeFitUI / repaintPointer / 更新 overlay
+          updateSpectrumLayout();
+          continue;
         }
+
+        // 未跨阈值：保持原有轻量刷新路径
+        try { chart.resize(); } catch(_){}
+        try {
+          if (lastOption) {
+            const { x, y, visible } = computePrefixCenter(lastOption);
+            placeAxisOverlayAt(x, y, visible && !lastOption.__empty);
+          }
+          placeFitUI();
+          repaintPointer();
+          updateAxisSwitchPosition({ force: true, animate: false });
+        } catch(_){}
+        updateSpectrumLayout();
       }
-    });
-    __chartRO.observe(root);
-  }
+    }
+  });
+  __chartRO.observe(root);
+}
 
   function isMobile(){
     return /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
@@ -275,27 +331,29 @@
     return narrow;
   }
 
-  // ===== 对外 API =====
+// 1) 在 mount() 里，首屏就创建频谱宿主（保持 0 高度收起）
 function mount(rootEl) {
   root = rootEl;
   if (!root) {
     warnOnce('[ChartRenderer] mount(rootEl) 需要一个有效的 DOM 容器');
     return;
   }
+
+  // 新增：首屏就创建 #spectrumHost，保证后续仅是“高度变化”，浏览器原生跟随滚动
+  ensureSpectrumHost();
+
   ensureEcharts();  // 统一解析初始主题
   const initialTheme =
     (window.ThemePref && typeof window.ThemePref.resolve === 'function')
       ? window.ThemePref.resolve()
       : (document.documentElement.getAttribute('data-theme') || 'light');
 
-  // 写入 DOM（不触发后端上报）
   if (window.ThemePref && typeof window.ThemePref.setDom === 'function') {
     window.ThemePref.setDom(initialTheme);
   } else {
     document.documentElement.setAttribute('data-theme', initialTheme);
   }
 
-  // 首次挂载时渲染空数据状态（沿用 initialTheme）
   if (!chart) return;
   const emptyPayload = { chartData: { series: [] }, theme: initialTheme };
   render(emptyPayload);
@@ -315,61 +373,69 @@ function setTheme(theme) {
   if (lastPayload) render(lastPayload);
 }
 
-  function render(payload){
-    lastPayload = payload || lastPayload;
-    if (!root){ warnOnce('[ChartRenderer] 请先调用 mount(rootEl)'); return; }
-    if (!window.echarts){ requestAnimationFrame(()=>render(lastPayload)); return; }
-    ensureEcharts();
-    if (!chart) return;
+// 替换整个函数：render（渲染后联动频谱懒加载与布局）
+function render(payload){
+  lastPayload = payload || lastPayload;
+  if (!root){ warnOnce('[ChartRenderer] 请先调用 mount(rootEl)'); return; }
+  if (!window.echarts){ requestAnimationFrame(()=>render(lastPayload)); return; }
+  ensureEcharts();
+  if (!chart) return;
 
-    const prevXMode = currentXModeFromPayload(lastPayload);
-    const prevEmpty = !!(lastOption && lastOption.__empty);
+  const prevXMode = currentXModeFromPayload(lastPayload);
+  const prevEmpty = !!(lastOption && lastOption.__empty);
 
-    syncThemeAttr((lastPayload && lastPayload.theme) || 'light');
+  syncThemeAttr((lastPayload && lastPayload.theme) || 'light');
 
-    if (!fitUIInstalled && showFitCurves) { ensureFitUI(); fitUIInstalled = true; }
+  if (!fitUIInstalled && showFitCurves) { ensureFitUI(); fitUIInstalled = true; }
 
-    const option = buildOption(lastPayload);
-    const nextXMode = currentXModeFromPayload(lastPayload);
-    const nextEmpty = !!option.__empty;
+  const option = buildOption(lastPayload);
+  const nextXMode = currentXModeFromPayload(lastPayload);
+  const nextEmpty = !!option.__empty;
 
-    if (prevXMode !== nextXMode || prevEmpty !== nextEmpty) {
-      try { chart.clear(); } catch(_){}
-    }
-
-    chart.setOption(option, true);
-    chart.resize();
-
-    requestAnimationFrame(() => updateAxisSwitchPosition({ force:true, animate:false }));
-    if (option.__empty) {
-      try { chart.dispatchAction({ type: 'updateAxisPointer', currTrigger: 'leave' }); } catch(_){}
-    }
-
-    const { x, y, visible } = computePrefixCenter(option);
-    placeAxisOverlayAt(x, y, visible && !option.__empty);
-
-    lastOption = option;
-    lastIsNarrow = layoutIsNarrow();
-
-    // 窄屏也显示拟合 UI
-    toggleFitUI(showFitCurves);
-    placeFitUI();
-
-    // NEW: 渲染后短暂跟踪一次位置，以覆盖同步/异步布局抖动
-    primeRootRect();
-    maybeStartRootPosWatch(600);
-
-    try {
-      const onFinished = () => {
-        try { chart.off('finished', onFinished); } catch(_){}
-        repaintPointer();
-      };
-      chart.on('finished', onFinished);
-    } catch(_){}
-    requestAnimationFrame(repaintPointer);
-
-    if (showFitCurves) refreshFitBubble();
+  if (prevXMode !== nextXMode || prevEmpty !== nextEmpty) {
+    try { chart.clear(); } catch(_){}
   }
+
+  chart.setOption(option, true);
+  chart.resize();
+
+  requestAnimationFrame(() => updateAxisSwitchPosition({ force:true, animate:false }));
+  if (option.__empty) {
+    try { chart.dispatchAction({ type: 'updateAxisPointer', currTrigger: 'leave' }); } catch(_){}
+  }
+
+  const { x, y, visible } = computePrefixCenter(option);
+  placeAxisOverlayAt(x, y, visible && !option.__empty);
+
+  lastOption = option;
+  lastIsNarrow = layoutIsNarrow();
+
+  // 窄屏也显示拟合 UI
+  toggleFitUI(showFitCurves);
+  placeFitUI();
+
+  // NEW: 渲染后短暂跟踪一次位置，以覆盖同步/异步布局抖动
+  primeRootRect();
+  maybeStartRootPosWatch(600);
+
+  try {
+    const onFinished = () => {
+      try { chart.off('finished', onFinished); } catch(_){}
+      repaintPointer();
+      // 频谱：图完成后再做一次布局同步（避免尺寸抖动）
+      updateSpectrumLayout();
+      if (spectrumEnabled) { requestAndRenderSpectrum(); }
+    };
+    chart.on('finished', onFinished);
+  } catch(_){}
+  requestAnimationFrame(repaintPointer);
+
+  if (showFitCurves) refreshFitBubble();
+
+  // 若用户已开启频谱，则尝试懒加载并绘制
+  updateSpectrumLayout();
+  if (spectrumEnabled) { requestAndRenderSpectrum(); }
+}
 
   function resize(){ if (chart) chart.resize(); }
 
@@ -885,7 +951,7 @@ function setTheme(theme) {
       if (normalized !== 'rpm' && normalized !== 'noise_db') return;
       if (xAxisOverride === normalized) return;
       xAxisOverride = normalized;
-      try { localStorage.setItem('x_axis_type', normalized); } catch(_) {}
+      try { localStorage.setItem('x_axis_type', normalized); } catch(_){}
       pos(normalized, true);
       protectSliderAnimationWindow();
       if (lastPayload) render(lastPayload);
@@ -934,7 +1000,9 @@ function setTheme(theme) {
       pos(currentXModeFromPayload(lastPayload), true);
     }
 
-    xAxisSwitchTrack.addEventListener('click', () => {
+    xAxisSwitchTrack.addEventListener('click', (e) => {
+      e.preventDefault();     // 关键：阻止任何潜在默认行为（例如提交）
+      e.stopPropagation();    // 关键：不让点击冒泡到上层表单或容器
       if (dragMoved) { dragMoved = false; return; }
       const curr = currentXModeFromPayload(lastPayload);
       const next = (curr === 'rpm') ? 'noise_db' : 'rpm';
@@ -975,76 +1043,90 @@ function setTheme(theme) {
     return hint;
   }
 
-  function ensureFitUI(){
-    // 仅保留“趋势拟合曲线”按钮，移除 ECHARTS 原生曲线按钮
-    let btns = getById('fitButtons');
-    if (!btns){
-      btns = document.createElement('div');
-      btns.id = 'fitButtons';
-      btns.className = 'fit-buttons';
-      btns.innerHTML = `
-        <button class="btn" id="btnFit">${FIT_ALGO_NAME}<br>曲线</button>
-      `;
-      appendToRoot(btns);
+function ensureFitUI(){
+  let btns = getById('fitButtons');
+  if (!btns){
+    btns = document.createElement('div');
+    btns.id = 'fitButtons';
+    btns.className = 'fit-buttons';
+    btns.innerHTML = `
+      <button class="btn" id="btnFit" type="button">${FIT_ALGO_NAME}<br>曲线</button>
+      <button class="btn" id="btnSpectrum" type="button">频谱图</button>
+    `;
+    appendToRoot(btns);
 
-      const btnFit = btns.querySelector('#btnFit');
-      function syncButtons(){
-        btnFit.classList.toggle('active', showFitCurves);
-      }
+    const btnFit = btns.querySelector('#btnFit');
+    const btnSpectrum = btns.querySelector('#btnSpectrum');
+    function syncButtons(){
+      btnFit.classList.toggle('active', showFitCurves);
+      btnSpectrum.classList.toggle('active', spectrumEnabled);
+    }
 
-      btnFit.addEventListener('click', ()=>{
-        showFitCurves = !showFitCurves;
-        // 切换后重置气泡位置
-        bubbleUserMoved = false; bubblePos.left = null; bubblePos.top = null;
-        syncButtons();
-        if (lastPayload) render(lastPayload);
-        requestAnimationFrame(placeFitUI);
-      });
-
+    btnFit.addEventListener('click', (e)=>{
+      e.preventDefault();   // 双保险，阻止任何表单默认动作
+      e.stopPropagation();
+      showFitCurves = !showFitCurves;
+      bubbleUserMoved = false; bubblePos.left = null; bubblePos.top = null;
       syncButtons();
-    }
+      if (lastPayload) render(lastPayload);
+      requestAnimationFrame(placeFitUI);
+    });
 
-    // 气泡：挂到 body，使用 fixed；但位置以“相对图表”的偏移（bubblePos）计算
-    let bubble = getById('fitBubble');
-    if (!bubble){
-      bubble = document.createElement('div');
-      bubble.id = 'fitBubble';
-      bubble.className = 'fit-bubble';
-      bubble.innerHTML = `
-        <div class="head">
-          <div class="title">${FIT_ALGO_NAME} 估算值</div>
-          <div class="x-input">
-            <span>当前位置</span>
-            <input id="fitXInput" type="number" step="1" />
-            <span id="fitXUnit"></span>
-          </div>
-        </div>
-        <div id="fitBubbleRows"></div>
-        <div class="hint">按系列可见性（Legend）过滤，按风量从大到小排序</div>
-      `;
-      document.body.appendChild(bubble);
-      bubble.style.position = 'fixed';
+    btnSpectrum.addEventListener('click', async (e)=>{
+      e.preventDefault();   // 双保险
+      e.stopPropagation();
+      spectrumEnabled = !spectrumEnabled;
+      syncButtons();
+      toggleSpectrumUI(spectrumEnabled);
+      if (spectrumEnabled) {
+        await requestAndRenderSpectrum();
+      }
+    });
 
-      adoptBubbleHost();
-      bindBubbleDrag(bubble);
-
-      const xInput = bubble.querySelector('#fitXInput');
-      xInput.addEventListener('input', onBubbleInputLive);
-      xInput.addEventListener('change', onBubbleInputCommit);
-      xInput.addEventListener('keydown', (e)=>{ if (e.key === 'Enter') { onBubbleInputCommit(); } });
-    }
-
-    // 指针
-    let ptr = getById('fitPointer');
-    if (!ptr){
-      ptr = document.createElement('div');
-      ptr.id = 'fitPointer';
-      ptr.className = 'fit-pointer';
-      ptr.innerHTML = `<div class="line"></div><div class="handle" id="fitPointerHandle"></div>`;
-      appendToRoot(ptr);
-      bindPointerDrag();
-    }
+    syncButtons();
   }
+
+  // 气泡：挂到 body，使用 fixed；但位置等于“图表左上角 + 相对偏移 bubblePos”
+  let bubble = getById('fitBubble');
+  if (!bubble){
+    bubble = document.createElement('div');
+    bubble.id = 'fitBubble';
+    bubble.className = 'fit-bubble';
+    bubble.innerHTML = `
+      <div class="head">
+        <div class="title">${FIT_ALGO_NAME} 估算值</div>
+        <div class="x-input">
+          <span>当前位置</span>
+          <input id="fitXInput" type="number" step="1" />
+          <span id="fitXUnit"></span>
+        </div>
+      </div>
+      <div id="fitBubbleRows"></div>
+      <div class="hint">按系列可见性（Legend）过滤，按风量从大到小排序</div>
+    `;
+    document.body.appendChild(bubble);
+    bubble.style.position = 'fixed';
+
+    adoptBubbleHost();
+    bindBubbleDrag(bubble);
+
+    const xInput = bubble.querySelector('#fitXInput');
+    xInput.addEventListener('input', onBubbleInputLive);
+    xInput.addEventListener('change', onBubbleInputCommit);
+    xInput.addEventListener('keydown', (e)=>{ if (e.key === 'Enter') { onBubbleInputCommit(); } });
+  }
+
+  // 指针
+  let ptr = getById('fitPointer');
+  if (!ptr){
+    ptr = document.createElement('div');
+    ptr.id = 'fitPointer';
+    ptr.className = 'fit-pointer';
+    ptr.innerHTML = `<div class="line"></div><div class="handle" id="fitPointerHandle"></div>`;
+    appendToRoot(ptr);
+    bindPointerDrag();
+  }
+}
 
   let bubbleUserMoved = false;
   const bubblePos = { left: null, top: null };
@@ -1255,6 +1337,8 @@ function setTheme(theme) {
         xQueryByMode[mode] = clampXDomain(xVal);
         syncBubbleInput();
         if (showFitCurves) refreshFitBubble();
+        // 实时同步频谱
+        if (spectrumEnabled && spectrumChart) scheduleSpectrumRebuild();
       }
     }
     function onUp(){
@@ -1277,6 +1361,15 @@ function setTheme(theme) {
     window.addEventListener('pointerup', onUp, { passive:true });
     window.addEventListener('pointercancel', onCancel);
     window.addEventListener('blur', onCancel);
+  }
+
+  function scheduleSpectrumRebuild(){
+    if (!spectrumEnabled || !spectrumChart) return;
+    if (__spectrumRaf) return;
+    __spectrumRaf = requestAnimationFrame(() => {
+      __spectrumRaf = null;
+      buildAndSetSpectrumOption();
+    });
   }
 
   function pxToDataX(xPixel){
@@ -1349,10 +1442,14 @@ function setTheme(theme) {
     if (ptr && Number.isFinite(xPixel)) ptr.style.left = xPixel + 'px';
 
     if (showFitCurves) refreshFitBubble();
+    // 实时同步频谱
+    if (spectrumEnabled && spectrumChart) scheduleSpectrumRebuild();
   }
   function onBubbleInputCommit(){
     repaintPointer();
     refreshFitBubble();
+    // 实时同步频谱
+    if (spectrumEnabled && spectrumChart) scheduleSpectrumRebuild();
   }
 
   function refreshFitBubble(){
@@ -1409,8 +1506,11 @@ function setTheme(theme) {
     const maxValChars = valTexts.reduce((m,s)=>Math.max(m, s.length), 1);
     const pctWidthCh = 6;
 
-    const crossUnit = (mode === 'rpm') ? 'dB' : 'RPM';
-    const crossFmt  = (v)=> (mode === 'rpm') ? Number(v).toFixed(1) : String(Math.round(Number(v)));
+    // 工具：RPM 数字左侧补空至 4 位
+    const pad4 = (n) => {
+      const s = String(Math.round(Number(n)));
+      return s.length < 4 ? (' '.repeat(4 - s.length) + s) : s;
+    };
 
     const ordered = withVal.concat(noVal);
     rowsEl.innerHTML = ordered.map(it => {
@@ -1420,16 +1520,49 @@ function setTheme(theme) {
       const pctText = (pct==null) ? '-' : `(${pct}%)`;
 
       const hasCross = Number.isFinite(it.cross);
-      const crossText = hasCross ? `${crossFmt(it.cross)} ${crossUnit}` : '-';
+      // 交叉值：转速/噪音
+      let crossHTML = '';
+      if (hasCross) {
+        if (mode === 'noise_db') {
+          // X=噪音 → 显示拟合转速：以 4 位数为基准左补空
+          const rpmDigits = pad4(it.cross);
+          crossHTML = `<span style="display:inline-block; width:4ch; text-align:right; font-variant-numeric:tabular-nums;">${rpmDigits}</span> RPM`;
+        } else {
+          // X=转速 → 显示拟合噪音，1 位小数
+          crossHTML = `${Number(it.cross).toFixed(1)} dB`
+        }
+      }
+
+      // 无有效拟合值（主风量无效）→ 仅显示一个 “-”，不要分隔符与其它占位
+      if (!hasY) {
+        return `
+          <div class="row">
+            <span class="dot" style="background:${it.color}"></span>
+            <span>${it.name}</span>
+            <span style="margin-left:auto; display:inline-flex; align-items:center; gap:0;">
+              <span style="color:var(--text-muted); font-variant-numeric:tabular-nums;">-</span>
+            </span>
+          </div>
+        `;
+      }
+
+      // 有主值：永远显示“风量+百分比”，与之前相同；
+      // 仅当有交叉值时才显示分隔竖线与交叉值；没有交叉值时不显示竖线与额外的 “-”
+      const crossBlock = hasCross
+        ? `
+            <span class="sep" style="color:var(--text-muted); opacity:.5; margin:0 8px;">│</span>
+            <span style="color:var(--text-muted); font-variant-numeric:tabular-nums;">${crossHTML}</span>
+          `
+        : '';
 
       return `
         <div class="row">
           <span class="dot" style="background:${it.color}"></span>
           <span>${it.name}</span>
-          <span style="margin-left:auto; display:inline-flex; align-items:center; gap:10px;">
+          <span style="margin-left:auto; display:inline-flex; align-items:center; gap:0;">
             <span style="min-width:${maxValChars}ch; text-align:right; font-weight:800; font-variant-numeric:tabular-nums;">${valText}</span>
             <span style="width:${pctWidthCh}ch; text-align:right; font-variant-numeric:tabular-nums;">${pctText}</span>
-            <span style="color:var(--text-muted); font-variant-numeric:tabular-nums;">${crossText}</span>
+            ${crossBlock}
           </span>
         </div>
       `;
@@ -1569,6 +1702,398 @@ function setTheme(theme) {
   }
 
   function toggleFullscreen(){ if (document.fullscreenElement) exitFullscreen(); else enterFullscreen(); }
+
+  // 确保仅安装一次：频谱容器高度过渡结束时强制 resize，消除“底部空一段”
+  function ensureSpectrumTransitionResizeHook(){
+    if (!spectrumRoot || spectrumRoot.__resizeHooked__) return;
+    try {
+      spectrumRoot.addEventListener('transitionend', (e) => {
+        if (!spectrumEnabled) return;
+        if (e && e.propertyName !== 'height') return;
+        try {
+          spectrumChart && spectrumChart.resize();
+          // 高度稳定后再按当前指针/Legend 重建一次
+          buildAndSetSpectrumOption();
+        } catch(_) {}
+      }, { passive:true });
+      spectrumRoot.__resizeHooked__ = true;
+    } catch(_) {}
+  }
+
+function ensureSpectrumHost() {
+  if (spectrumRoot && spectrumRoot.isConnected && spectrumInner && spectrumInner.isConnected) {
+    return spectrumRoot;
+  }
+
+  // 先尝试 adopt 页面已有 DOM
+  let host =
+    (root && root.parentElement && root.parentElement.querySelector('#spectrumHost')) ||
+    document.getElementById('spectrumHost');
+
+  if (!host) {
+    host = document.createElement('div');
+    host.id = 'spectrumHost';
+    try {
+      const parent = root?.parentElement || document.body;
+      parent.insertBefore(host, root.nextSibling);
+    } catch(_) {
+      appendToRoot(host);
+    }
+  }
+
+  // 基础样式（不覆盖已有）
+  if (!host.style.width) host.style.width = '100%';
+  if (!host.style.position) host.style.position = 'relative';
+  if (!host.style.overflow) host.style.overflow = 'hidden';
+  if (!host.style.transition) host.style.transition = `height ${Math.max(180, getCssTransitionMs())}ms ease`;
+  try { host.style.setProperty('overflow-anchor', 'auto'); } catch(_) {}
+
+  // NEW: 内层固定高宿主，ECharts 挂在这里
+  let inner = host.querySelector('.spectrum-inner');
+  if (!inner) {
+    inner = document.createElement('div');
+    inner.className = 'spectrum-inner';
+    inner.style.width = '100%';
+    inner.style.height = '0px';      // 高度由 JS 设为目标值
+    inner.style.position = 'relative';
+    inner.style.overflow = 'visible'; // 内层不裁切，外层裁切负责“露出”
+    host.appendChild(inner);
+  }
+
+  spectrumRoot = host;
+  spectrumInner = inner;
+  return host;
+}
+
+function ensureSpectrumChart() {
+  ensureSpectrumHost();
+  if (spectrumChart || !window.echarts || !spectrumInner) return;
+  spectrumChart = echarts.init(spectrumInner, null, {
+    renderer:'canvas',
+    devicePixelRatio: window.devicePixelRatio || 1
+  });
+}
+
+function toggleSpectrumUI(show) {
+  ensureSpectrumHost();
+  spectrumEnabled = !!show;
+  if (!spectrumRoot) return;
+
+  const docEl = document.documentElement;
+
+  if (show) {
+    // 允许容器自适应：切换属性，以便 fancool.css 中的 [data-chart-mode="spectrum"] 生效
+    try { docEl.setAttribute('data-chart-mode', 'spectrum'); } catch(_) {}
+
+    // 稳住主图最小高度，避免早期收缩
+    if (root) {
+      const rh = Math.max(220, Math.round(root.getBoundingClientRect().height || (chart?.getHeight?.() || 480)));
+      try { root.style.minHeight = rh + 'px'; } catch(_) {}
+    }
+
+    ensureSpectrumChart();
+
+    // 1) 预先把内层设为目标高度，先完成一次尺寸确定 + 渲染
+    const target = getTargetSpectrumHeight();
+    if (spectrumInner) spectrumInner.style.height = target + 'px';
+    try { spectrumChart && spectrumChart.resize(); } catch(_) {}
+    // 同步一次 option（含标题等），不必等待动画
+    requestAndRenderSpectrum();
+
+    // 2) 只动画“外层容器”高度：从 0 → target，逐步露出已渲染好的频谱
+    //    这里不再在动画中频繁 resize，避免“二次/硬跳”现象
+    const prevTransition = spectrumRoot.style.transition || '';
+    // 确保有过渡
+    if (!prevTransition) spectrumRoot.style.transition = `height ${Math.max(180, getCssTransitionMs())}ms ease`;
+
+    // 起始 0 高（收起）
+    spectrumRoot.style.height = '0px';
+    // 下一帧拉起至目标高度
+    requestAnimationFrame(() => {
+      spectrumRoot.style.height = target + 'px';
+    });
+
+    // 动画结束后做一次兜底 resize（兼容某些浏览器的绘制时序）
+    const onEnd = (e) => {
+      if (e && e.propertyName !== 'height') return;
+      try { spectrumRoot.removeEventListener('transitionend', onEnd); } catch(_){}
+      try { spectrumChart && spectrumChart.resize(); } catch(_) {}
+    };
+    try { spectrumRoot.addEventListener('transitionend', onEnd, { passive:true }); } catch(_) {}
+
+    spectrumFirstShowDone = true;
+  } else {
+    const onEnd = () => {
+      try { spectrumRoot.removeEventListener('transitionend', onEnd); } catch(_){}
+      try { docEl.removeAttribute('data-chart-mode'); } catch(_){}
+      if (root) try { root.style.minHeight = ''; } catch(_){}
+    };
+    try { spectrumRoot.addEventListener('transitionend', onEnd, { once:true }); } catch(_){}
+    spectrumRoot.style.height = '0px';
+  }
+}
+
+function updateSpectrumLayout(opts = {}) {
+  if (!spectrumRoot || !spectrumInner) return;
+
+  const target = getTargetSpectrumHeight();
+
+  // 始终先把内层调到目标高度（ECharts 宿主）
+  if (spectrumInner) spectrumInner.style.height = target + 'px';
+
+  // 未展开时，不需要推外层高度（保持 0 以便收起）
+  if (!spectrumEnabled) return;
+
+  // 展开态：外层同步为目标高度（有 CSS 过渡，会平滑调整）
+  spectrumRoot.style.height = target + 'px';
+
+  // 展开态的窗口/布局变化：做一次 resize 即可
+  if (spectrumChart) {
+    try { spectrumChart.resize(); } catch(_) {}
+  }
+}
+
+// 新增：根据当前 X 选择获取值（若未初始化，用可视范围中点）
+function getXQueryOrDefault(mode){
+  let x = xQueryByMode[mode];
+  if (x == null) {
+    const [vx0, vx1] = getVisibleXRange();
+    x = (vx0 + vx1) / 2;
+  }
+  return x;
+}
+
+// 新增：根据当前主图 X 轴与指针，计算单个系列的 RPM
+function getSeriesRpmForCurrentX(series, spectrumModel){
+  const mode = currentXModeFromPayload(lastPayload);
+  if (mode === 'rpm') {
+    const rpm = Number(getXQueryOrDefault('rpm'));
+    return Number.isFinite(rpm) && rpm > 0 ? rpm : 0;
+  } else {
+    // X=噪音：用该系列自带的 noise->rpm 模型
+    const noiseX = Number(getXQueryOrDefault('noise_db'));
+    const ph = series?.pchip?.noise_to_rpm;
+    if (ph && Array.isArray(ph.x) && Array.isArray(ph.y) && Array.isArray(ph.m)) {
+      const rpm = Number(evalPchipJS(ph, noiseX));
+      return Number.isFinite(rpm) && rpm > 0 ? rpm : 0;
+    }
+    // 没有模型时保底：用系列最大转速
+    return rpmMaxForSeries(series, spectrumModel);
+  }
+}
+
+// 新增整个函数：懒加载 + 绘制频谱
+async function requestAndRenderSpectrum() {
+  if (!spectrumEnabled) return;
+  if (!lastPayload || !lastPayload.chartData || !Array.isArray(lastPayload.chartData.series)) return;
+
+  ensureSpectrumHost();
+  ensureSpectrumChart();
+  updateSpectrumLayout();
+
+  const sList = lastPayload.chartData.series;
+  const pairs = [];
+  const missingKeys = [];
+
+  const seen = new Set();
+  sList.forEach(s => {
+    const mid = Number(s.model_id), cid = Number(s.condition_id);
+    if (!Number.isInteger(mid) || !Number.isInteger(cid)) return;
+    const key = `${mid}_${cid}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    pairs.push({ model_id: mid, condition_id: cid });
+    if (!spectrumModelCache.has(key)) missingKeys.push(key);
+  });
+
+  // 懒加载：仅在缺失时请求
+  if (missingKeys.length) {
+    try {
+      await fetchSpectrumModelsForPairs(pairs);
+    } catch(e) {
+      console.warn('加载频谱模型失败：', e);
+    }
+  }
+
+  buildAndSetSpectrumOption();
+}
+
+// 新增整个函数：取频谱模型（调用后端 /api/spectrum-models）
+async function fetchSpectrumModelsForPairs(pairs) {
+  if (!Array.isArray(pairs) || !pairs.length) return;
+  const resp = await fetch('/api/spectrum-models', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ pairs })
+  });
+  const j = await resp.json();
+  // 统一解析（此文件不引 normalizeApiResponse，上层已标准化）
+  const ok = !!(j && typeof j === 'object' && j.success === true);
+  if (!ok) throw new Error((j && j.error_message) || '频谱模型接口失败');
+
+  const data = j.data || {};
+  const models = Array.isArray(data.models) ? data.models : [];
+  models.forEach(item => {
+    const mid = Number(item.model_id), cid = Number(item.condition_id);
+    const key = `${mid}_${cid}`;
+    const model = (item && item.model) || null;
+    if (model && Array.isArray(model.centers_hz) && Array.isArray(model.band_models_pchip)) {
+      spectrumModelCache.set(key, model);
+    }
+  });
+  // missing / rebuilding 暂不强制处理；后续可在 UI 提示
+}
+
+// 新增整个函数：依据当前 Legend 可见性构建频谱线并渲染
+function getLegendSelectionMap(){
+  try {
+    const opt = chart.getOption() || {};
+    return (opt.legend && opt.legend[0] && opt.legend[0].selected) || {};
+  } catch(_) { return {}; }
+}
+
+function rpmMaxForSeries(s, model) {
+  // 优先用模型的 rpm_max；其次从原始点估计
+  const fromModel = Number(model && model.rpm_max);
+  if (Number.isFinite(fromModel) && fromModel > 0) return fromModel;
+  const arr = Array.isArray(s.rpm) ? s.rpm.filter(v => Number.isFinite(Number(v))) : [];
+  if (arr.length) return Math.max.apply(null, arr.map(Number));
+  return 0;
+}
+
+function computeSpectrumSeriesLines() {
+  if (!lastPayload || !lastPayload.chartData) return { lines: [], yMax: 60 };
+  const sList = Array.isArray(lastPayload.chartData.series) ? lastPayload.chartData.series : [];
+  const selected = getLegendSelectionMap();
+
+  const lines = [];
+  let globalMax = 0;
+
+  sList.forEach(s => {
+    // 仅绘制可见系列
+    if (selected && selected[s.name] === false) return;
+
+    const mid = Number(s.model_id), cid = Number(s.condition_id);
+    if (!Number.isInteger(mid) || !Number.isInteger(cid)) return;
+    const key = `${mid}_${cid}`;
+    const model = spectrumModelCache.get(key);
+    if (!model) return;
+
+    const centers = Array.isArray(model.centers_hz) ? model.centers_hz : (model.freq_hz || model.freq || []);
+    const bands = Array.isArray(model.band_models_pchip) ? model.band_models_pchip : [];
+    if (!centers.length || !bands.length) return;
+
+    // 根据当前主图 X（rpm 或 noise 反算 rpm）实时计算 RPM
+    const rpmTarget = getSeriesRpmForCurrentX(s, model);
+    if (!Number.isFinite(rpmTarget) || rpmTarget <= 0) return;
+
+    const pts = [];
+    for (let i = 0; i < centers.length; i++) {
+      const hz = Number(centers[i]);
+      if (!Number.isFinite(hz)) continue;
+      const bandModel = bands[i];
+      if (!bandModel || !Array.isArray(bandModel.x) || !Array.isArray(bandModel.y) || !Array.isArray(bandModel.m)) continue;
+      const db = Number(evalPchipJS(bandModel, rpmTarget));
+      if (!Number.isFinite(db)) continue;
+      pts.push([hz, db]);
+      if (db > globalMax) globalMax = db;
+    }
+    if (pts.length) {
+      lines.push({
+        name: s.name,
+        color: s.color,
+        data: pts
+      });
+    }
+  });
+
+  // y 轴：固定 0 ~ 全系列最大值（向上取整）
+  const yMax = Math.max(10, Math.ceil(globalMax || 60));
+  return { lines, yMax };
+}
+
+// 修改：buildAndSetSpectrumOption 加入标题 + 顶部留白
+function buildAndSetSpectrumOption() {
+  if (!spectrumChart) return;
+
+  const { lines, yMax } = computeSpectrumSeriesLines();
+  lastSpectrumOption = { __yMax: yMax };
+
+  const gridMain = (lastOption && lastOption.grid) || { left:40, right:260, top:60, bottom:40 };
+  const left = (typeof gridMain.left === 'number') ? gridMain.left : 40;
+  const rightGap = (typeof gridMain.right === 'number') ? gridMain.right : 260;
+
+  const t = tokens(document.documentElement.getAttribute('data-theme') || 'light');
+  const titleText = buildSpectrumTitle();
+
+  const option = {
+    backgroundColor: (lastOption && lastOption.backgroundColor) || 'transparent',
+    textStyle: { fontFamily: t.fontFamily },
+    title: {
+      text: titleText,
+      left: 'center',
+      top: 6,
+      textStyle: { color: t.axisLabel, fontWeight: 700, fontSize: 14, fontFamily: t.fontFamily }
+    },
+    grid: { left, right: rightGap, top: 36, bottom: 18 },
+    xAxis: {
+      type: 'log',
+      logBase: 10,
+      min: SPECTRUM_X_MIN,
+      max: SPECTRUM_X_MAX,
+      name: '频率(Hz)',
+      nameLocation: 'middle',
+      nameGap: 24,
+      axisLabel: { color: t.axisLabel, formatter: (v)=> String(v) + ' Hz' },
+      axisLine: { lineStyle: { color: t.axisLine } },
+      splitLine: { show: true, lineStyle: { color: t.gridLine } }
+    },
+    yAxis: {
+      type: 'value',
+      min: 0,
+      max: yMax,
+      name: '声级(dB)',
+      nameTextStyle: { color: t.axisName, fontWeight: 600 },
+      axisLabel: { color: t.axisLabel },
+      axisLine: { lineStyle: { color: t.axisLine } },
+      splitLine: { show: true, lineStyle: { color: t.gridLine } }
+    },
+    tooltip: {
+      appendToBody: true,
+      confine: true,
+      trigger: 'axis',
+      backgroundColor: t.tooltipBg,
+      borderColor: t.tooltipBorder, borderWidth: 1, borderRadius: 10,
+      textStyle: { color: t.tooltipText },
+      axisPointer: { type: 'line' },
+      valueFormatter: (v)=> Number.isFinite(v) ? v.toFixed(1) + ' dB' : '-'
+    },
+    legend: { show: false },
+    series: lines.map(l => ({
+      name: l.name,
+      type: 'line',
+      showSymbol: false,
+      smooth: false,
+      connectNulls: false,
+      data: l.data,
+      lineStyle: { width: 2.5, color: l.color },
+      itemStyle: { color: l.color },
+      silent: true,
+      z: 1
+    }))
+  };
+  spectrumChart.setOption(option, true);
+  spectrumChart.resize();
+}
+
+// 新增：频谱标题文本
+function buildSpectrumTitle(){
+  const mode = currentXModeFromPayload(lastPayload);
+  const x = Number(getXQueryOrDefault(mode));
+  if (mode === 'rpm') return `A计权声级频谱 @ ${Math.round(x)} RPM`;
+  const v = Number.isFinite(x) ? x.toFixed(1) : '-';
+  return `A计权声级频谱 @ ${v} dB`;
+}
 
   // 挂到全局
   window.ChartRenderer = API;
