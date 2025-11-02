@@ -630,24 +630,55 @@ function fetchAllLikeKeys(){
     .finally(()=>{ fetchAllLikeKeys._pending = false; });
 }
 
-// 替换 rebuildRecentLikes：like-button 加 type="button"
 function rebuildRecentLikes(list){
   const wrap = recentLikesListEl;
   if (!wrap) return;
   wrap.innerHTML = '';
-  if (!list || list.length===0){
+
+  if (!Array.isArray(list) || list.length === 0){
     wrap.innerHTML = '<p class="text-gray-500 text-center py-6">暂无最近点赞</p>';
     requestAnimationFrame(prepareRecentLikesMarquee);
     return;
   }
+
+  // 分组：按 品牌+型号 聚合，同组里的不同工况作为 scenarios
   const groups = new Map();
-  // ...分组逻辑保持不变
-  groups.forEach(g=>{
+  list.forEach(it => {
+    const brand = it.brand_name_zh || it.brand || '';
+    const model = it.model_name || it.model || '';
+    const key = `${brand}||${model}`;
+
+    if (!groups.has(key)) {
+      groups.set(key, {
+        brand,
+        model,
+        // 兼容若干后端字段命名
+        maxSpeed: it.max_speed || it.max_rpm || it.rpm_max || '',
+        size: it.size || it.frame_size || it.diameter || '',
+        thickness: it.thickness || it.frame_thickness || '',
+        scenarios: []
+      });
+    }
+    const g = groups.get(key);
+    g.scenarios.push({
+      mid: it.model_id,
+      cid: it.condition_id,
+      condition: it.condition_name_zh || it.condition || '',
+      // 供 formatScenario 使用的原始字段
+      rt: it.resistance_type_zh || it.rt || '',
+      rl: it.resistance_location_zh || it.rl || ''
+    });
+  });
+
+  // 渲染
+  const frag = document.createDocumentFragment();
+  groups.forEach(g => {
     const metaParts = [];
     if (g.maxSpeed) metaParts.push(`${escapeHtml(g.maxSpeed)} RPM`);
     if (g.size && g.thickness) metaParts.push(`${escapeHtml(g.size)}x${escapeHtml(g.thickness)}`);
     const metaRight = metaParts.join(' · ');
-    const scenariosHtml = g.scenarios.map(s=>{
+
+    const scenariosHtml = g.scenarios.map(s => {
       const extra = (typeof formatScenario === 'function') ? formatScenario(s.rt, s.rl) : '';
       const label = extra ? `${s.condition} - ${extra}` : s.condition;
       const scenText = escapeHtml(label);
@@ -665,8 +696,9 @@ function rebuildRecentLikes(list){
           </div>
         </div>`;
     }).join('');
+
     const groupDiv = document.createElement('div');
-    groupDiv.className='recent-like-group p-3 border border-gray-200 rounded-md';
+    groupDiv.className = 'recent-like-group p-3 border border-gray-200 rounded-md';
     groupDiv.innerHTML = `
       <div class="fc-group-header">
         <div class="fc-title-wrap flex items-center min-w-0">
@@ -675,11 +707,15 @@ function rebuildRecentLikes(list){
         <div class="fc-meta-right text-sm text-gray-600">${metaRight}</div>
       </div>
       <div class="group-scenarios mt-2 space-y-1">${scenariosHtml}</div>`;
-    wrap.appendChild(groupDiv);
+    frag.appendChild(groupDiv);
   });
 
+  wrap.appendChild(frag);
   syncQuickActionButtons();
-  requestAnimationFrame(prepareRecentLikesMarquee);
+  requestAnimationFrame(() => {
+    applyRecentLikesTitleMask();
+    prepareRecentLikesMarquee();
+  });
 }
 
 async function ensureLikeStatusBatch(pairs){
@@ -1501,7 +1537,7 @@ if (quickRemove){
     }
     return;
   }
-  
+
   if (e.target.id === 'cancelClearAll'){
     clearAllBtn.setAttribute('data-state','normal');
     clearAllBtn.textContent='移除所有';

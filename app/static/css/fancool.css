@@ -967,7 +967,7 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
 .fc-chart-container {
   position:relative!important;
   min-height:0!important;
-  height:clamp(480px,62vh,720px)!important;
+  height:clamp(480px,62vh,600px)!important;
   background:var(--bg-secondary)!important;
 }
 #chartRoot, #chartHost { height:100%!important; }
@@ -1387,3 +1387,8 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
 [data-chart-mode="spectrum"] #chartHost {
   height: auto !important;
 }
+
+/* 全屏兜底：确保整列容器可以按 100vh 铺满，内部子容器释放 100% 限制 */
+:fullscreen .fc-chart-container { height: 100vh !important; }
+:fullscreen #chartHost,
+:fullscreen #chartRoot { height: auto !important; min-height: 0 !important; }

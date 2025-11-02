@@ -29,14 +29,13 @@
 /* 明确允许锚定（若全局样式曾关闭） */
 #chartRoot, #spectrumHost { overflow-anchor: auto; }
 
-/* x轴切换与拟合 UI 样式保持不变 ... */
-
 /* 频谱容器高度过渡 */
 #spectrumHost {
   height: 0;
   overflow: hidden;
   transition: height var(--transition-speed-bg, .35s) ease;
 }
+
 
  /*x轴切换开关*/
 .chart-xaxis-overlay{
@@ -201,4 +200,21 @@
   height: 0;                    /* 初始收起 */
   overflow: hidden;             /* 防止内容外溢 */
   transition: height var(--transition-speed-bg, .35s) ease;
+}
+
+/* 全屏铺满与过渡（覆盖默认限高和 100%!important） */
+:fullscreen .fc-chart-container {
+  height: 100vh !important;   /* 父容器全屏高度 */
+}
+
+:fullscreen #chartHost,
+:fullscreen #chartRoot {
+  height: auto !important;    /* 释放 100% 限制，交给 JS 的像素高度 */
+  min-height: 0 !important;
+  transition: height var(--transition-speed-bg, .5s) ease;
+}
+
+/* 展开频谱模式下，父容器仍保持 100vh */
+:fullscreen [data-chart-mode="spectrum"] .fc-chart-container {
+  height: 100vh !important;
 }
