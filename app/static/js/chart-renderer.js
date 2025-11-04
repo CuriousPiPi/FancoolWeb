@@ -15,25 +15,201 @@
   let spectrumRoot = null;
   let spectrumInner = null;
   let spectrumChart = null;
+  let spectrumClip = null;
   let spectrumEnabled = false;
   let lastSpectrumOption = null;
   const spectrumModelCache = new Map();
   const SPECTRUM_X_MIN = 20;
   const SPECTRUM_X_MAX = 20000;
   let __spectrumRaf = null;
-  
   let __specLegendSyncing = false;
+  let __skipSpectrumOnce = false;
+  let __suppressSpectrumUntil = 0;
 
-// 替换：频谱高度，支持全屏时使用屏高比例
-const FS_MAIN_RATIO = 0.58;   // 全屏下主图占比
-const FS_SPEC_RATIO = 0.42;   // 全屏下频谱占比
+  let __legendRailEl = null;
+  let __legendScrollEl = null;
+  let __legendActionsEl = null;
+  let spectrumLoadingEl = null;
+  let __specPending = false;
+  let __specFetchInFlight = false;
+  let __lastFetchKeyHash = '';
+
+  const NF_MAIN_H_PX = 600;  // 非全屏：主图固定高度
+  const NF_SPEC_H_PX = 600;  // 非全屏：频谱固定高度
+  
+  const LEGEND_OFFSET = 50;     // Legend 顶部下移像素
+
+  let __specToggleCooldownUntil = 0;
+  let __mainHLocked = false;
+  
+  // 新增：频谱动画“轮次”与定时器管理，根除竞态
+  let __specEpoch = 0;
+  const __specTimers = new Set();
+  function specBumpEpochAndClearTimers() {
+    __specEpoch++;
+    __specTimers.forEach(id => { try { clearTimeout(id); } catch(_) {} });
+    __specTimers.clear();
+  }
+  function specSetTimeout(fn, ms) {
+    const myEpoch = __specEpoch;
+    const id = setTimeout(() => {
+      __specTimers.delete(id);
+      if (myEpoch === __specEpoch) fn();
+    }, ms);
+    __specTimers.add(id);
+    return id;
+  }
+
+function __hashWantedSet(set) {
+  try { return Array.from(set).sort().join('|'); } catch(_) { return ''; }
+}
+
+function ensureLegendRail(){
+  const shell = document.getElementById('chart-settings') || (root && root.closest('.fc-chart-container')) || null;
+  if (!shell) return null;
+  shell.classList.add('chart-flex');
+
+  let stack = shell.querySelector('.chart-stack');
+  if (!stack) {
+    stack = document.createElement('div');
+    stack.className = 'chart-stack';
+
+    if (root) stack.appendChild(root);
+    if (spectrumRoot) stack.appendChild(spectrumRoot);
+    shell.insertBefore(stack, shell.firstChild); 
+  }
+
+  if (__legendRailEl && __legendRailEl.isConnected) return __legendRailEl;
+
+  const rail = document.createElement('aside');
+  rail.id = 'legendRail';
+  rail.innerHTML = `
+    <div class="legend-spacer" id="legendRailSpacer" style="height:${LEGEND_OFFSET}px"></div>
+    <div class="legend-scroll" id="legendRailScroll"></div>
+    <div class="rail-actions"><!-- #fitButtons 将被挂到这里 --></div>
+  `;
+  shell.appendChild(rail);
+
+  __legendRailEl = rail;
+  __legendScrollEl = rail.querySelector('#legendRailScroll');
+  __legendActionsEl = rail.querySelector('.rail-actions');
+  return rail;
+}
+
+// 修改：Legend rail 的布局计算 —— 去掉“随按钮增宽”的约束，减小左右内边距与最大宽度
+function updateLegendRailLayout(){
+  const shell = document.getElementById('chart-settings') || (root && root.closest('.fc-chart-container')) || null;
+  if (!shell) return;
+  shell.classList.add('chart-flex');
+  if (layoutIsNarrow()) shell.classList.add('is-narrow'); else shell.classList.remove('is-narrow');
+
+  if (!__legendRailEl) return;
+
+  // 占位器保持
+  const spacer = __legendRailEl.querySelector('#legendRailSpacer');
+  if (spacer) spacer.style.height = `${LEGEND_OFFSET}px`;
+
+  // 不再让按钮区影响最小宽度
+  let minW = 160;
+
+  // 文本测量
+  let textMax = 0;
+  try {
+    const t = tokens((lastPayload && lastPayload.theme) || (document.documentElement.getAttribute('data-theme') || 'light'));
+    const sList = Array.isArray(lastPayload?.chartData?.series) ? lastPayload.chartData.series : [];
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const l1Font = `600 13px ${t.fontFamily}`;
+    const l2Font = `500 11px ${t.fontFamily}`;
+    sList.forEach(s=>{
+      const brand = s.brand || s.brand_name_zh || s.brand_name || '';
+      const model = s.model || s.model_name || '';
+      const cond  = s.condition_name_zh || s.condition || '';
+      const line1 = [brand, model].filter(Boolean).join(' ') || (s.name || '');
+      ctx.font = l1Font;
+      const w1 = ctx.measureText(line1).width || 0;
+      let w2 = 0;
+      if (cond) { ctx.font = l2Font; w2 = ctx.measureText(cond).width || 0; }
+      textMax = Math.max(textMax, w1, w2);
+    });
+  } catch(_){}
+
+  // icon + gap + 文本 + 左右内边距
+  const iconW = 12, gap = 8, pad = 12;
+  const need = Math.ceil(iconW + gap + textMax + pad);
+  const targetW = Math.max(minW, Math.min(320, need));
+
+  if (!layoutIsNarrow()) __legendRailEl.style.width = `${Math.round(targetW)}px`;
+  else __legendRailEl.style.width = '100%';
+}
+
+function renderLegendRailItems(){
+  ensureLegendRail();
+  if (!__legendScrollEl) return;
+  const sList = Array.isArray(lastPayload?.chartData?.series) ? lastPayload.chartData.series : [];
+  const selMap = getLegendSelectionMap();
+  const items = sList.map(s => ({
+    name: s.name, brand: s.brand || s.brand_name_zh || s.brand_name || '',
+    model: s.model || s.model_name || '', condition: s.condition_name_zh || s.condition || '',
+    color: s.color, selected: selMap ? (selMap[s.name] !== false) : true
+  }));
+
+  __legendScrollEl.innerHTML = items.map(it => `
+    <div class="legend-item ${it.selected ? '' : 'is-off'}" data-name="${it.name}">
+      <span class="dot" style="background:${it.color}"></span>
+      <span style="flex:1 1 auto; display:flex; flex-direction:column; min-width:0;">
+        <span class="l1">${(it.brand || it.model) ? `${it.brand} ${it.model}` : it.name}</span>
+        ${it.condition ? `<span class="l2">${it.condition}</span>` : ``}
+      </span>
+    </div>
+  `).join('');
+
+    __legendScrollEl.querySelectorAll('.legend-item').forEach(node => {
+    const name = node.getAttribute('data-name') || '';
+    node.addEventListener('click', () => {
+      if (!name || !chart) return;
+      const sel = getLegendSelectionMap();
+      const isCurrentlyVisible = sel ? (sel[name] !== false) : true;
+      const actionType = isCurrentlyVisible ? 'legendUnSelect' : 'legendSelect';
+
+      node.classList.toggle('is-off', isCurrentlyVisible);
+
+      try { chart.dispatchAction({ type: actionType, name }); } catch(_){}
+      if (spectrumEnabled && spectrumChart) {
+        try { spectrumChart.dispatchAction({ type: actionType, name }); } catch(_){}
+      }
+
+      if (showFitCurves) refreshFitBubble();
+    });
+    
+    node.addEventListener('mouseenter', () => { if (name && chart) try { chart.dispatchAction({ type: 'highlight', seriesName: name }); } catch(_){ } });
+    node.addEventListener('mouseleave', () => { if (name && chart) try { chart.dispatchAction({ type: 'downplay', seriesName: name }); } catch(_){ } });
+  });
+}
+
+// 修改：syncLegendRailFromChart —— 根据选中态增减 is-off 类
+function syncLegendRailFromChart(){
+  if (!__legendScrollEl) return;
+  const sel = getLegendSelectionMap();
+  __legendScrollEl.querySelectorAll('.legend-item').forEach(node => {
+    const name = node.getAttribute('data-name');
+    const selected = sel ? (sel[name] !== false) : true;
+    node.classList.toggle('is-off', !selected);
+  });
+}
+function updateLegendRail(){
+  ensureLegendRail();
+  renderLegendRailItems();
+  updateLegendRailLayout();
+
+  // 将 #fitButtons 放到 rail 底部
+  const btns = getById('fitButtons');
+  if (btns && __legendActionsEl && btns.parentElement !== __legendActionsEl) {
+    try { __legendActionsEl.appendChild(btns); } catch(_){}
+  }
+}
 
 function getTargetSpectrumHeight(){
-  // 全屏：按屏幕高度比例
-  if (isFs && spectrumEnabled) {
-    const vh = window.innerHeight || document.documentElement.clientHeight || 800;
-    return Math.max(200, Math.round(vh * FS_SPEC_RATIO));
-  }
   // 非全屏：参考主图高度
   const mainH =
     (root && root.getBoundingClientRect ? root.getBoundingClientRect().height : 0) ||
@@ -44,12 +220,12 @@ function getTargetSpectrumHeight(){
   function getCssTransitionMs(){
     try {
       const raw = getComputedStyle(document.documentElement).getPropertyValue('--transition-speed').trim();
-      if (!raw) return 300;
+      if (!raw) return 250;
       if (raw.endsWith('ms')) return Math.max(0, parseFloat(raw));
       if (raw.endsWith('s'))  return Math.max(0, parseFloat(raw) * 1000);
       const n = parseFloat(raw);
-      return Number.isFinite(n) ? n : 300;
-    } catch(_) { return 300; }
+      return Number.isFinite(n) ? n : 250;
+    } catch(_) { return 250; }
   }
   // NEW: 追踪 root 的几何变化（位置/尺寸），用于在容器“移动但不改变尺寸”时重放置拟合气泡
   let __lastRootRect = { left:0, top:0, width:0, height:0 };
@@ -155,7 +331,7 @@ function getTargetSpectrumHeight(){
 
   function bindGlobalListeners(){
     window.addEventListener('resize', onWindowResize, { passive:true });
-
+  
     // 滚动时基于“相对图表偏移”重算一次气泡位置（rAF 节流）
     let __scrollRaf = null;
     const onAnyScroll = () => {
@@ -166,12 +342,11 @@ function getTargetSpectrumHeight(){
       });
     };
     window.addEventListener('scroll', onAnyScroll, { passive: true, capture: true });
-
-    // NEW: 监听侧栏/主容器的过渡与属性变化，侧栏展开/收起/拖拽期间跟随图表容器移动
+  
     (function hookLayoutMovers(){
       const watchMovement = () => { try { placeFitUI(); repaintPointer(); } catch(_) {} };
       const kickWatch = () => { watchMovement(); maybeStartRootPosWatch(900); };
-
+  
       const sidebar = document.getElementById('sidebar');
       if (sidebar) {
         ['transitionrun','transitionstart','transitionend'].forEach(ev=>{
@@ -193,59 +368,65 @@ function getTargetSpectrumHeight(){
         } catch(_){}
       }
     })();
-
-    // fullscreenchange 事件里加一处兜底清理
-    document.addEventListener('fullscreenchange', async () => {
-      isFs = !!document.fullscreenElement;
-    
-      adoptBubbleHost();
-      bubbleUserMoved = false;
-    
-      if (!isFs) {
-        // 退出全屏兜底：频谱收起时移除 spectrum 模式标记并清理 minHeight
-        if (!spectrumEnabled) {
-          try { document.documentElement.removeAttribute('data-chart-mode'); } catch(_) {}
-          if (root) try { root.style.minHeight = ''; } catch(_) {}
-        }
-        if (screen.orientation && screen.orientation.unlock) {
-          try { screen.orientation.unlock(); } catch(_) {}
-        }
+  
+  document.addEventListener('fullscreenchange', async () => {
+    isFs = !!document.fullscreenElement;
+  
+    const modeHost =
+      document.getElementById('chart-settings') ||
+      (root && root.closest('.fc-chart-container')) ||
+      document.documentElement;
+  
+    adoptBubbleHost();
+    bubbleUserMoved = false;
+  
+    if (window.visualViewport) {
+      try { window.visualViewport.removeEventListener('resize', onWindowResize); } catch(_) {}
+      if (isFs) {
+        try { window.visualViewport.addEventListener('resize', onWindowResize, { passive: true }); } catch(_) {}
+      }
+    }
+  
+    try { chart && chart.dispatchAction({ type: 'hideTip' }); } catch(_) {}
+    try { spectrumChart && spectrumChart.dispatchAction({ type: 'hideTip' }); } catch(_) {}
+  
+    if (!isFs) {
+      if (spectrumRoot) spectrumRoot.style.marginTop = '0px';
+  
+      if (!spectrumEnabled) {
+        try { modeHost.removeAttribute('data-chart-mode'); } catch(_) {}
+        if (root) try { root.style.minHeight = ''; } catch(_) {}
+      } else {
+        __ensureMainChartMinHeightForSpectrumMode();
       }
   
-      onWindowResize();
-      requestAnimationFrame(() => {
-        try { placeFitUI(); repaintPointer(); } catch(_) {}
-      });
-    }, { passive:true });
-  }
-
-// 1) 主图 legend 变化 → 对频谱广播（即便频谱 legend 隐藏也能生效）
-function bindChartListeners(){
-  chart.on('legendselectchanged', (e) => {
-    if (showFitCurves) refreshFitBubble();
-
-    if (spectrumEnabled && spectrumChart) {
-      if (!__specLegendSyncing) {
-        __specLegendSyncing = true;
-        try {
-          if (e && e.name) {
-            const want = e.selected && e.selected[e.name] !== false;
-            spectrumChart.dispatchAction({ type: want ? 'legendSelect' : 'legendUnSelect', name: e.name });
-          } else if (e && e.selected) {
-            Object.keys(e.selected).forEach((name) => {
-              const want = e.selected[name] !== false;
-              spectrumChart.dispatchAction({ type: want ? 'legendSelect' : 'legendUnSelect', name });
-            });
-          }
-        } finally {
-          __specLegendSyncing = false;
-        }
+      if (screen.orientation && screen.orientation.unlock) {
+        try { screen.orientation.unlock(); } catch(_) {}
       }
-      // 注意：这里不要重建频谱 option，让 ECharts 自己的 legend 动画生效
     }
-  });
+  
+    updateFullscreenHeights();
+  
+    if (lastPayload) render(lastPayload); else if (chart) chart.resize();
+  
+    requestAnimationFrame(() => {
+      try {
+        // 切换全屏模式后，同步频谱展开/收起状态（不做二次动画）
+        syncSpectrumStateAcrossModes({ animate: false });
+      
+        placeFitUI();
+        repaintPointer();
+        updateSpectrumLayout();
+        updateLegendRailLayout();
+        updateLegendRail();
+        if (chart) chart.resize();
+        if (spectrumChart) spectrumChart.resize();
+      } catch(_) {}
+    });
+  }, { passive:true });
+}
 
-  // hover 高亮联动（不改选中）
+function bindChartListeners(){
   chart.on('legendmouseover', (p) => {
     if (!spectrumEnabled || !spectrumChart || !p || !p.name) return;
     try { spectrumChart.dispatchAction({ type: 'highlight', seriesName: p.name }); } catch(_) {}
@@ -267,21 +448,21 @@ function bindChartListeners(){
     clampXQueryIntoVisibleRange();
     repaintPointer();
     if (showFitCurves) refreshFitBubble();
-    // 指针/视窗变化需要重算频谱数据
+
+    if (__skipSpectrumOnce || performance.now() < __suppressSpectrumUntil) return;
     if (spectrumEnabled && spectrumChart) scheduleSpectrumRebuild();
   });
 }
 
-// 替换：窗口尺寸变化时，同步全屏高度计算
 function onWindowResize(){
   if (!chart) return;
-  // 全屏高度联动优先执行（会同时触发两图 resize）
-  updateFullscreenHeights();
 
+  // 在连续 resize 期间压制频谱请求，停止后 ~500ms 才允许
+  __suppressSpectrumUntil = Math.max(__suppressSpectrumUntil, performance.now() + 500);
+
+  updateFullscreenHeights();
   const nowNarrow = layoutIsNarrow();
   if (lastIsNarrow === null) lastIsNarrow = nowNarrow;
-
-  // NEW: 窗口 resize 期间也跟踪 root 几何漂移（例如响应式 reflow）
   maybeStartRootPosWatch(900);
 
   if (nowNarrow !== lastIsNarrow) {
@@ -297,23 +478,24 @@ function onWindowResize(){
     }
   }
 
-  // 同步频谱布局（非全屏时生效；全屏时由 updateFullscreenHeights 直接控制高度）
   updateSpectrumLayout();
+  updateLegendRailLayout();
+  __refreshFsSpecMaxHeightIfExpanded();
 }
 
   let __chartRO = null;
-// 替换整个函数：installChartResizeObserver（联动频谱布局）
 function installChartResizeObserver(){
   if (__chartRO || !root || typeof ResizeObserver === 'undefined') return;
   __chartRO = new ResizeObserver(entries => {
     for (const entry of entries) {
       const cr = entry.contentRect || {};
       if (chart && cr.width > 0 && cr.height > 0) {
-        // NEW: 容器尺寸变化 → 启动短暂的几何跟踪，覆盖“移动 + 尺寸变动”的过渡阶段
+        // 在连续尺寸变化期间压制频谱请求
+        __suppressSpectrumUntil = Math.max(__suppressSpectrumUntil, performance.now() + 500);
+
         primeRootRect();
         maybeStartRootPosWatch(900);
 
-        // 当容器宽度变化导致“窄/宽布局”跨阈值时，重建 option（让 legend 立即切换布局）
         const nowNarrow = layoutIsNarrow();
         if (lastIsNarrow === null) lastIsNarrow = nowNarrow;
         if (nowNarrow !== lastIsNarrow) {
@@ -322,12 +504,11 @@ function installChartResizeObserver(){
             if (lastPayload) { render(lastPayload); }
             else { chart.resize(); }
           } catch(_){}
-          // render() 会自行调用 placeFitUI / repaintPointer / 更新 overlay
           updateSpectrumLayout();
+          updateLegendRailLayout();
           continue;
         }
 
-        // 未跨阈值：保持原有轻量刷新路径
         try { chart.resize(); } catch(_){}
         try {
           if (lastOption) {
@@ -339,6 +520,7 @@ function installChartResizeObserver(){
           updateAxisSwitchPosition({ force: true, animate: false });
         } catch(_){}
         updateSpectrumLayout();
+        updateLegendRailLayout();
       }
     }
   });
@@ -362,18 +544,39 @@ function installChartResizeObserver(){
     return narrow;
   }
 
-// 1) 在 mount() 里，首屏就创建频谱宿主（保持 0 高度收起）
 function mount(rootEl) {
-  root = rootEl;
-  if (!root) {
+  if (!rootEl) {
     warnOnce('[ChartRenderer] mount(rootEl) 需要一个有效的 DOM 容器');
     return;
   }
+  root = rootEl; // 在函数最开始设置 root 变量
 
-  // 新增：首屏就创建 #spectrumHost，保证后续仅是“高度变化”，浏览器原生跟随滚动
   ensureSpectrumHost();
 
-  ensureEcharts();  // 统一解析初始主题
+  // 确保 DOM 结构正确
+  const shell = root.closest('.fc-chart-container');
+  if (shell) {
+    let stack = shell.querySelector('.chart-stack');
+    if (!stack) {
+      stack = document.createElement('div');
+      stack.className = 'chart-stack';
+      
+      if (root.parentElement) {
+        root.parentElement.insertBefore(stack, root);
+      }
+      stack.appendChild(root);
+    }
+
+    // 确保 spectrumRoot 也被移入 stack
+    if (spectrumRoot && spectrumRoot.parentElement !== stack) {
+        stack.appendChild(spectrumRoot);
+    }
+  }
+
+  ensureLegendRail();
+  updateLegendRailLayout();
+
+  ensureEcharts();
   const initialTheme =
     (window.ThemePref && typeof window.ThemePref.resolve === 'function')
       ? window.ThemePref.resolve()
@@ -386,8 +589,67 @@ function mount(rootEl) {
   }
 
   if (!chart) return;
+  
   const emptyPayload = { chartData: { series: [] }, theme: initialTheme };
   render(emptyPayload);
+}
+
+function ensureSpectrumHost() {
+  // 若已存在 host，仅保证有 .spectrum-inner 子元素
+  if (spectrumRoot && spectrumRoot.isConnected) {
+    let inner = spectrumRoot.querySelector('.spectrum-inner');
+    if (!inner) {
+      inner = document.createElement('div');
+      inner.className = 'spectrum-inner';
+      spectrumRoot.appendChild(inner);
+    }
+    try {
+      inner.style.position = 'relative';
+      inner.style.width = '100%';
+      inner.style.overflow = 'visible';
+    } catch(_) {}
+    spectrumInner = inner;
+    return spectrumRoot;
+  }
+
+  // 新建 Host + inner（无剪裁层）
+  let host = document.getElementById('spectrumHost');
+  if (!host) { host = document.createElement('div'); host.id = 'spectrumHost'; }
+
+  const shell = document.getElementById('chart-settings') || (root && root.closest('.fc-chart-container')) || document.body;
+  let stack = shell && shell.querySelector('.chart-stack');
+  if (!stack && root && root.parentElement) {
+    stack = document.createElement('div');
+    stack.className = 'chart-stack';
+    root.parentElement.insertBefore(stack, root);
+    stack.appendChild(root);
+    if (shell && stack.parentElement !== shell) shell.insertBefore(stack, shell.firstChild);
+  }
+  if (stack && host.parentElement !== stack) stack.appendChild(host);
+  else if (!stack && root && host.parentElement !== root.parentElement) root.parentElement?.insertBefore(host, root.nextSibling);
+
+  let inner = host.querySelector('.spectrum-inner');
+  if (!inner) { inner = document.createElement('div'); inner.className = 'spectrum-inner'; host.appendChild(inner); }
+  try {
+    inner.style.position = 'relative';
+    inner.style.width = '100%';
+    inner.style.overflow = 'visible';
+  } catch(_) {}
+
+  spectrumRoot = host;
+  spectrumInner = inner;
+  return host;
+}
+
+function updateFullscreenHeights() {
+  const fsEl = document.fullscreenElement;
+  const activeFs = !!fsEl;
+  isFs = activeFs;
+
+  requestAnimationFrame(() => {
+    try { chart && chart.resize(); } catch (_) { }
+    try { spectrumEnabled && spectrumChart && spectrumChart.resize(); } catch (_) { }
+  });
 }
 
 function setTheme(theme) {
@@ -404,7 +666,7 @@ function setTheme(theme) {
   if (lastPayload) render(lastPayload);
 }
 
-// 替换整个函数：render（渲染后联动频谱懒加载与布局）
+// 修改：render —— 渲染后刷新 rail
 function render(payload){
   lastPayload = payload || lastPayload;
   if (!root){ warnOnce('[ChartRenderer] 请先调用 mount(rootEl)'); return; }
@@ -441,11 +703,12 @@ function render(payload){
   lastOption = option;
   lastIsNarrow = layoutIsNarrow();
 
-  // 窄屏也显示拟合 UI
   toggleFitUI(showFitCurves);
   placeFitUI();
 
-  // NEW: 渲染后短暂跟踪一次位置，以覆盖同步/异步布局抖动
+  // NEW：rail 刷新（Legend 渲染与尺寸）
+  updateLegendRail();
+
   primeRootRect();
   maybeStartRootPosWatch(600);
 
@@ -453,19 +716,24 @@ function render(payload){
     const onFinished = () => {
       try { chart.off('finished', onFinished); } catch(_){}
       repaintPointer();
-      // 频谱：图完成后再做一次布局同步（避免尺寸抖动）
       updateSpectrumLayout();
-      if (spectrumEnabled) { requestAndRenderSpectrum(); }
+
+      if (spectrumEnabled) {
+        if (__skipSpectrumOnce || performance.now() < __suppressSpectrumUntil) {
+          // do nothing
+        } else {
+          requestAndRenderSpectrum();
+        }
+      }
+      setTimeout(() => { __skipSpectrumOnce = false; }, 450);
+      // NEW：成帧后再同步一次 rail 勾选态（避免 setOption 后首次不同步）
+      try { syncLegendRailFromChart(); } catch(_){}
     };
     chart.on('finished', onFinished);
   } catch(_){}
+
   requestAnimationFrame(repaintPointer);
-
   if (showFitCurves) refreshFitBubble();
-
-  // 若用户已开启频谱，则尝试懒加载并绘制
-  updateSpectrumLayout();
-  if (spectrumEnabled) { requestAndRenderSpectrum(); }
 }
 
   function resize(){ if (chart) chart.resize(); }
@@ -604,298 +872,218 @@ function render(payload){
     return { series, xMin: Math.max(minX - pad, 0), xMax: maxX + pad, yMax: Math.ceil(maxAir * 1.4) };
   }
 
-  function getExportBg() {
-    const bgBody = getComputedStyle(document.body).backgroundColor;
-    return bgBody && bgBody !== 'rgba(0, 0, 0, 0)' ? bgBody : '#ffffff';
-  }
+function buildOption(payload) {
+  const { chartData, theme } = payload || {};
+  const t = tokens(theme||'light');
+  const sList = Array.isArray(chartData?.series) ? chartData.series : [];
+  const xMode = currentXModeFromPayload(payload);
 
-  function buildOption(payload) {
-    const { chartData, theme } = payload || {};
-    const t = tokens(theme||'light');
-    const sList = Array.isArray(chartData?.series) ? chartData.series : [];
-    const xMode = currentXModeFromPayload(payload);
+  const isNarrow = layoutIsNarrow();
+  const exportBg = (payload && payload.chartBg) || getExportBg();
+  const bgNormal = isFs ? exportBg : 'transparent';
+  const transitionMs = getCssTransitionMs();
 
-    const isNarrow = layoutIsNarrow();
-    const exportBg = (payload && payload.chartBg) || getExportBg();
-    const bgNormal = isFs ? exportBg : 'transparent';
-    const transitionMs = getCssTransitionMs();
-
-    // 改动：仅根据是否有数据判断“空状态”，不再受外部按钮控制
-    if (!sList.length) {
-      toggleFitUI(false);
-      return { 
-        __empty:true,
-        backgroundColor: bgNormal,
-        title:{ text:'请 先 添 加 数 据', left:'center', top:'middle',
-          textStyle:{ color:t.axisLabel, fontFamily:t.fontFamily, fontSize: 20, fontWeight: 600 }
-        },
-        toolbox:{ show:false },
-        tooltip:{ show:false, triggerOn:'none' }
-      };
-    }
-
-    const built = buildSeries(sList, xMode);
-
-    const xName = xMode==='rpm' ? '转速(RPM)' : '噪音(dB)';
-    const titlePrefix = xMode==='rpm' ? '转速' : '噪音';
-    const titleTop = 10, titleFontSize = 20, titleFontWeight = 600;
-    const titleText = `${titlePrefix}${TITLE_GLUE}风量曲线`;
-    const titleMeasure = measureText(titleText, titleFontSize, titleFontWeight, t.fontFamily);
-    const gridTop = Math.max(54, titleTop + Math.ceil(titleMeasure.height) + 12);
-
-    // 构造 legend 文本数据（保持原有 formatter 的语义）
-    const legendMeta = {};
-    sList.forEach(s=>{
-      const brand = s.brand || s.brand_name_zh || s.brand_name || '';
-      const model = s.model || s.model_name || '';
-      const condition = s.condition_name_zh || s.condition || '';
-      const key   = s.name || [brand, model].filter(Boolean).join(' ') || String(s.key || '');
-      legendMeta[key] = { brand, model, condition };
-    });
-    function desktopLegendFormatter(name){
-      const m = legendMeta[name] || {};
-      const line1 = [m.brand, m.model].filter(Boolean).join(' ');
-      const line2 = m.condition || '';
-      if (line2) return `{l1|${line1}}\n{l2|${line2}}`;
-      return `{l1|${line1||name}}`;
-    }
-    function mobileLegendFormatter(name){
-      const m = legendMeta[name] || {};
-      const left  = [m.brand, m.model].filter(Boolean).join(' ');
-      const right = m.condition || '';
-      if (right) return `{m1|${left}} {m1|-} {m2|${right}}`;
-      return `{m1|${left||name}}`;
-    }
-
-    // ========== 关键变更开始（保持与现有布局计算一致） ==========
-    const isN = isNarrow;
-
-    let legendItemTextMaxW = 0;
-    if (!isN) {
-      const l1Size=13, l1Weight=600;
-      const l2Size=11, l2Weight=500;
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      const l1Font = `${l1Weight} ${l1Size}px ${t.fontFamily}`;
-      const l2Font = `${l2Weight} ${l2Size}px ${t.fontFamily}`;
-      sList.forEach(s=>{
-        const brand = s.brand || s.brand_name_zh || s.brand_name || '';
-        const model = s.model || s.model_name || '';
-        const condition = s.condition || s.condition_name_zh || '';
-        const line1 = [brand, model].filter(Boolean).join(' ') || (s.name || '');
-        const line2 = condition || '';
-        ctx.font = l1Font;
-        const w1 = ctx.measureText(line1).width;
-        let w2 = 0;
-        if (line2) {
-          ctx.font = l2Font;
-          w2 = ctx.measureText(line2).width;
-        }
-        legendItemTextMaxW = Math.max(legendItemTextMaxW, Math.max(w1, w2));
-      });
-    }
-
-    const iconW = 18;
-    const iconTextGap = 8;
-    const safety = 12;
-    const legendComputedW = !isN ? (iconW + iconTextGap + legendItemTextMaxW + safety) : 0;
-
-    const legendRightDesktop = 20; 
-    const gridRightDesktop = !isN
-      ? Math.max(180, legendRightDesktop + legendComputedW + 10)
-      : 20;
-
-    const narrowBottomAuto = Math.min(320, 50 + (sList.length || 1) * 22);
-    const gridBottom = isN ? Math.max(140, narrowBottomAuto) : 40;
-    // ========== 关键变更结束 ==========
-
-    const legendCfg = isN ? {
-      type: 'scroll',
-      orient: 'vertical',
-      left: 20, right: 6, bottom: 6,
-      itemWidth: 16, itemHeight: 10, align: 'auto',
-      pageIconColor: t.pagerIcon, pageTextStyle: { color: t.axisLabel },
-      textStyle: { color: t.axisLabel, fontFamily: t.fontFamily,
-        rich: { m1:{ fontSize:13,fontWeight:600,color:t.axisLabel,lineHeight:18 },
-                m2:{ fontSize:11,fontWeight:500,color:t.axisName,lineHeight:16 } } },
-      formatter: mobileLegendFormatter
-    } : {
-      type: 'scroll',
-      orient: 'vertical',
-      right: legendRightDesktop,
-      top: gridTop,
-      bottom: 10,
-      itemWidth: 18, itemHeight: 10, itemGap: 16, align: 'auto',
-      pageIconColor: t.pagerIcon, pageTextStyle: { color: t.axisLabel },
-      textStyle: { color: t.axisLabel, fontFamily: t.fontFamily,
-        rich: { l1:{ fontSize:13,fontWeight:600,color:t.axisLabel,lineHeight:18 },
-                l2:{ fontSize:11,fontWeight:500,color:t.axisName,lineHeight:14 } } },
-      formatter: desktopLegendFormatter
-    };
-    legendCfg.data = sList.map(s => s.name);
-    try {
-      const prevSel = chart && chart.getOption && chart.getOption().legend && chart.getOption().legend[0] && chart.getOption().legend[0].selected;
-      if (prevSel) legendCfg.selected = prevSel;
-    } catch(_){}
-
-    const finalSeries = [];
-    // 改动：原生曲线始终参与绘制（不再由外部控件控制）
-    built.series.forEach(s => finalSeries.push(s));
-
-    if (showFitCurves) {
-      ensureFitModels(sList, xMode);
-      const width = Math.max(300, chart.getWidth ? chart.getWidth() : 800);
-      const sampleCount = computeSampleCount(width);
-      sList.forEach(s => {
-        const model = fitModelsCache[xMode].get(s.name);
-        if (!model || model.x0 == null || model.x1 == null) return;
-        const sMin = Math.min(model.x0, model.x1);
-        const sMax = Math.max(model.x0, model.x1);
-        const xmin = Math.max(built.xMin, sMin);
-        const xmax = Math.min(built.xMax, sMax);
-        if (!(xmax > xmin)) return;
-
-        const pts = resampleSingle(model, xmin, xmax, sampleCount);
-        finalSeries.push({
-          id: `fit-line:${xMode}:${s.name}`,
-          name: s.name,
-          type: 'line',
-          smooth: false,
-          showSymbol: false,
-          connectNulls: false,
-          data: pts.map(p => [p.x, p.y]),
-          lineStyle: { width: 2.5, type:'dashed', color: s.color, opacity: 0.95 },
-          itemStyle: { color: s.color },
-          legendHoverLink: true,
-          emphasis: { focus: 'series', blurScope: 'coordinateSystem', lineStyle: { width: 3.5, opacity: 1 }, itemStyle: { opacity: 1 } },
-          blur: { lineStyle: { opacity: 0.2 }, itemStyle: { opacity: 0.2 } },
-          silent: false,
-          tooltip: { show: false },
-          z: 3
-        });
-      });
-    }
-
-    const rawMin = Math.max(X_MIN_CLAMP, built.xMin);
-    const rawMax = built.xMax * 1.2;
-    let xMinForAxis = Math.floor(rawMin);
-    let xMaxForAxis = Math.ceil(rawMax);
-    if (!(xMaxForAxis > xMinForAxis)) xMaxForAxis = xMinForAxis + 1;
-
-    const toolboxFeatures = isNarrow ? {
-      restore: {},
-      saveAsImage: { backgroundColor: exportBg, pixelRatio: window.devicePixelRatio || 1 },
-      myFullscreen: {
-        show: true,
-        title: !!document.fullscreenElement ? '退出全屏' : '全屏查看',
-        icon: !!document.fullscreenElement
-          ? 'path://M3 7v7h7M3 14l7-7M21 17v-7h-7M21 10l-7 7'
-          : 'path://M3 10v-7h7M3 3l7 7M21 14v7-7M21 21l-7-7',
-        onclick: () => toggleFullscreen()
-      }
-    } : {
-      dataZoom: { yAxisIndex: 'none' },
-      restore: {},
-      saveAsImage: { backgroundColor: exportBg, pixelRatio: window.devicePixelRatio || 1 },
-      myFullscreen: {
-        show: true,
-        title: !!document.fullscreenElement ? '退出全屏' : '全屏查看',
-        icon: !!document.fullscreenElement
-          ? 'path://M3 7v7h7M3 14l7-7M21 17v-7h-7M21 10l-7 7'
-          : 'path://M3 10v-7h7M3 3l7 7M21 14v7-7M21 21l-7-7',
-        onclick: () => toggleFullscreen()
-      }
-    };
-
+  if (!sList.length) {
+    toggleFitUI(false);
     return {
-      __empty:false,
-      __titlePrefix:titlePrefix,
-
+      __empty:true,
       backgroundColor: bgNormal,
-      color: sList.map(s=>s.color),
-      textStyle:{ fontFamily:t.fontFamily },
-      stateAnimation: { duration: transitionMs, easing: 'cubicOut' },
-      animationDurationUpdate: transitionMs,
-      animationEasingUpdate: 'cubicOut',
-
-      grid:{ left:40, right: gridRightDesktop, top: gridTop, bottom: gridBottom },
-
-      title: { text: titleText, left: 'center', top: titleTop,
-        textStyle: { color: t.axisLabel, fontSize: 20, fontWeight: 600, fontFamily:t.fontFamily } },
-
-      legend: legendCfg,
-
-      xAxis:{
-        type:'value', name:xName, nameLocation:'middle', nameGap:25, nameMoveOverlap:true,
-        nameTextStyle:{ color:t.axisName, fontWeight:600, fontFamily:t.fontFamily, textShadowColor:'rgba(0,0,0,0.28)', textShadowBlur:4, textShadowOffsetY:1 },
-        axisLabel:{ color:t.axisLabel, fontSize:12, fontFamily:t.fontFamily, margin:10 },
-        axisLine:{ lineStyle:{ color:t.axisLine }},
-        splitLine:{ show:true, lineStyle:{ color:t.gridLine }},
-        min: xMinForAxis, max: xMaxForAxis
+      title:{ text:'请 先 添 加 数 据', left:'center', top:'middle',
+        textStyle:{ color:t.axisLabel, fontFamily:t.fontFamily, fontSize: 20, fontWeight: 600 }
       },
-      yAxis:{
-        type:'value', name:'风量(CFM)', min:0, max: built.yMax * 1.3,
-        nameTextStyle:{ color:t.axisName, fontWeight:600, textShadowColor:'rgba(0,0,0,0.28)', textShadowBlur:4, textShadowOffsetY:1 },
-        axisLabel:{ color:t.axisLabel }, axisLine:{ lineStyle:{ color:t.axisLine }},
-        splitLine:{ show:true, lineStyle:{ color:t.gridLine }}
-      },
-
-      tooltip: {
-        appendToBody: true,
-        confine: true,
-        axisPointer: { type: "cross", label: { color: t.tooltipText } },
-        trigger: 'item',
-        backgroundColor: t.tooltipBg,
-        borderColor: t.tooltipBorder, borderWidth: 1, borderRadius: 12,
-        textStyle: { color: t.tooltipText },
-        position: function (pos, _params, dom) {
-          const x = Array.isArray(pos) ? pos[0] : 0;
-          const y = Array.isArray(pos) ? pos[1] : 0;
-          const vw = window.innerWidth  || document.documentElement.clientWidth || 0;
-          const vh = window.innerHeight || document.documentElement.clientHeight || 0;
-          const dw = dom?.offsetWidth  || 0;
-          const dh = dom?.offsetHeight || 0;
-          const pad = 8, gap = 12;
-
-          let left = x + gap;
-          let top  = y + gap;
-
-          if (left + dw > vw - pad) left = Math.max(pad, x - gap - dw);
-          if (top  + dh > vh - pad) top  = Math.max(pad, y - gap - dh);
-          if (left < pad) left = pad;
-          if (top  < pad) top  = pad;
-
-          return [Math.round(left), Math.round(top)];
-        },
-        extraCssText: `
-          position: fixed;
-          backdrop-filter: blur(4px) saturate(120%);
-          -webkit-backdrop-filter: blur(4px) saturate(120%);
-          box-shadow: ${t.tooltipShadow};
-          z-index: 1000000;
-        `,
-        formatter: function(p){
-          const xModeNow = currentXModeFromPayload(lastPayload);
-          const xLabel = xModeNow==='rpm' ? 'RPM, ' : 'dB, ';
-          const infoLabel = xModeNow==='rpm' ? 'dB' : 'RPM';
-          const x = p.value?.[0], y = p.value?.[1];
-          const tip = p.data?.tip ?? '';
-          const dot = `<span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${p.color};margin-right:4px;"></span>`;
-          return `${dot}${p.seriesName}<br/>&nbsp;&nbsp;&nbsp;&nbsp;${y}CFM @${x}${xLabel}${tip}${infoLabel}`;
-        }
-      },
-
-      toolbox:{ top: -5, right: 0, feature:toolboxFeatures },
-
-      dataZoom: [
-        { type: 'inside', xAxisIndex: 0, throttle: 50, zoomOnMouseWheel: true, moveOnMouseWheel: true, moveOnMouseMove: true ,filterMode: "none", startValue: xMinForAxis, endValue: xMaxForAxis*0.85 },
-        { type: 'inside', yAxisIndex: 0, throttle: 50, zoomOnMouseWheel: 'alt', moveOnMouseWheel: 'alt', moveOnMouseMove: true ,filterMode: "none", endValue: built.yMax}
-      ],
-
-      series: finalSeries
+      toolbox:{ show:false },
+      tooltip:{ show:false, triggerOn:'none' }
     };
   }
 
+  const built = buildSeries(sList, xMode);
+
+  const xName = xMode==='rpm' ? '转速(RPM)' : '噪音(dB)';
+  const titlePrefix = xMode==='rpm' ? '转速' : '噪音';
+  const titleTop = 10, titleFontSize = 20, titleFontWeight = 600;
+  const titleText = `${titlePrefix}${TITLE_GLUE}风量曲线`;
+  const titleMeasure = measureText(titleText, titleFontSize, titleFontWeight, t.fontFamily);
+  const gridTop = Math.max(54, titleTop + Math.ceil(titleMeasure.height) + 12);
+
+  const gridRight = 40;
+  const narrowBottomAuto = Math.min(320, 50 + (sList.length || 1) * 22);
+  const gridBottom = isNarrow ? Math.max(140, narrowBottomAuto) : 40;
+
+  const legendCfg = { show: false, data: sList.map(s=>s.name) };
+  try {
+    const prevSel = chart?.getOption?.().legend?.[0]?.selected;
+    if (prevSel) legendCfg.selected = prevSel;
+  } catch(_){}
+
+  const finalSeries = [];
+  built.series.forEach(s => finalSeries.push(s));
+
+  if (showFitCurves) {
+    ensureFitModels(sList, xMode);
+    const width = Math.max(300, chart.getWidth ? chart.getWidth() : 800);
+    const sampleCount = computeSampleCount(width);
+    sList.forEach(s => {
+      const model = fitModelsCache[xMode].get(s.name);
+      if (!model || model.x0 == null || model.x1 == null) return;
+      const sMin = Math.min(model.x0, model.x1);
+      const sMax = Math.max(model.x0, model.x1);
+      const xmin = Math.max(built.xMin, sMin);
+      const xmax = Math.min(built.xMax, sMax);
+      if (!(xmax > xmin)) return;
+      const pts = resampleSingle(model, xmin, xmax, sampleCount);
+      finalSeries.push({
+        id: `fit-line:${xMode}:${s.name}`,
+        name: s.name,
+        type: 'line',
+        smooth: false,
+        showSymbol: false,
+        connectNulls: false,
+        data: pts.map(p => [p.x, p.y]),
+        lineStyle: { width: 2.5, type:'dashed', color: s.color, opacity: 0.95 },
+        itemStyle: { color: s.color },
+        legendHoverLink: true,
+        emphasis: { focus: 'series', blurScope: 'coordinateSystem', lineStyle: { width: 3.5, opacity: 1 }, itemStyle: { opacity: 1 } },
+        blur: { lineStyle: { opacity: 0.2 }, itemStyle: { opacity: 0.2 } },
+        silent: false,
+        tooltip: { show: false },
+        z: 3
+      });
+    });
+  }
+
+  const rawMin = Math.max(X_MIN_CLAMP, built.xMin);
+  const rawMax = built.xMax * 1.2;
+  let xMinForAxis = Math.floor(rawMin);
+  let xMaxForAxis = Math.ceil(rawMax);
+  if (!(xMaxForAxis > xMinForAxis)) xMaxForAxis = xMinForAxis + 1;
+
+  // 自定义导出按钮
+  const exportAllFeature = {
+    show: true,
+    title: '导出为图片',
+    icon: 'path://M12 2v10m0 0 4-4m-4 4-4-4M4 20h16v2H4z',
+    onclick: () => { try { exportCombinedImage(); } catch(e){ console.warn('导出失败', e); } }
+  };
+
+  // 全屏按钮：基于 isFs 切换图标与标题（非独立按钮）
+  const fsEnterIcon = 'path://M4 4h6v2H6v4H4V4Zm10 0h6v6h-2V6h-4V4Zm6 10v6h-6v-2h4v-4h2ZM4 14h2v4h4v2H4v-6z';
+  const fsExitIcon  = 'path://M6 6h4v2H8v2H6V6Zm10 0h2v4h-2V8h-2V6h2Zm2 10v2h-4v-2h2v-2h2v2ZM6 16h2v2h4v2H6v-4z';
+  const myFullscreen = {
+    show: true,
+    title: isFs ? '退出全屏' : '全屏查看',
+    icon: isFs ? fsExitIcon : fsEnterIcon,
+    onclick: () => toggleFullscreen()
+  };
+
+  // 移除原生 saveAsImage
+  const toolboxFeatures = isNarrow ? {
+    restore: {},
+    myExportAll: exportAllFeature,
+    myFullscreen
+  } : {
+    dataZoom: { yAxisIndex: 'none' },
+    restore: {},
+    myExportAll: exportAllFeature,
+    myFullscreen
+  };
+
+  return {
+    __empty:false,
+    __titlePrefix:titlePrefix,
+
+    backgroundColor: bgNormal,
+    color: sList.map(s=>s.color),
+    textStyle:{ fontFamily:t.fontFamily },
+    stateAnimation: { duration: transitionMs, easing: 'cubicOut' },
+    animationDurationUpdate: transitionMs,
+    animationEasingUpdate: 'cubicOut',
+
+    grid:{ left:40, right: gridRight, top: gridTop, bottom: gridBottom },
+
+    title: { text: titleText, left: 'center', top: titleTop,
+      textStyle: { color: t.axisLabel, fontSize: 20, fontWeight: 600, fontFamily:t.fontFamily } },
+
+    legend: legendCfg,
+
+    xAxis:{
+      type:'value', name:xName, nameLocation:'middle', nameGap:25, nameMoveOverlap:true,
+      nameTextStyle:{ color:t.axisName, fontWeight:600, fontFamily:t.fontFamily, textShadowColor:'rgba(0,0,0,0.28)', textShadowBlur:4, textShadowOffsetY:1 },
+      axisLabel:{ color:t.axisLabel, fontSize:12, fontFamily:t.fontFamily, margin:10 },
+      axisLine:{ lineStyle:{ color:t.axisLine }},
+      splitLine:{ show:true, lineStyle:{ color:t.gridLine }},
+      min: xMinForAxis, max: xMaxForAxis
+    },
+    yAxis:{
+      type:'value', name:'风量(CFM)', min:0, max: built.yMax * 1.3,
+      nameTextStyle:{ color:t.axisName, fontWeight:600, textShadowColor:'rgba(0,0,0,0.28)', textShadowBlur:4, textShadowOffsetY:1 },
+      axisLabel:{ color:t.axisLabel }, axisLine:{ lineStyle:{ color:t.axisLine }},
+      splitLine:{ show:true, lineStyle:{ color:t.gridLine }}
+    },
+
+    tooltip: {
+      appendToBody: !isFs,
+      confine: false,
+      trigger: 'item',
+      triggerOn: 'mousemove|click|touchstart|touchmove',
+      // 仅保留文字颜色；其他样式使用 ECharts 默认值，保证可读性
+      axisPointer: {
+        type: 'cross',
+        label: {
+          color: t.tooltipText
+        }
+      },
+      backgroundColor: t.tooltipBg,
+      borderColor: t.tooltipBorder,
+      borderWidth: 1,
+      borderRadius: 12,
+      textStyle: { color: t.tooltipText },
+      position: function (pos, _params, dom) {
+        const x = Array.isArray(pos) ? pos[0] : 0;
+        const y = Array.isArray(pos) ? pos[1] : 0;
+        const vw = window.innerWidth  || document.documentElement.clientWidth || 0;
+        const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+        const dw = dom?.offsetWidth  || 0;
+        const dh = dom?.offsetHeight || 0;
+        const pad = 8, gap = 12;
+
+        let left = x + gap;
+        let top  = y + gap;
+
+        if (left + dw > vw - pad) left = Math.max(pad, x - gap - dw);
+        if (top  + dh > vh - pad) top  = Math.max(pad, y - gap - dh);
+        if (left < pad) left = pad;
+        if (top  < pad) top = pad;
+
+        return [Math.round(left), Math.round(top)];
+      },
+      extraCssText: `
+        position: fixed;
+        backdrop-filter: blur(4px) saturate(120%);
+        -webkit-backdrop-filter: blur(4px) saturate(120%);
+        box-shadow: ${t.tooltipShadow};
+        z-index: 1000000;
+      `,
+      formatter: function(p){
+        const xModeNow = currentXModeFromPayload(lastPayload);
+        const xLabel = xModeNow==='rpm' ? 'RPM, ' : 'dB, ';
+        const infoLabel = xModeNow==='rpm' ? 'dB' : 'RPM';
+        const x = p.value?.[0], y = p.value?.[1];
+        const tip = p.data?.tip ?? '';
+        const dot = `<span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${p.color};margin-right:4px;"></span>`;
+        return `${dot}${p.seriesName}<br/>&nbsp;&nbsp;&nbsp;&nbsp;${y}CFM @${x}${xLabel}${tip}${infoLabel}`;
+      }
+    },
+
+    toolbox:{ top: 0, right: 0, feature:toolboxFeatures },
+
+    dataZoom: [
+      { type: 'inside', xAxisIndex: 0, throttle: 50, zoomOnMouseWheel: true, moveOnMouseWheel: true, moveOnMouseMove: true ,filterMode: "none", startValue: xMinForAxis, endValue: xMaxForAxis*0.85 },
+      { type: 'inside', yAxisIndex: 0, throttle: 50, zoomOnMouseWheel: 'alt', moveOnMouseWheel: 'alt', moveOnMouseMove: true ,filterMode: "none", endValue: built.yMax}
+    ],
+
+    series: finalSeries
+  };
+}
   // ===== UI：X 轴切换 =====
   let xAxisOverride = null;
   let axisSnapSuppressUntil = 0;
@@ -985,9 +1173,13 @@ function render(payload){
       try { localStorage.setItem('x_axis_type', normalized); } catch(_){}
       pos(normalized, true);
       protectSliderAnimationWindow();
+
+      __skipSpectrumOnce = true;
+      __suppressSpectrumUntil = performance.now() + 420;  // 抑制 ~420ms，覆盖 ECharts 异步 dataZoom
       if (lastPayload) render(lastPayload);
       if (typeof onXAxisChange === 'function') { try { onXAxisChange(normalized); } catch(_) {} }
     }
+
     function nearestType() {
       const m = new DOMMatrix(getComputedStyle(xAxisSwitchSlider).transform);
       const cur = m.m41 || 0;
@@ -1061,6 +1253,7 @@ function render(payload){
     requestAnimationFrame(() => updateAxisSwitchPosition({ force:true, animate:false }));
   }
 
+// 1) 确保 fit UI 不再依赖自定义 rail（回退到 Version185）
 function ensureFitUI(){
   let btns = getById('fitButtons');
   if (!btns){
@@ -1068,8 +1261,8 @@ function ensureFitUI(){
     btns.id = 'fitButtons';
     btns.className = 'fit-buttons';
     btns.innerHTML = `
-      <button class="btn" id="btnFit" type="button">${FIT_ALGO_NAME}<br>曲线</button>
-      <button class="btn" id="btnSpectrum" type="button">频谱图</button>
+      <button class="btn" id="btnFit" type="button">实时拟合</button>
+      <button class="btn" id="btnSpectrum" type="button">动态频谱</button>
     `;
     appendToRoot(btns);
 
@@ -1081,30 +1274,50 @@ function ensureFitUI(){
     }
 
     btnFit.addEventListener('click', (e)=>{
-      e.preventDefault();   // 双保险，阻止任何表单默认动作
+      e.preventDefault();
       e.stopPropagation();
       showFitCurves = !showFitCurves;
-      bubbleUserMoved = false; bubblePos.left = null; bubblePos.top = null;
+      bubbleUserMoved = false;
+      bubblePos.left = null;
+      bubblePos.top  = null;
+
       syncButtons();
-      if (lastPayload) render(lastPayload);
-      requestAnimationFrame(placeFitUI);
+      toggleFitUI(showFitCurves);
+      placeFitUI();
+      repaintPointer();
+      if (showFitCurves) refreshFitBubble(); else {
+        const bubble = getById('fitBubble');
+        if (bubble) bubble.style.visibility = 'hidden';
+      }
     });
 
     btnSpectrum.addEventListener('click', async (e)=>{
-      e.preventDefault();   // 双保险
+      e.preventDefault();
       e.stopPropagation();
+
+      const now = performance.now();
+      if (now < __specToggleCooldownUntil) return; // 冷却中，忽略点击
+
+      __specToggleCooldownUntil = now + 250;
+      // 不可交互 0.3s，避免动画未完成时重复触发
+      btnSpectrum.disabled = true;
+      btnSpectrum.style.pointerEvents = 'none';
+      btnSpectrum.setAttribute('aria-disabled', 'true');
+      setTimeout(() => {
+        btnSpectrum.disabled = false;
+        btnSpectrum.style.pointerEvents = '';
+        btnSpectrum.removeAttribute('aria-disabled');
+      }, 250);
+
       spectrumEnabled = !spectrumEnabled;
       syncButtons();
-      toggleSpectrumUI(spectrumEnabled);
-      if (spectrumEnabled) {
-        await requestAndRenderSpectrum();
-      }
+      await toggleSpectrumUI(spectrumEnabled);
     });
 
     syncButtons();
   }
 
-  // 气泡：挂到 body，使用 fixed；但位置等于“图表左上角 + 相对偏移 bubblePos”
+  // 气泡
   let bubble = getById('fitBubble');
   if (!bubble){
     bubble = document.createElement('div');
@@ -1239,24 +1452,26 @@ function ensureFitUI(){
     if (ptr)    ptr.style.visibility    = showFloating ? 'visible' : 'hidden';
   }
 
-  function placeFitUI(){
+// 修改：placeFitUI —— 有 rail 时，按钮不再用绝对/固定定位
+function placeFitUI(){
   const btns = getById('fitButtons');
   const bubble = getById('fitBubble');
   if (!lastOption) return;
 
   const grid = lastOption.grid || { left:40, right: 260, top: 60, bottom: 40 };
-  const chartW = chart ? chart.getWidth() : (root ? root.clientWidth : 800);
-  const chartH = chart ? chart.getHeight() : (root ? root.clientHeight : 600);
   const left = (typeof grid.left==='number') ? grid.left : 40;
-  const rightGap = (typeof grid.right==='number') ? grid.right : 260;
   const top = (typeof grid.top==='number') ? grid.top : 60;
-  const bottomGap = (typeof grid.bottom==='number') ? grid.bottom : 40;
 
-  if (btns){
-    // 全屏：固定在右下角；非全屏：跟随图表容器
+  // 如果 rail 存在：按钮交给 rail 布局，不需要定位
+  if (btns && __legendActionsEl) {
+    btns.style.position = 'static';
+    btns.style.right = '';
+    btns.style.bottom = '';
+    btns.style.visibility = (lastOption.__empty) ? 'hidden' : 'visible';
+  } else if (btns) {
+    // 回退：保持原有逻辑
     const narrow = layoutIsNarrow();
     btns.style.flexDirection = narrow ? 'column' : 'row';
-
     if (isFs) {
       btns.style.position = 'fixed';
       btns.style.right = '12px';
@@ -1269,50 +1484,38 @@ function ensureFitUI(){
     btns.style.visibility = (lastOption.__empty) ? 'hidden' : 'visible';
   }
 
-    if (bubble){
-      // bubble 在 body 上，使用 fixed；但位置等于“图表左上角 + 相对偏移 bubblePos”
-      const r = root ? root.getBoundingClientRect() : { left:0, top:0 };
-      const vw = window.innerWidth, vh = window.innerHeight;
-      const bw = bubble.offsetWidth  || 0;
-      const bh = bubble.offsetHeight || 0;
-      const pad = 6;
+  if (bubble){
+    const r = root ? root.getBoundingClientRect() : { left:0, top:0 };
+    const defaultOffsetX = left;
+    const defaultOffsetY = top;
 
-      // 默认偏移：绘图区左上角（不偏移）
-      const defaultOffsetX = left;
-      const defaultOffsetY = top;
-
-      let offX, offY;
-      if (!bubbleUserMoved || bubblePos.left == null || bubblePos.top == null){
-        offX = defaultOffsetX;
-        offY = defaultOffsetY;
-        bubblePos.left = offX;
-        bubblePos.top  = offY;
-      } else {
-        offX = bubblePos.left;
-        offY = bubblePos.top;
-      }
-
-      // 计算 fixed 位置
-      let fx = r.left + offX;
-      let fy = r.top  + offY;
-
-      // 轻微可视区钳制（不把气泡完全挤出屏幕）
-      fx = Math.min(Math.max(-bw + pad, fx), Math.max(pad, vw - pad));
-      fy = Math.min(Math.max(-bh + pad, fy), Math.max(pad, vh - pad));
-
-      bubble.style.position = 'fixed';
-      bubble.style.left = Math.round(fx) + 'px';
-      bubble.style.top  = Math.round(fy) + 'px';
-      bubble.style.right  = 'auto';
-      bubble.style.bottom = 'auto';
-
-      const showFloating = showFitCurves && !lastOption.__empty;
-      bubble.style.visibility = showFloating ? 'visible' : 'hidden';
-
-      const unit = (currentXModeFromPayload(lastPayload) === 'rpm') ? 'RPM' : 'dB';
-      const unitSpan = bubble.querySelector('#fitXUnit');
-      if (unitSpan) unitSpan.textContent = unit;
+    let offX, offY;
+    if (!bubbleUserMoved || bubblePos.left == null || bubblePos.top == null){
+      offX = defaultOffsetX;
+      offY = defaultOffsetY;
+      bubblePos.left = offX;
+      bubblePos.top  = offY;
+    } else {
+      offX = bubblePos.left;
+      offY = bubblePos.top;
     }
+
+    let fx = r.left + offX;
+    let fy = r.top  + offY;
+
+    bubble.style.position = 'fixed';
+    bubble.style.left = Math.round(fx) + 'px';
+    bubble.style.top  = Math.round(fy) + 'px';
+    bubble.style.right  = 'auto';
+    bubble.style.bottom = 'auto';
+
+    const showFloating = showFitCurves && !lastOption.__empty;
+    bubble.style.visibility = showFloating ? 'visible' : 'hidden';
+
+    const unit = (currentXModeFromPayload(lastPayload) === 'rpm') ? 'RPM' : 'dB';
+    const unitSpan = bubble.querySelector('#fitXUnit');
+    if (unitSpan) unitSpan.textContent = unit;
+  }
 }
 
 
@@ -1694,210 +1897,272 @@ function ensureFitUI(){
     if (xQueryByMode[mode] > vmax) xQueryByMode[mode] = vmax;
   }
 
-    // 替换：enterFullscreen —— 进入后立即按比例分配高度
-    async function enterFullscreen(){
-      const target =
-        (root && root.parentElement) ||
-        root ||
-        document.getElementById('chartHost') ||
-        document.documentElement;
-
-      try {
-        if (target.requestFullscreen) { await target.requestFullscreen(); }
-        else { await document.documentElement.requestFullscreen(); }
-        isFs = true;
-        if (isMobile() && screen.orientation && screen.orientation.lock) {
-          try { await screen.orientation.lock('landscape'); } catch(_) {}
-        }
-      } catch(err){
-        console.warn('requestFullscreen 失败：', err);
-      } finally {
-        adoptBubbleHost();
-        bubbleUserMoved = false;
-        // 全屏：先分配高度再统一 resize
-        updateFullscreenHeights();
-        if (lastPayload) render(lastPayload); else if (chart) chart.resize();
-        requestAnimationFrame(() => { try { placeFitUI(); repaintPointer(); updateSpectrumLayout(); } catch(_) {} });
+  async function enterFullscreen(){
+    const shell = document.getElementById('chart-settings');
+    const target = shell || (root && root.parentElement) || root || document.documentElement;
+  
+    try {
+      if (target.requestFullscreen) { await target.requestFullscreen(); }
+      else { await document.documentElement.requestFullscreen(); }
+      isFs = true;
+      if (isMobile() && screen.orientation && screen.orientation.lock) {
+        try { await screen.orientation.lock('landscape'); } catch(_) {}
       }
+    } catch(err){
+      console.warn('requestFullscreen 失败：', err);
+    } finally {
+      adoptBubbleHost();
+      bubbleUserMoved = false;
+  
+      updateFullscreenHeights();
+      if (lastPayload) render(lastPayload); else if (chart) chart.resize();
+  
+      requestAnimationFrame(() => {
+        try {
+          placeFitUI(); repaintPointer(); updateSpectrumLayout();
+          updateLegendRailLayout();  // 全屏下立刻重排 rail
+          updateLegendRail();
+        } catch(_) {}
+      });
     }
+  }
 
-    // 退出全屏：补一处普通模式布局收敛，避免“展开状态退出后仍很高”
-    async function exitFullscreen(){
-      try { if (document.fullscreenElement) await document.exitFullscreen(); }
-      catch(err){ console.warn('exitFullscreen 失败：', err); }
-      finally {
-        isFs = false;
-        adoptBubbleHost();
-        bubbleUserMoved = false;
-    
-        updateFullscreenHeights();   // 清 height/minHeight + 设回目标高度
-        updateSpectrumLayout();      // 按普通模式目标高度收敛一次
-    
-        if (lastPayload) render(lastPayload); else if (chart) chart.resize();
-        requestAnimationFrame(() => { try { placeFitUI(); repaintPointer(); } catch(_) {} });
+  async function exitFullscreen(){
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+    } catch(err) {
+      console.warn('exitFullscreen 失败：', err);
+    } finally {
+      isFs = false;
+      adoptBubbleHost();
+      bubbleUserMoved = false;
+  
+      // 退出全屏：先修正 minHeight，再做一次布局收敛，避免高度偏大
+      if (spectrumEnabled) {
+        __ensureMainChartMinHeightForSpectrumMode();
+      } else {
+        if (root) try { root.style.minHeight = ''; } catch(_) {}
       }
+  
+      updateFullscreenHeights();
+      updateSpectrumLayout();
+  
+      if (lastPayload) render(lastPayload);
+      else if (chart) chart.resize();
+  
+      requestAnimationFrame(() => {
+        try { placeFitUI(); repaintPointer(); } catch(_) {}
+      });
     }
-
+  }
+  
   function toggleFullscreen(){ if (document.fullscreenElement) exitFullscreen(); else enterFullscreen(); }
 
-function ensureSpectrumHost() {
-  if (spectrumRoot && spectrumRoot.isConnected && spectrumInner && spectrumInner.isConnected) {
-    return spectrumRoot;
+  function ensureSpectrumChart() {
+    ensureSpectrumHost();
+    if (spectrumChart || !window.echarts || !spectrumInner) return;
+    spectrumChart = echarts.init(spectrumInner, null, { renderer:'canvas', devicePixelRatio: window.devicePixelRatio || 1 });
   }
 
-  // 先尝试 adopt 页面已有 DOM
-  let host =
-    (root && root.parentElement && root.parentElement.querySelector('#spectrumHost')) ||
-    document.getElementById('spectrumHost');
-
-  if (!host) {
-    host = document.createElement('div');
-    host.id = 'spectrumHost';
-    try {
-      const parent = root?.parentElement || document.body;
-      parent.insertBefore(host, root.nextSibling);
-    } catch(_) {
-      appendToRoot(host);
-    }
-  }
-
-  // 基础样式（不覆盖已有）
-  if (!host.style.width) host.style.width = '100%';
-  if (!host.style.position) host.style.position = 'relative';
-  if (!host.style.overflow) host.style.overflow = 'hidden';
-  if (!host.style.transition) host.style.transition = `height ${Math.max(180, getCssTransitionMs())}ms ease`;
-  try { host.style.setProperty('overflow-anchor', 'auto'); } catch(_) {}
-
-  // NEW: 内层固定高宿主，ECharts 挂在这里
-  let inner = host.querySelector('.spectrum-inner');
-  if (!inner) {
-    inner = document.createElement('div');
-    inner.className = 'spectrum-inner';
-    inner.style.width = '100%';
-    inner.style.height = '0px';      // 高度由 JS 设为目标值
-    inner.style.position = 'relative';
-    inner.style.overflow = 'visible'; // 内层不裁切，外层裁切负责“露出”
-    host.appendChild(inner);
-  }
-
-  spectrumRoot = host;
-  spectrumInner = inner;
-  return host;
-}
-
-// 2) 频谱实例：隐藏 legend UI；去掉“频谱 → 主图”的反向广播（频谱不可交互）
-function ensureSpectrumChart() {
-  ensureSpectrumHost();
-  if (spectrumChart || !window.echarts || !spectrumInner) return;
-  spectrumChart = echarts.init(spectrumInner, null, {
-    renderer:'canvas',
-    devicePixelRatio: window.devicePixelRatio || 1
-  });
-}
-
-// 收起/展开频谱：非全屏时让容器高度平滑过渡，且把 minHeight/属性的清理放到过渡结束
-function toggleSpectrumUI(show) {
+async function toggleSpectrumUI(show) {
   ensureSpectrumHost();
   spectrumEnabled = !!show;
   if (!spectrumRoot) return;
 
-  const docEl = document.documentElement;
+  specBumpEpochAndClearTimers();
+
+  const shell =
+    document.getElementById('chart-settings') ||
+    (root && root.closest('.fc-chart-container')) ||
+    document.documentElement;
+
+  try { spectrumChart && spectrumChart.dispatchAction({ type: 'hideTip' }); } catch(_) {}
+
+  const bgMs = getCssTransitionMs();
+  const safetyMs = Math.max(240, bgMs + 120);
+  const myEpoch = __specEpoch;
 
   if (show) {
-    try { docEl.setAttribute('data-chart-mode', 'spectrum'); } catch(_) {}
-    if (root) {
-      const rh = Math.max(220, Math.round(root.getBoundingClientRect().height || (chart?.getHeight?.() || 480)));
-      try { root.style.minHeight = rh + 'px'; } catch(_) {}
-    }
+    try { shell.setAttribute('data-chart-mode', 'spectrum'); } catch(_) {}
 
     ensureSpectrumChart();
 
     if (isFs) {
-      spectrumRoot.style.transition = 'none';
-      updateFullscreenHeights();
-      requestAndRenderSpectrum();
-      try { spectrumChart && spectrumChart.resize(); } catch(_) {}
+      // 全屏：沿用 max-height 逻辑（移除透明度过渡）
+      spectrumRoot.style.setProperty('flex', '0 0 auto', 'important');
+      spectrumRoot.style.setProperty('max-height', '0px');
+
+      const targetPx = __computeFsSpecTargetPx();
+      spectrumRoot.style.setProperty('--fs-spec-h', targetPx + 'px');
+      void spectrumRoot.offsetHeight;
+
+      requestAndRenderSpectrum().catch(()=>{}).then(() => {
+        if (myEpoch !== __specEpoch) return;
+        try { spectrumChart && spectrumChart.resize(); } catch(_) {}
+      });
+
+      requestAnimationFrame(() => {
+        if (myEpoch !== __specEpoch) return;
+        const onEnd = (e) => {
+          if (myEpoch !== __specEpoch) return;
+          if (e && e.propertyName && e.propertyName !== 'max-height') return;
+          try { spectrumRoot.removeEventListener('transitionend', onEnd); } catch(_) {}
+          try { chart && chart.resize(); } catch(_) {}
+          try { spectrumChart && spectrumChart.resize(); } catch(_) {}
+        };
+        try { spectrumRoot.addEventListener('transitionend', onEnd, { once: true }); } catch(_) {}
+        spectrumRoot.style.setProperty('max-height', targetPx + 'px');
+      });
     } else {
-      const ms = Math.max(180, getCssTransitionMs());
-      if (!spectrumRoot.style.transition || spectrumRoot.style.transition === 'none') {
-        spectrumRoot.style.transition = `height ${ms}ms ease`;
+      // 非全屏：只增长 #spectrumHost 的高度；去掉透明度过渡，仅保留变形/尺寸过渡
+      const spec = NF_SPEC_H_PX;
+
+      // 强制去掉透明度过渡与淡入淡出
+      if (spectrumInner) {
+        spectrumInner.style.transition = 'transform var(--transition-speed, .25s) ease';
+        spectrumInner.style.opacity = '1';
       }
 
-      const target = getTargetSpectrumHeight();
-      if (spectrumInner) spectrumInner.style.height = target + 'px';
-      try { spectrumChart && spectrumChart.resize(); } catch(_) {}
-      requestAndRenderSpectrum();
-
-      // 0 -> target
+      spectrumRoot.classList.add('anim-scale', 'reveal-from-0');
+      spectrumRoot.style.transition = 'none';
       spectrumRoot.style.height = '0px';
-      requestAnimationFrame(() => { spectrumRoot.style.height = target + 'px'; });
+      void spectrumRoot.offsetHeight;
 
-      const onEnd = (e) => {
-        if (e && e.propertyName !== 'height') return;
-        try { spectrumRoot.removeEventListener('transitionend', onEnd); } catch(_) {}
+      requestAndRenderSpectrum().catch(()=>{}).then(() => {
+        if (myEpoch !== __specEpoch) return;
         try { spectrumChart && spectrumChart.resize(); } catch(_) {}
-      };
-      try { spectrumRoot.addEventListener('transitionend', onEnd, { passive:true }); } catch(_) {}
-    }
+      });
 
+      requestAnimationFrame(() => {
+        if (myEpoch !== __specEpoch) return;
+        const onEnd = (e) => {
+          if (myEpoch !== __specEpoch) return;
+          if (e && e.propertyName !== 'height') return;
+          try { spectrumRoot.removeEventListener('transitionend', onEnd); } catch(_) {}
+          spectrumRoot.classList.remove('anim-scale', 'reveal-from-0', 'revealed');
+          spectrumRoot.style.transition = '';
+          // 复位 inner 的内联样式（不再保留透明度过渡）
+          if (spectrumInner) {
+            spectrumInner.style.transition = '';
+            spectrumInner.style.opacity = '';
+          }
+          try { spectrumChart && spectrumChart.resize(); } catch(_) {}
+          revealSpectrumIfNeeded();
+        };
+        try { spectrumRoot.addEventListener('transitionend', onEnd, { once:true }); } catch(_) {}
+
+        spectrumRoot.style.transition = `height var(--transition-speed, .25s) ease`;
+        void spectrumRoot.offsetHeight;
+        spectrumRoot.style.height = spec + 'px';
+        spectrumRoot.classList.add('revealed');
+
+        specSetTimeout(() => {
+          if (myEpoch !== __specEpoch) return;
+          spectrumRoot.classList.remove('anim-scale', 'reveal-from-0', 'revealed');
+          spectrumRoot.style.transition = '';
+          if (spectrumInner) {
+            spectrumInner.style.transition = '';
+            spectrumInner.style.opacity = '';
+          }
+        }, safetyMs);
+      });
+    }
   } else {
-    // 非全屏收起：动画期间先别动 root/minHeight 与 data-chart-mode，等动画结束后再清
     const cleanupAfter = () => {
-      try { docEl.removeAttribute('data-chart-mode'); } catch(_) {}
+      if (myEpoch !== __specEpoch) return;
+      try {
+        shell.removeAttribute('data-chart-mode');
+      } catch(_) {}
       if (root) try { root.style.minHeight = ''; } catch(_) {}
+
+      spectrumRoot.classList.remove('anim-scale', 'revealed', 'reveal-from-0', 'collapse-to-0');
+      // 复位 inner 的内联样式（无透明度过渡/无淡出）
+      if (spectrumInner) {
+        spectrumInner.style.transition = '';
+        spectrumInner.style.opacity = '';
+      }
+      try {
+        spectrumRoot.style.removeProperty('max-height');
+        spectrumRoot.style.removeProperty('flex');
+      } catch(_) {}
     };
 
     if (isFs) {
-      spectrumRoot.style.transition = 'none';
-      spectrumRoot.style.height = '0px';
-      updateFullscreenHeights();
-      try { spectrumChart && spectrumChart.resize(); } catch(_) {}
-      cleanupAfter();
-    } else {
-      const ms = Math.max(180, getCssTransitionMs());
-      if (!spectrumRoot.style.transition || spectrumRoot.style.transition === 'none') {
-        spectrumRoot.style.transition = `height ${ms}ms ease`;
-      }
-
-      // 锁定当前像素高度 → 强制 reflow → 下一帧设为 0，保证有过渡
-      const curH = Math.max(0, Math.round(spectrumRoot.getBoundingClientRect().height || 0));
-      spectrumRoot.style.height = curH + 'px';
-      void spectrumRoot.offsetHeight; // 强制 reflow
+      const curH = Math.max(1, Math.round((spectrumRoot.getBoundingClientRect().height || 1)));
+      spectrumRoot.style.setProperty('flex', '0 0 auto', 'important');
+      spectrumRoot.style.setProperty('--fs-spec-h', curH + 'px');
+      spectrumRoot.style.setProperty('max-height', curH + 'px');
 
       requestAnimationFrame(() => {
+        if (myEpoch !== __specEpoch) return;
         const onEnd = (e) => {
+          if (myEpoch !== __specEpoch) return;
+          if (e && e.propertyName && e.propertyName !== 'max-height') return;
+          try { spectrumRoot.removeEventListener('transitionend', onEnd); } catch(_) {}
+          cleanupAfter();
+          try {
+            spectrumRoot.style.removeProperty('max-height');
+            spectrumRoot.style.removeProperty('flex');
+            spectrumRoot.style.removeProperty('--fs-spec-h');
+          } catch(_) {}
+          updateFullscreenHeights();
+          try { chart && chart.resize(); } catch(_) {}
+        };
+        try { spectrumRoot.addEventListener('transitionend', onEnd, { once:true }); } catch(_) {}
+        spectrumRoot.style.setProperty('max-height', '0px');
+      });
+
+      specSetTimeout(() => { try { cleanupAfter(); updateFullscreenHeights(); } catch(_) {} }, Math.max(900, (getCssTransitionMs()||350)+300));
+    } else {
+      // 非全屏：只收缩 #spectrumHost 的高度到 0；去掉透明度过渡
+      const curSpec = Math.round((spectrumRoot?.getBoundingClientRect().height || 0));
+
+      // 强制去掉透明度过渡与淡出
+      if (spectrumInner) {
+        spectrumInner.style.transition = 'transform var(--transition-speed, .25s) ease';
+        spectrumInner.style.opacity = '1';
+      }
+
+      spectrumRoot.classList.add('anim-scale', 'collapse-to-0');
+      spectrumRoot.style.transition = 'none';
+      spectrumRoot.style.height = curSpec + 'px';
+
+      requestAnimationFrame(() => {
+        if (myEpoch !== __specEpoch) return;
+        const onEnd = (e) => {
+          if (myEpoch !== __specEpoch) return;
           if (e && e.propertyName !== 'height') return;
           try { spectrumRoot.removeEventListener('transitionend', onEnd); } catch(_) {}
           cleanupAfter();
+          spectrumRoot.classList.remove('anim-scale', 'collapse-to-0');
+          spectrumRoot.style.transition = '';
+          if (spectrumInner) {
+            spectrumInner.style.transition = '';
+            spectrumInner.style.opacity = '';
+          }
         };
         try { spectrumRoot.addEventListener('transitionend', onEnd, { once:true }); } catch(_) {}
+
+        spectrumRoot.style.transition = `height var(--transition-speed, .25s) ease`;
+        void spectrumRoot.offsetHeight;
         spectrumRoot.style.height = '0px';
       });
     }
   }
 }
-
-function updateSpectrumLayout(opts = {}) {
+  
+// 非全屏：不再改 --main-chart-h（主图固定）；全屏仍旧由 flex 驱动
+function updateSpectrumLayout() {
   if (!spectrumRoot || !spectrumInner) return;
 
-  const target = getTargetSpectrumHeight();
-
-  // 始终先把内层调到目标高度（ECharts 宿主）
-  if (spectrumInner) spectrumInner.style.height = target + 'px';
-
-  // 未展开时，不需要推外层高度（保持 0 以便收起）
-  if (!spectrumEnabled) return;
-
-  // 展开态：外层同步为目标高度（有 CSS 过渡，会平滑调整）
-  spectrumRoot.style.height = target + 'px';
-
-  // 展开态的窗口/布局变化：做一次 resize 即可
-  if (spectrumChart) {
-    try { spectrumChart.resize(); } catch(_) {}
+  if (isFs) {
+    if (spectrumRoot) spectrumRoot.style.height = '';
+    if (spectrumInner) spectrumInner.style.height = '';
+    if (spectrumChart) { try { spectrumChart.resize(); } catch(_) {} }
+    return;
   }
 }
 
-// 新增：根据当前 X 选择获取值（若未初始化，用可视范围中点）
 function getXQueryOrDefault(mode){
   let x = xQueryByMode[mode];
   if (x == null) {
@@ -1926,7 +2191,6 @@ function getSeriesRpmForCurrentX(series, spectrumModel){
   }
 }
 
-// 新增整个函数：懒加载 + 绘制频谱
 async function requestAndRenderSpectrum() {
   if (!spectrumEnabled) return;
   if (!lastPayload || !lastPayload.chartData || !Array.isArray(lastPayload.chartData.series)) return;
@@ -1936,9 +2200,10 @@ async function requestAndRenderSpectrum() {
   updateSpectrumLayout();
 
   const sList = lastPayload.chartData.series;
-  const pairs = [];
-  const missingKeys = [];
 
+  // 计算当前所需的模型键集合
+  const wanted = new Set();
+  const pairs = [];
   const seen = new Set();
   sList.forEach(s => {
     const mid = Number(s.model_id), cid = Number(s.condition_id);
@@ -1946,46 +2211,98 @@ async function requestAndRenderSpectrum() {
     const key = `${mid}_${cid}`;
     if (seen.has(key)) return;
     seen.add(key);
+    wanted.add(key);
     pairs.push({ model_id: mid, condition_id: cid });
-    if (!spectrumModelCache.has(key)) missingKeys.push(key);
   });
 
-  // 懒加载：仅在缺失时请求
-  if (missingKeys.length) {
-    try {
-      await fetchSpectrumModelsForPairs(pairs);
-    } catch(e) {
-      console.warn('加载频谱模型失败：', e);
-    }
+  const wantedArr = Array.from(wanted);
+  const keyHash = __hashWantedSet(wanted);
+
+  // 1) 若全部已缓存，直接渲染，无需发请求
+  const allCached = wantedArr.length > 0 && wantedArr.every(k => spectrumModelCache.has(k));
+  if (allCached) {
+    __specPending = false;
+    setSpectrumLoading(false);
+    buildAndSetSpectrumOption();
+    __lastFetchKeyHash = keyHash;
+    return;
   }
 
-  buildAndSetSpectrumOption();
+  // 2) 并发去重：已有请求在进行中则直接返回，避免重复打点
+  if (__specFetchInFlight) return;
+
+  // 3) 发起请求（仅在确有缺失时）
+  __specFetchInFlight = true;
+  try {
+    let fetchRes = { modelsLoaded: 0, missingKeys: new Set(), rebuildingKeys: new Set() };
+    try {
+      fetchRes = await fetchSpectrumModelsForPairs(pairs);
+    } catch (e) {
+      console.warn('加载频谱模型失败：', e);
+    }
+
+    const pendingKeys = wantedArr.filter(k => !spectrumModelCache.has(k) && !fetchRes.missingKeys.has(k));
+    __specPending = pendingKeys.length > 0;
+
+    // 已就绪的先渲染（Loading 只做遮罩提示，不阻挡内容）
+    buildAndSetSpectrumOption();
+
+    if (__specPending) {
+      setSpectrumLoading(true, `${pendingKeys.length}条频谱加载中，请稍后...`);
+      // 使用已有的定时器工具轮询
+      specSetTimeout(() => {
+        if (spectrumEnabled) requestAndRenderSpectrum();
+      }, 1500);
+    } else {
+      setSpectrumLoading(false);
+    }
+
+    __lastFetchKeyHash = keyHash;
+  } finally {
+    __specFetchInFlight = false;
+  }
 }
 
-// 新增整个函数：取频谱模型（调用后端 /api/spectrum-models）
 async function fetchSpectrumModelsForPairs(pairs) {
-  if (!Array.isArray(pairs) || !pairs.length) return;
+  if (!Array.isArray(pairs) || !pairs.length) {
+    return { modelsLoaded: 0, missingKeys: new Set(), rebuildingKeys: new Set() };
+  }
   const resp = await fetch('/api/spectrum-models', {
     method: 'POST',
-    headers: {'Content-Type':'application/json'},
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ pairs })
   });
   const j = await resp.json();
-  // 统一解析（此文件不引 normalizeApiResponse，上层已标准化）
   const ok = !!(j && typeof j === 'object' && j.success === true);
   if (!ok) throw new Error((j && j.error_message) || '频谱模型接口失败');
 
   const data = j.data || {};
   const models = Array.isArray(data.models) ? data.models : [];
+  let loaded = 0;
+
   models.forEach(item => {
     const mid = Number(item.model_id), cid = Number(item.condition_id);
     const key = `${mid}_${cid}`;
     const model = (item && item.model) || null;
     if (model && Array.isArray(model.centers_hz) && Array.isArray(model.band_models_pchip)) {
       spectrumModelCache.set(key, model);
+      loaded++;
     }
   });
-  // missing / rebuilding 暂不强制处理；后续可在 UI 提示
+
+  function toKeySet(arr) {
+    const s = new Set();
+    (Array.isArray(arr) ? arr : []).forEach(e => {
+      const mid = Number(e && e.model_id), cid = Number(e && e.condition_id);
+      if (Number.isInteger(mid) && Number.isInteger(cid)) s.add(`${mid}_${cid}`);
+    });
+    return s;
+  }
+
+  const missingKeys = toKeySet(data.missing);
+  const rebuildingKeys = toKeySet(data.rebuilding);
+
+  return { modelsLoaded: loaded, missingKeys, rebuildingKeys };
 }
 
 // 新增整个函数：依据当前 Legend 可见性构建频谱线并渲染
@@ -2005,9 +2322,8 @@ function rpmMaxForSeries(s, model) {
   return 0;
 }
 
-let __spectrumWasEmpty = true;
+  let __spectrumWasEmpty = true;
 
-// 3) 频谱配置：legend 隐藏；初次选中集沿主图设置；series 一律给完整数据，显隐交给 legend 广播动画
 function buildAndSetSpectrumOption() {
   if (!spectrumChart) return;
 
@@ -2020,65 +2336,82 @@ function buildAndSetSpectrumOption() {
   const fmtHz = (v) => {
     const n = Number(v);
     if (!Number.isFinite(n)) return String(v);
-    if (n >= 1000) return (n / 1000).toFixed(1) + ' kHz';
-    return n.toFixed(1) + ' Hz';
+    return n >= 1000 ? (n / 1000).toFixed(1) + ' kHz' : n.toFixed(1) + ' Hz';
   };
 
-  // 固定 y 上限基于“主图可见集合”
   const selMapFromMain = getLegendSelectionMap();
-  const visibleKeys = allSeries
-    .filter(s => (selMapFromMain ? selMapFromMain[s.name] !== false : true))
+  const visibleSeries = allSeries.filter(s => (selMapFromMain ? selMapFromMain[s.name] !== false : true));
+
+  const visibleKeys = visibleSeries
     .map(s => `${s.model_id}_${s.condition_id}`)
     .sort()
     .join('|');
-  const needRecalcYMax = !lastSpectrumOption || lastSpectrumOption.__visibleHash !== visibleKeys || !Number.isFinite(lastSpectrumOption.__yMaxFixed);
+
+  // 统计“可见系列中已就绪模型”的数量（用于决定是否重算 Y max）
+  let modelReadyCount = 0;
+  visibleSeries.forEach(s => {
+    const k = `${Number(s.model_id)}_${Number(s.condition_id)}`;
+    if (spectrumModelCache.has(k)) modelReadyCount++;
+  });
+
+  const needRecalcYMax =
+    !lastSpectrumOption ||
+    lastSpectrumOption.__visibleHash !== visibleKeys ||
+    !Number.isFinite(lastSpectrumOption.__yMaxFixed) ||
+    lastSpectrumOption.__modelReadyCount !== modelReadyCount;
+
   if (needRecalcYMax) {
     const fixedMax = computeSpectrumYMaxFixed();
-    lastSpectrumOption = { __yMax: fixedMax, __yMaxFixed: fixedMax, __visibleHash: visibleKeys };
+    lastSpectrumOption = {
+      __yMax: fixedMax,
+      __yMaxFixed: fixedMax,
+      __visibleHash: visibleKeys,
+      __modelReadyCount: modelReadyCount
+    };
   }
 
-  // 始终为每条系列计算完整数据（显隐由 legend 选中集控制）
   const lines = [];
   let hasAnyData = false;
-  allSeries.forEach(s => {
+  visibleSeries.forEach(s => {
     const mid = Number(s.model_id), cid = Number(s.condition_id);
     if (!Number.isInteger(mid) || !Number.isInteger(cid)) return;
-    const key = `${mid}_${cid}`;
-    const model = spectrumModelCache.get(key);
+    const model = spectrumModelCache.get(`${mid}_${cid}`);
     if (!model) return;
 
     const centers = Array.isArray(model.centers_hz) ? model.centers_hz : (model.freq_hz || model.freq || []);
     const bands = Array.isArray(model.band_models_pchip) ? model.band_models_pchip : [];
-    let pts = [];
-    if (centers.length && bands.length) {
-      const rpmTarget = getSeriesRpmForCurrentX(s, model);
-      if (Number.isFinite(rpmTarget) && rpmTarget > 0) {
-        for (let i = 0; i < centers.length; i++) {
-          const hz = Number(centers[i]);
-          if (!Number.isFinite(hz)) continue;
-          const bm = bands[i];
-          if (!bm || !Array.isArray(bm.x) || !Array.isArray(bm.y) || !Array.isArray(bm.m)) continue;
-          const raw = Number(evalPchipJS(bm, rpmTarget));
-          const db = Number.isFinite(raw) ? Math.max(0, raw) : NaN;
-          if (!Number.isFinite(db)) continue;
-          pts.push([hz, db]);
-        }
+    if (!(centers.length && bands.length)) return;
+
+    const rpmTarget = getSeriesRpmForCurrentX(s, model);
+    const pts = [];
+    if (Number.isFinite(rpmTarget) && rpmTarget > 0) {
+      for (let i = 0; i < centers.length; i++) {
+        const hz = Number(centers[i]);
+        if (!Number.isFinite(hz)) continue;
+        const bm = bands[i];
+        if (!bm || !Array.isArray(bm.x) || !Array.isArray(bm.y) || !Array.isArray(bm.m)) continue;
+        const raw = Number(evalPchipJS(bm, rpmTarget));
+        const db = Number.isFinite(raw) ? Math.max(0, raw) : NaN;
+        if (!Number.isFinite(db)) continue;
+        pts.push([hz, db]);
       }
     }
     if (pts.length) hasAnyData = true;
-
-    lines.push({
-      id: `spec:${key}`,
-      name: s.name,
-      color: s.color,
-      data: pts
-    });
+    lines.push({ id: `spec:${mid}_${cid}`, name: s.name, color: s.color, data: pts });
   });
 
-  // 若无任何数据（非“全部隐藏”的场景），显示空态
+  const canvasBg = (lastOption && lastOption.backgroundColor) || getExportBg();
+
+  // 注意：等待期内如果没有任何可渲染数据，则不渲染空态，避免与 Loading 叠加
   if (!hasAnyData) {
-    const emptyOption = {
-      backgroundColor: (lastOption && lastOption.backgroundColor) || 'transparent',
+    if (__specPending) {
+      // 正在等待重建/加载：保持现有画面，不更新为空态
+      return;
+    }
+
+    // 非等待期：可以安全显示空态
+    spectrumChart.setOption({
+      backgroundColor: canvasBg,
       title: {
         text: '当前无可渲染频谱',
         left: 'center',
@@ -2088,23 +2421,16 @@ function buildAndSetSpectrumOption() {
       grid: { left, right: rightGap, top: 36, bottom: 18 },
       xAxis: { show: false, min: SPECTRUM_X_MIN, max: SPECTRUM_X_MAX },
       yAxis: { show: false, min: 0, max: Math.max(0, Number(lastSpectrumOption?.__yMaxFixed) || 60) },
-      legend: { show: false },
+      legend: { show: false, selected: selMapFromMain },
       series: []
-    };
-    spectrumChart.setOption(emptyOption, { notMerge: false, replaceMerge: ['series','xAxis','yAxis','grid','title'] });
+    }, { notMerge: false, replaceMerge: ['series'] });
     spectrumChart.resize();
-    __spectrumWasEmpty = true;
     return;
   }
 
-  const option = {
-    backgroundColor: (lastOption && lastOption.backgroundColor) || 'transparent',
+  spectrumChart.setOption({
+    backgroundColor: canvasBg,
     textStyle: { fontFamily: t.fontFamily },
-    animation: true,
-    animationDuration: 300,
-    animationDurationUpdate: 500,
-    animationEasing: 'cubicOut',
-    animationEasingUpdate: 'cubicOut',
 
     title: {
       text: buildSpectrumTitle(),
@@ -2113,16 +2439,17 @@ function buildAndSetSpectrumOption() {
       textStyle: { color: t.axisLabel, fontWeight: 700, fontSize: 16, fontFamily: t.fontFamily }
     },
 
-    grid: { left, right: rightGap, top: 38, bottom: 18 },
+    grid: { left, right: rightGap, top: 38, bottom: 40 },
 
     xAxis: {
       type: 'log',
       logBase: 10,
       min: SPECTRUM_X_MIN,
       max: SPECTRUM_X_MAX,
-      name: '频率(Hz)',
+      name: '频率',
+      nameGap: 25,
       nameLocation: 'middle',
-      nameGap: 24,
+      nameTextStyle: { color: t.axisName, fontWeight: 600 },
       axisLabel: { color: t.axisLabel, formatter: fmtHz },
       axisLine: { lineStyle: { color: t.axisLine } },
       splitLine: { show: true, lineStyle: { color: t.gridLine } },
@@ -2142,15 +2469,19 @@ function buildAndSetSpectrumOption() {
     },
 
     tooltip: {
-      appendToBody: true,
-      confine: true,
+      appendToBody: !isFs,
+      confine: false,
       trigger: 'axis',
+      triggerOn: 'mousemove|click|touchstart|touchmove',
       backgroundColor: t.tooltipBg,
-      borderColor: t.tooltipBorder, borderWidth: 1, borderRadius: 10,
+      borderColor: t.tooltipBorder,
+      borderWidth: 1,
+      borderRadius: 10,
       textStyle: { color: t.tooltipText },
-      axisPointer: { type: 'line', label: { formatter: (obj) => fmtHz(obj?.value) } },
+      axisPointer: { type: 'line', snap: true, label: { formatter: (obj) => fmtHz(obj?.value) } },
+      position: function (pos) { const x = Array.isArray(pos) ? pos[0] : 0; const y = Array.isArray(pos) ? pos[1] : 0; const gap = 12; return [Math.round(x + gap), Math.round(y + gap)]; },
       extraCssText: `
-        position: fixed;
+        position: ${isFs ? 'absolute' : 'fixed'};
         backdrop-filter: blur(4px) saturate(120%);
         -webkit-backdrop-filter: blur(4px) saturate(120%);
         box-shadow: ${t.tooltipShadow};
@@ -2173,12 +2504,7 @@ function buildAndSetSpectrumOption() {
       }
     },
 
-    // 核心：隐藏 legend UI，但保留组件
-    legend: {
-      show: false,
-      // 初始 selected 跟随主图；后续靠广播更新
-      selected: selMapFromMain
-    },
+    legend: { show: false, selected: selMapFromMain },
 
     series: lines.map(l => ({
       id: l.id,
@@ -2187,10 +2513,10 @@ function buildAndSetSpectrumOption() {
       showSymbol: false,
       smooth: false,
       connectNulls: false,
-      data: l.data, // 永远给完整数据；显隐交给 legend 选中集
+      data: l.data,
       lineStyle: { width: 2.5, color: l.color },
       itemStyle: { color: l.color },
-      silent: true,
+      silent: false,
       z: 1,
       clip: true,
       animation: true,
@@ -2202,13 +2528,9 @@ function buildAndSetSpectrumOption() {
       universalTransition: true,
       emphasis: { focus: 'series', blurScope: 'coordinateSystem' }
     }))
-  };
+  }, { notMerge: false, replaceMerge: ['series'] });
 
-  const replaceKeys = ['series'];
-  if (__spectrumWasEmpty) replaceKeys.push('xAxis','yAxis','grid','title','legend');
-  spectrumChart.setOption(option, { notMerge: false, replaceMerge: replaceKeys });
   spectrumChart.resize();
-  __spectrumWasEmpty = false;
 }
 
 // 新增：频谱标题文本
@@ -2263,48 +2585,372 @@ function __ensureMainChartMinHeightForSpectrumMode() {
   root.style.minHeight = clampH + 'px';
 }
 
-function updateFullscreenHeights() {
-  if (!root) return;
+// 删除重复定义的 updateFullscreenHeights（保留前面的唯一版本）
 
-  const fsEl = document.fullscreenElement;
-  const activeFs = !!fsEl;
-  isFs = activeFs;
-
-  if (!activeFs) {
-    try { root.style.height = ''; } catch(_) {}
-    if (spectrumEnabled) {
-      __ensureMainChartMinHeightForSpectrumMode();
-    } else {
-      try { root.style.minHeight = ''; } catch(_) {}
-    }
-
-    const target = getTargetSpectrumHeight();
-    if (spectrumInner) spectrumInner.style.height = target + 'px';
-    if (spectrumRoot) {
-      // 非全屏：只根据是否展开设置目标高度或 0，高度动画由 CSS 负责
-      spectrumRoot.style.height = spectrumEnabled ? (target + 'px') : '0px';
-    }
-    try { chart && chart.resize(); } catch(_){}
-    try { spectrumEnabled && spectrumChart && spectrumChart.resize(); } catch(_){}
-    return;
-  }
-
-  // 全屏：按比例分配像素高度，不触碰 transition
+function revealSpectrumIfNeeded() {
+  if (!spectrumRoot) return;
+  const rect = spectrumRoot.getBoundingClientRect();
   const vh = window.innerHeight || document.documentElement.clientHeight || 0;
-  const total = Math.max(320, vh - 16);
-  const ratioMain = spectrumEnabled ? FS_MAIN_RATIO : 1.0;
-  const ratioSpec = spectrumEnabled ? FS_SPEC_RATIO : 0.0;
-
-  const mainH = Math.max(240, Math.round(total * ratioMain));
-  const specH = Math.max(ratioSpec > 0 ? 200 : 0, Math.round(total * ratioSpec));
-
-  try { root.style.height = mainH + 'px'; } catch(_) {}
-  if (spectrumInner) spectrumInner.style.height = specH + 'px';
-
-  try { chart && chart.resize(); } catch(_){}
-  try { spectrumChart && spectrumChart.resize(); } catch(_){}
+  // 若底部超出可视区域，则滚动让其露出（对齐到开始位置）
+  if (rect.bottom > vh - 8) {
+    try { spectrumRoot.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch(_) {
+      // 兜底：使用 window.scrollTo
+      const se = document.scrollingElement || document.documentElement || document.body;
+      const top = (window.scrollY || se.scrollTop || 0) + (rect.top - 8);
+      window.scrollTo({ top, behavior: 'smooth' });
+    }
+  }
 }
 
+// 替换：导出主图+频谱（修复 Legend 样式/位置、字体大小，以及底部裁切）
+async function exportCombinedImage() {
+  if (!chart) return;
+
+  // 1) 准备
+  try { chart.dispatchAction({ type: 'hideTip' }); } catch(_) {}
+  try { spectrumChart && spectrumChart.dispatchAction({ type: 'hideTip' }); } catch(_) {}
+  try { chart.resize(); } catch(_) {}
+  try { spectrumEnabled && spectrumChart && spectrumChart.resize(); } catch(_) {}
+
+  // 等一帧，确保布局稳定
+  await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+
+  const exportBg = getExportBg();
+  const dpr = window.devicePixelRatio || 1;
+  const t = tokens(document.documentElement.getAttribute('data-theme') || 'light');
+
+  // 2) 获取主图/频谱图片（高分辨率）
+  const mainUrl = chart.getDataURL({ pixelRatio: dpr, backgroundColor: exportBg, excludeComponents: [] });
+  let specUrl = null;
+  if (spectrumEnabled && spectrumChart) {
+    try {
+      specUrl = spectrumChart.getDataURL({ pixelRatio: dpr, backgroundColor: exportBg, excludeComponents: [] });
+    } catch(_) {}
+  }
+
+  // 3) 加载图片资源
+  const loadImg = (src) => new Promise((res, rej) => {
+    if (!src) return res(null);
+    const im = new Image();
+    im.onload = () => res(im);
+    im.onerror = rej;
+    im.crossOrigin = 'anonymous';
+    im.src = src;
+  });
+
+  const mainImg = await loadImg(mainUrl);
+  const specImg = await loadImg(specUrl);
+
+  if (!mainImg) return;
+
+  // 4) 用 CSS 像素布局（将高分辨率图按 dpr 缩放到 CSS 大小）
+  const mainCssW = mainImg.width / dpr;
+  const mainCssH = mainImg.height / dpr;
+  const specCssW = specImg ? (specImg.width / dpr) : 0;
+  const specCssH = specImg ? (specImg.height / dpr) : 0;
+
+  const chartsW = Math.max(mainCssW, specCssW);
+  const gap = 24;            // 主图与频谱之间的间距（CSS px）
+  const pad = 16;            // 画布内边距
+  const bottomPad = 16;      // 额外底部留白，避免“紧贴底边”的裁切感
+  const chartsH = mainCssH + (specImg ? (gap + specCssH) : 0);
+
+  // 5) 构造导出用 Legend（复刻侧栏）
+  const items = __buildLegendItemsForExport();
+  const lm = __measureLegendForExport(items, t);
+  const legendW = lm.colW;
+  const legendH = lm.totalH;
+
+  // 6) 计算输出画布的 CSS 尺寸，并用 dpr 放大像素尺寸
+  const cssW = pad + chartsW + gap + legendW + pad;
+  const cssH = pad + Math.max(chartsH, legendH) + bottomPad;
+  const out = document.createElement('canvas');
+  out.width = Math.max(1, Math.round(cssW * dpr));
+  out.height = Math.max(1, Math.round(cssH * dpr));
+  const ctx = out.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  // 背景
+  ctx.fillStyle = exportBg;
+  ctx.fillRect(0, 0, cssW, cssH);
+
+  // 7) 绘制主图与频谱（按 CSS 尺寸投放）
+  let x = pad, y = pad;
+  ctx.drawImage(mainImg, x, y, mainCssW, mainCssH);
+  y += mainCssH;
+
+  if (specImg) {
+    y += gap;
+    ctx.drawImage(specImg, x, y, specCssW, specCssH);
+  }
+
+  // 8) 绘制 Legend（右列，复刻两行样式）
+  let lx = pad + chartsW + gap;
+  let ly = pad;
+
+  ctx.textBaseline = 'alphabetic';
+
+  items.forEach(it => {
+    const color = it.selected ? (it.color || '#888') : 'rgba(128,128,128,.35)';
+    // dot
+    ctx.fillStyle = color;
+    const r = lm.dotW / 2;
+    ctx.beginPath();
+    ctx.arc(lx + r + lm.padX, ly + r + 2, r, 0, Math.PI * 2);
+    ctx.fill();
+
+    // texts
+    const textX = lx + lm.padX + lm.dotW + lm.gapDotText;
+    const line1Y = ly + lm.line1H - 6; // 视觉基线略向上，靠近侧栏观感
+    ctx.font = lm.line1Font;
+    ctx.fillStyle = it.selected ? t.tooltipText : 'rgba(0,0,0,.55)';
+    ctx.fillText(it.line1 || '', textX, line1Y);
+
+    let itemH = lm.line1H;
+    if (it.line2) {
+      ctx.font = lm.line2Font;
+      const line2Y = ly + lm.line1H + lm.line2H - 6;
+      ctx.fillStyle = 'var(--text-muted)';
+      // 如无全局 CSS 变量，兜底为次要文本色
+      if (getComputedStyle(document.documentElement).getPropertyValue('--text-muted')) {
+        ctx.fillStyle = getComputedStyle(document.documentElement).getPropertyValue('--text-muted').trim() || '#6b7280';
+      } else {
+        ctx.fillStyle = '#6b7280';
+      }
+      ctx.fillText(it.line2, textX, line2Y);
+      itemH = lm.line1H + lm.line2H;
+    }
+
+    ly += itemH + lm.itemGap;
+  });
+
+  // 9) 触发下载
+  const a = document.createElement('a');
+  a.download = 'charts-all.png';
+  a.href = out.toDataURL('image/png');
+  a.click();
+}
+
+function __computeFsSpecTargetPx() {
+  const shell = document.getElementById('chart-settings') || (root && root.closest('.fc-chart-container'));
+  if (!shell) return 0;
+  const stack = shell.querySelector('.chart-stack');
+  if (!stack) return 0;
+
+  const st = getComputedStyle(stack);
+  const gap = parseFloat(st.rowGap || st.gap || '0') || 0;
+  const stackH = Math.max(0, Math.round(stack.getBoundingClientRect().height));
+
+  // 可用高度要扣掉一个列间隙（两行之间只会产生一个 gap）
+  const usable = Math.max(0, stackH - gap);
+
+  const cs = getComputedStyle(document.documentElement);
+  const mainFlex = parseFloat(cs.getPropertyValue('--fs-main-flex')) || 3;
+  const specFlex = parseFloat(cs.getPropertyValue('--fs-spec-flex')) || 2;
+
+  const total = Math.max(0.0001, mainFlex + specFlex);
+  const specPx = Math.round(usable * (specFlex / total));
+
+  // 合理下限，避免 0 导致动画不触发
+  return Math.max(1, specPx);
+}
+
+function __refreshFsSpecMaxHeightIfExpanded() {
+  if (!(isFs && spectrumEnabled && spectrumRoot)) return;
+  const px = __computeFsSpecTargetPx();
+  if (px > 0) {
+    spectrumRoot.style.setProperty('max-height', px + 'px');
+    spectrumRoot.style.setProperty('--fs-spec-h', px + 'px');
+  }
+}
+
+/* 追加：创建/获取 Loading 覆盖层 */
+function ensureSpectrumLoader() {
+  if (!spectrumRoot) return null;
+  let el = spectrumRoot.querySelector('.spectrum-loading');
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'spectrum-loading';
+    el.innerHTML = `
+      <div class="spinner" aria-hidden="true"></div>
+      <div class="text" id="spectrumLoadingText">加载中...</div>
+    `;
+    spectrumRoot.appendChild(el);
+  }
+  spectrumLoadingEl = el;
+  return el;
+}
+
+function setSpectrumLoading(on, text) {
+  const el = ensureSpectrumLoader();
+  if (!el) return;
+  const txt = el.querySelector('#spectrumLoadingText');
+  if (txt) {
+    if (typeof text === 'string' && text.length) txt.textContent = text;
+    txt.style.fontSize = '15px';
+  }
+  el.classList.toggle('is-active', !!on);
+}
+
+// 锁定/解锁主图高度，避免非全屏动画期间抖动
+function lockMainChartHeight() {
+  if (!root) return;
+  const h = Math.round((root.getBoundingClientRect && root.getBoundingClientRect().height) || root.clientHeight || 0);
+  if (h > 0) {
+    root.style.height = h + 'px';
+    root.style.minHeight = h + 'px';
+    __mainHLocked = true;
+  }
+}
+function unlockMainChartHeight() {
+  if (!root || !__mainHLocked) return;
+  try { root.style.removeProperty('height'); } catch(_) {}
+  try { root.style.removeProperty('min-height'); } catch(_) {}
+  __mainHLocked = false;
+
+}
+
+// 新增：在当前模式（全屏/非全屏）下把频谱展开/收起状态同步到 DOM，保持状态一致
+function syncSpectrumStateAcrossModes({ animate = false } = {}) {
+  ensureSpectrumHost();
+  const shell =
+    document.getElementById('chart-settings') ||
+    (root && root.closest('.fc-chart-container')) ||
+    document.documentElement;
+
+  if (!spectrumRoot) return;
+
+  if (spectrumEnabled) {
+    try { shell.setAttribute('data-chart-mode', 'spectrum'); } catch (_) {}
+
+    if (isFs) {
+      // 全屏：用 max-height + --fs-spec-h 表达展开高度
+      const targetPx = __computeFsSpecTargetPx();
+      spectrumRoot.style.removeProperty('height');
+      spectrumRoot.style.setProperty('flex', '0 0 auto', 'important');
+      spectrumRoot.style.setProperty('--fs-spec-h', targetPx + 'px');
+
+      if (animate) {
+        spectrumRoot.style.transition = 'max-height var(--transition-speed, .25s) ease';
+        const cur = Math.max(0, Math.round(spectrumRoot.getBoundingClientRect().height || 0));
+        spectrumRoot.style.setProperty('max-height', cur + 'px');
+        void spectrumRoot.offsetHeight;
+        spectrumRoot.style.setProperty('max-height', targetPx + 'px');
+      } else {
+        spectrumRoot.style.transition = 'none';
+        spectrumRoot.style.setProperty('max-height', targetPx + 'px');
+        void spectrumRoot.offsetHeight;
+        spectrumRoot.style.transition = '';
+      }
+    } else {
+      // 非全屏：直接设 #spectrumHost 的像素高
+      spectrumRoot.style.removeProperty('max-height');
+      spectrumRoot.style.removeProperty('flex');
+
+      if (animate) {
+        const cur = Math.max(0, Math.round(spectrumRoot.getBoundingClientRect().height || 0));
+        spectrumRoot.style.transition = 'height var(--transition-speed, .25s) ease';
+        spectrumRoot.style.height = cur + 'px';
+        void spectrumRoot.offsetHeight;
+        spectrumRoot.style.height = NF_SPEC_H_PX + 'px';
+      } else {
+        spectrumRoot.style.transition = 'none';
+        spectrumRoot.style.height = NF_SPEC_H_PX + 'px';
+        void spectrumRoot.offsetHeight;
+        spectrumRoot.style.transition = '';
+      }
+    }
+  } else {
+    // 收起：根据模式设到 0
+    try { shell.removeAttribute('data-chart-mode'); } catch (_) {}
+
+    if (isFs) {
+      spectrumRoot.style.removeProperty('height');
+      if (animate) {
+        spectrumRoot.style.transition = 'max-height var(--transition-speed, .25s) ease';
+      } else {
+        spectrumRoot.style.transition = 'none';
+      }
+      spectrumRoot.style.setProperty('max-height', '0px');
+      if (!animate) spectrumRoot.style.transition = '';
+    } else {
+      spectrumRoot.style.removeProperty('max-height');
+      if (animate) {
+        spectrumRoot.style.transition = 'height var(--transition-speed, .25s) ease';
+      } else {
+        spectrumRoot.style.transition = 'none';
+      }
+      spectrumRoot.style.height = '0px';
+      if (!animate) spectrumRoot.style.transition = '';
+    }
+  }
+
+  try { chart && chart.resize(); } catch (_) {}
+  try { spectrumEnabled && spectrumChart && spectrumChart.resize(); } catch (_) {}
+}
+
+  function getExportBg() {
+    const bgBody = getComputedStyle(document.body).backgroundColor;
+    return bgBody && bgBody !== 'rgba(0, 0, 0, 0)' ? bgBody : '#ffffff';
+  }
+
+  // 新增：构建导出用 Legend 条目（复刻侧栏的两行文案）
+function __buildLegendItemsForExport() {
+  const sList = Array.isArray(lastPayload?.chartData?.series) ? lastPayload.chartData.series : [];
+  const selMap = getLegendSelectionMap();
+  return sList.map(s => {
+    const brand = s.brand || s.brand_name_zh || s.brand_name || '';
+    const model = s.model || s.model_name || '';
+    const line1 = (brand || model) ? `${brand} ${model}`.trim() : (s.name || '');
+    const line2 = s.condition_name_zh || s.condition || '';
+    const selected = selMap ? (selMap[s.name] !== false) : true;
+    return {
+      id: s.name,
+      color: s.color || '#888',
+      line1,
+      line2,
+      selected
+    };
+  });
+}
+
+// 新增：测量导出用 Legend 的列宽与总高（CSS 像素）
+function __measureLegendForExport(items, t) {
+  const measureCtx = document.createElement('canvas').getContext('2d');
+  const padX = 10;            // 文本内边距
+  const dotW = 12;            // 圆点直径
+  const gapDotText = 8;       // 点到文字的水平间隔
+  const minCol = 160, maxCol = 360;
+
+  const line1Font = `600 13px ${t.fontFamily}`;
+  const line2Font = `500 11px ${t.fontFamily}`;
+  const line1H = 22;          // 第一行行高
+  const line2H = 16;          // 第二行行高
+  const itemGap = 8;          // 条目之间的垂直间距
+
+  let textMax = 0;
+  let totalH = 0;
+
+  items.forEach(it => {
+    measureCtx.font = line1Font;
+    const w1 = measureCtx.measureText(it.line1 || '').width || 0;
+    let w2 = 0;
+    if (it.line2) {
+      measureCtx.font = line2Font;
+      w2 = measureCtx.measureText(it.line2).width || 0;
+    }
+    textMax = Math.max(textMax, w1, w2);
+
+    const itemH = it.line2 ? (line1H + line2H) : line1H;
+    totalH += itemH + itemGap;
+  });
+
+  if (items.length > 0) totalH -= itemGap; // 最后一项不加间距
+
+  const colW = Math.min(maxCol, Math.max(minCol, Math.ceil(padX + dotW + gapDotText + textMax + padX)));
+  return { colW, totalH, line1H, line2H, itemGap, dotW, gapDotText, padX, line1Font, line2Font };
+}
   // 挂到全局
   window.ChartRenderer = API;
+
 })();

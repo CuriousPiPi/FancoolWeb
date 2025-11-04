@@ -963,15 +963,6 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
 #searchSuggestions > div:hover { background:rgba(59,130,246,.08); }
 [data-theme="dark"] #searchSuggestions > div:hover { background:#2a3545; }
 
-/* 图表容器 */
-.fc-chart-container {
-  position:relative!important;
-  min-height:0!important;
-  height:clamp(480px,62vh,600px)!important;
-  background:var(--bg-secondary)!important;
-}
-#chartRoot, #chartHost { height:100%!important; }
-
 /* Info 按钮 */
 .fc-info-btn {
   width:24px; height:24px;
@@ -1378,17 +1369,3 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
   border-color: var(--border-color) !important;
   color: var(--text-primary) !important;
 }
-
-/* 新增：频谱展开时让图表容器自适应高度，并解除内部 100% 高度限制 */
-[data-chart-mode="spectrum"] .fc-chart-container {
-  height: auto !important;
-}
-[data-chart-mode="spectrum"] #chartRoot,
-[data-chart-mode="spectrum"] #chartHost {
-  height: auto !important;
-}
-
-/* 全屏兜底：确保整列容器可以按 100vh 铺满，内部子容器释放 100% 限制 */
-:fullscreen .fc-chart-container { height: 100vh !important; }
-:fullscreen #chartHost,
-:fullscreen #chartRoot { height: auto !important; min-height: 0 !important; }

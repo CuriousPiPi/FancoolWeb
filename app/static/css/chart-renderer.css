@@ -11,7 +11,11 @@
   --shadow-strong:0 8px 24px rgba(0,0,0,0.18);
   --fit-handle-w: 16px;
   --fit-handle-h: 24px;
-  --fit-hitbox:   36px;  /* 透明命中区一边尺寸（桌面） */
+  --fit-hitbox:   36px;
+  --fit-btn-min-h: 24px;
+  /* 全屏分栏比例（默认主图:频谱 = 3:2），仅用于计算目标像素高 */
+  --fs-main-flex: 1;
+  --fs-spec-flex: 1;
 }
 [data-theme="dark"]{
   --bg-bubble:#1f293700;
@@ -26,195 +30,207 @@
   --shadow-strong:0 8px 24px rgba(0,0,0,0.45);
 }
 
-/* 明确允许锚定（若全局样式曾关闭） */
-#chartRoot, #spectrumHost { overflow-anchor: auto; }
-
-/* 频谱容器高度过渡 */
-#spectrumHost {
-  height: 0;
-  overflow: hidden;
-  transition: height var(--transition-speed-bg, .35s) ease;
+/* 图表容器基础：容器自适应高度，提供一个下限，展开频谱时“向下扩展” */
+.fc-chart-container {
+  position: relative !important;
+  min-height: clamp(480px, 62vh, 620px);
+  height: auto;
+  background: var(--bg-secondary) !important;
+  scrollbar-gutter: stable both-edges;
 }
 
+/* 非全屏：主图固定高度（用变量，可由 JS 统一设定或使用默认 600px）；避免 100% 跟随容器拉伸 */
+.fc-chart-container:not(:fullscreen) .chart-stack > #chartRoot {
+  height: var(--main-chart-h, 600px) !important;
+  min-height: 0 !important;
+}
 
- /*x轴切换开关*/
+/* 全屏时主图吃掉剩余高度（保持原逻辑） */
+:fullscreen .chart-stack > #chartRoot {
+  flex: 1 1 auto !important;
+  min-height: 0 !important;
+}
+
+/* 移除对 #chartRoot/#chartHost 的 100% 高度，避免跟随容器拉伸产生“压缩/反弹” */
+#chartRoot, #chartHost { /* height: 100% !important;  删除这一行为 */ }
+
+/* 明确允许锚定，避免滚动抖动 */
+#chartRoot, #spectrumHost { overflow-anchor: auto; }
+
+/* 频谱 Host（非全屏：直接做像素级高度动画；无剪裁层） */
+#spectrumHost {
+  position: relative;
+  height: 0;                     /* 收起态 */
+  overflow: hidden;              /* 收起与展开过程避免内容溢出 */
+  transition: height var(--transition-speed, .25s) ease;
+}
+#spectrumHost > .spectrum-inner {
+  width: 100%;
+  height: 100%;                  /* 内层随 Host 高度 */
+  position: relative;
+  overflow: visible;
+  transform-origin: top;
+}
+
+/* x轴切换开关：容器不拦截事件，内部元素可交互，避免遮挡 rail 点击 */
 .chart-xaxis-overlay{
-  position:absolute;
-  z-index:200;
-  visibility:hidden;
-  transform: translate(-65%, -37%);
-} 
+  position:absolute; z-index:200; visibility:hidden; transform: translate(-65%, -37%);
+  pointer-events: none;
+}
+.chart-xaxis-overlay .switch-container,
+.chart-xaxis-overlay .switch-track,
+.chart-xaxis-overlay .switch-slider,
+.chart-xaxis-overlay .switch-label {
+  pointer-events: auto;
+}
 .switch-container { position:relative; width:76px; height:32px; }
 .switch-track { width:100%; height:100%; background:var(--border-color); border-radius:12px; position:relative; overflow:hidden; }
 .switch-track::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  pointer-events: none;
+  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
   background: linear-gradient(to bottom, rgba(255,255,255,.22), rgba(255,255,255,0));
-  box-shadow:
-    inset 0 2px 6px rgba(0,0,0,.10),
-    inset 0 -1px 2px rgba(0,0,0,.05);
+  box-shadow: inset 0 2px 6px rgba(0,0,0,.10), inset 0 -1px 0 rgba(0,0,0,.05);
 }
 [data-theme="dark"] .switch-track::before {
   background: linear-gradient(to bottom, rgba(255,255,255,.08), rgba(255,255,255,0));
-  box-shadow:
-    inset 0 2px 8px rgba(0,0,0,.45),
-    inset 0 -1px 2px rgba(0,0,0,.35);
+  box-shadow: inset 0 2px 8px rgba(0,0,0,0.45), inset 0 -1px 0 rgba(0,0,0,0.35);
 }
 .switch-slider {
-  position:absolute;
-  width:24px;
-  height:100%;
-  background:var(--text-);
-  border-radius:12px;
-  left:0; top:0;
-  transition: transform .25s;
-  will-change: transform;
-  box-shadow:
-    0 2px 5px rgba(0,0,0,.35),
-    inset 0 1px 0 rgba(255,255,255,.25),
-    inset 0 -1px 0 rgba(0,0,0,.25);
-  cursor:grab;  
+  position:absolute; width:24px; height:100%; background:var(--text-); border-radius:12px; left:0; top:0;
+  transition: transform .25s; will-change: transform;
+  box-shadow: 0 2px 5px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.25), inset 0 -1px 0 rgba(0,0,0,.25);
+  cursor:grab;
 }
-.switch-label {
-  cursor: pointer;
-  position:absolute;
-  top:48%;
-  transform:translateY(-50%);
-  font-weight:600;
-  font-size:20px;
-  color:var(--text-primary);
-  white-space:nowrap;
-  pointer-events: none;
-  user-select: none;
-}
+.switch-label { cursor: pointer; position:absolute; top:48%; transform:translateY(-50%); font-weight:600; font-size:20px; color:var(--text-primary); white-space:nowrap; user-select:none; }
 .switch-label-left { right:calc(100% + 4px); }
 .switch-label-right { left:calc(100% + 4px); }
-.chart-xaxis-overlay,
-.switch-container,
-.switch-track,
-.switch-slider {
-  touch-action: none;
-}
+.chart-xaxis-overlay, .switch-container, .switch-track, .switch-slider { touch-action: none; }
 
-.fit-buttons{
-  position: absolute;
-  z-index: 220;
-  visibility: hidden;
-  display: flex;
-  gap: 6px;
-  pointer-events: auto;
-}
+/* 拟合按钮与气泡 */
+.fit-buttons{ position: absolute; z-index: 220; visibility: hidden; display: flex; gap: 6px; pointer-events: auto; }
 .fit-buttons .btn{
-  appearance: none;
-  border: 1px solid var(--border-color);
-  background: var(--bg-bubble);
-  color: var(--text-primary);
-  font-size: 12px;
-  font-weight: 700;
-  padding: 6px 8px;
-  border-radius: 8px;
-  cursor: pointer;
-  user-select: none;
-  line-height: 1;
-  box-shadow: var(--shadow);
+  appearance:none; border:1px solid var(--border-color); background: var(--bg-bubble); color:var(--text-primary);
+  font-size:12px; font-weight:700; padding:6px 12px; border-radius:8px; cursor:pointer; user-select:none;
+  box-shadow:var(--shadow);
   transition: transform .02s ease-in-out, background-color .15s ease, color .15s ease;
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: calc(var(--fit-btn-min-h) * 1.5); line-height: 1.2; box-sizing: border-box; white-space: nowrap;
 }
 .fit-buttons .btn:active{ transform: translateY(1px); }
-.fit-buttons .btn.active{
-  background: var(--ok);
-  color: #fff;
-  border-color: var(--ok);
-}
+.fit-buttons .btn.active{ background: var(--ok); color: #fff; border-color: var(--ok); }
 .fit-buttons .btn.active:active{ background: var(--ok-pressed); }
 
 .fit-bubble{
-  position: fixed !important;
-  min-width: 320px;          /* 保底 */
-  max-width: min(480px, 92vw);
-  z-index: 220 !important;   /* 层级：低于 overlay 侧栏(300)，高于指针(200)、X轴(210) */
-  visibility: hidden;
-  max-height: 60vh;
-  overflow: auto;
-  background: var(--bg-bubble);
-  backdrop-filter: blur(4px) saturate(120%);
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
-  box-shadow: var(--shadow-strong);
-  padding: 10px 12px;
-  cursor: grab;
-  touch-action: none;
+  position: fixed !important; min-width: 320px; max-width: min(480px, 92vw);
+  z-index: 220 !important; visibility: hidden; max-height: 60vh; overflow: auto;
+  background: var(--bg-bubble); backdrop-filter: blur(4px) saturate(120%);
+  border: 1px solid var(--border-color); border-radius: 12px; box-shadow: var(--shadow-strong);
+  padding: 10px 12px; cursor: grab; touch-action: none;
 }
-
 .fit-bubble.dragging{ cursor: grabbing; }
 .fit-bubble .head{ display:flex; align-items:center; gap:10px; margin-bottom: 6px; white-space: nowrap; }
-.fit-bubble .title{ font-weight: 800; color: var(--text-primary); font-size: 13px; line-height: 1.2; white-space: nowrap; }
-.fit-bubble .x-input{ margin-left:auto; display:flex; align-items:center; gap:6px; font-size:12px; color: var(--text-); white-space: nowrap; }
-.fit-bubble input[type="number"]{
-  width: 10ch; font-size: 12px; padding: 4px 6px; border: 1px solid var(--border-color);
-  border-radius: 8px; background: transparent; color: var(--text-primary); outline: none;
-}
-.fit-bubble .row{ display:flex; align-items:center; gap:8px; margin: 4px 0; color: var(--text-primary); font-size: 13px; }
+.fit-bubble .title{ font-weight:800; color:var(--text-primary); font-size:13px; line-height:1.2; white-space:nowrap; }
+.fit-bubble .x-input{ margin-left:auto; display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-); white-space:nowrap; }
+.fit-bubble input[type="number"]{ width:10ch; font-size:12px; padding:4px 6px; border:1px solid var(--border-color); border-radius:8px; background:transparent; color:var(--text-primary); outline:none; }
+.fit-bubble .row{ display:flex; align-items:center; gap:8px; margin:4px 0; color:var(--text-primary); font-size:13px; }
 .fit-bubble .row .dot{ width:10px; height:10px; border-radius:50%; flex:0 0 auto; }
-.fit-bubble .hint{ color: var(--text-); font-size: 11px; margin-top: 6px; }
+.fit-bubble .hint{ color: var(--text-); font-size: 11px; }
 
-.fit-pointer{
-  position: absolute;
-  z-index: 200;
-  visibility: hidden;
-  pointer-events: none;
-}
-.fit-pointer .line{
-  position:absolute; top:0; bottom:0; width: 2px; transform: translateX(-1px); background: var(--accent); opacity: 0.95;
-}
-.fit-pointer .handle{
-  position:absolute; bottom:-22px; left:-8px; width:16px; height:24px; border-radius:4px; background: var(--accent);
-  box-shadow: var(--shadow); cursor: grab; touch-action: none; pointer-events: auto;
-}
-.fit-pointer .handle::after{
-  content:""; position:absolute; left:50%; transform: translateX(-50%); top:-7px;
-  width: 0; height: 0; border-left: 8px solid transparent; border-right: 8px solid transparent; border-bottom: 9px solid var(--accent);
-}
+/* 拟合指针 */
+.fit-pointer{ position: absolute; z-index: 200; visibility: hidden; pointer-events: none; }
+.fit-pointer .line{ position:absolute; top:0; bottom:0; width: 2px; transform: translateX(-1px); background: var(--accent); opacity: 0.95; }
+.fit-pointer .handle{ position:absolute; bottom:-22px; left:-8px; width:16px; height:24px; border-radius:4px; background: var(--accent); box-shadow: var(--shadow); cursor: grab; touch-action: none; pointer-events: auto; }
+.fit-pointer .handle::after{ content:""; position:absolute; left:50%; transform: translateX(-50%); top:-7px; width:0; height:0; border-left:8px solid transparent; border-right:8px solid transparent; border-bottom:9px solid var(--accent); }
+.fit-pointer .handle::before{ content:""; position:absolute; left:50%; top:50%; width: var(--fit-hitbox); height: var(--fit-hitbox); transform: translate(-50%, -50%); background: transparent; pointer-events: auto; }
 
-/* 给把手增加透明“扩大命中区”——提高易点中性，不改变外观 */
-.fit-pointer .handle::before{
-  content: "";
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  width: var(--fit-hitbox);
-  height: var(--fit-hitbox);
-  transform: translate(-50%, -50%);
-  background: transparent;
-  pointer-events: auto;   /* 命中伪元素也算点中把手 */
-}
+.fit-narrow-hint{ position:absolute; z-index:2147483643; font-size:11px; color: var(--text-); pointer-events:none; user-select:none; white-space:nowrap; }
 
-.fit-narrow-hint{
-  position:absolute; z-index:2147483643; font-size:11px; color: var(--text-); pointer-events:none; user-select:none; white-space:nowrap;
+/* 全屏：用 max-height 驱动频谱展开/收起；主图吃掉剩余高度 */
+.fc-chart-container:fullscreen {
+  height: 100vh !important; box-sizing: border-box !important;
+  scrollbar-gutter: stable both-edges;
 }
-
-/* 新增：频谱容器基础过渡（用高度动画驱动容器向下/向上过渡） */
-#spectrumHost {
-  height: 0;                    /* 初始收起 */
-  overflow: hidden;             /* 防止内容外溢 */
-  transition: height var(--transition-speed-bg, .35s) ease;
-}
-
-/* 全屏铺满与过渡（覆盖默认限高和 100%!important） */
-:fullscreen .fc-chart-container {
-  height: 100vh !important;   /* 父容器全屏高度 */
-}
-
-:fullscreen #chartHost,
-:fullscreen #chartRoot {
-  height: auto !important;    /* 释放 100% 限制，交给 JS 的像素高度 */
+:fullscreen .chart-stack > #spectrumHost {
+  flex: 0 0 auto !important;
+  height: auto !important;
+  max-height: 0;
+  overflow: clip !important;
+  transition: max-height var(--transition-speed, .25s) ease;
+  will-change: max-height;
   min-height: 0 !important;
-  transition: height var(--transition-speed-bg, .5s) ease;
 }
+@supports not (overflow: clip) {
+  :fullscreen .chart-stack > #spectrumHost { overflow: hidden !important; }
+}
+/* 未展开频谱：保持 0 高（JS 在动画期间保留 data-chart-mode，避免提前命中此规则） */
+:fullscreen:not([data-chart-mode="spectrum"]) #spectrumHost {
+  height: 0 !important;
+  min-height: 0 !important;
+}
+/* 全屏下内部铺满容器（无剪裁层） */
+:fullscreen #spectrumHost > .spectrum-inner { height: var(--fs-spec-h, auto) !important; }
+:fullscreen #chartHost, :fullscreen #chartRoot { height:auto !important; min-height:0 !important; flex-shrink:0; }
 
-/* 展开频谱模式下，父容器仍保持 100vh */
-:fullscreen [data-chart-mode="spectrum"] .fc-chart-container {
-  height: 100vh !important;
+/* 图表容器：左右/上下布局（左=主图+频谱，右=rail） */
+.fc-chart-container.chart-flex { display: flex; align-items: stretch; gap: 12px; }
+.fc-chart-container.chart-flex:not(.is-narrow) .chart-stack { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.fc-chart-container.chart-flex .chart-stack > * { flex: 0 0 auto; min-height: 0; }
+
+/* rail 外观与布局（提升层级，避免被覆盖导致按钮无响应） */
+#legendRail {
+  position: relative;
+  z-index: 300;
+  flex: 0 0 auto; width: 240px; max-width: min(42vw, 360px); min-width: 160px;
+  box-sizing: border-box; border: none; border-radius: 0; background: transparent; box-shadow: none; padding: 0;
+  display: flex; flex-direction: column; overflow: hidden;
 }
+#legendRail .legend-scroll { flex: 1 1 auto; overflow: auto; margin-bottom: 8px; }
+#legendRail .rail-actions { flex: 0 0 auto; display: flex; gap: 6px; justify-content: flex-end; }
+
+/* 窄屏：上下分栏，rail 移到下方 */
+.fc-chart-container.chart-flex.is-narrow { flex-direction: column; }
+.fc-chart-container.chart-flex.is-narrow #legendRail { width: 100%; min-width: 0; max-width: none; padding: 0; }
+.fc-chart-container.chart-flex.is-narrow #legendRail .legend-scroll { max-height: 32vh; }
+
+/* rail legend 项 */
+#legendRail .legend-item { display:flex; align-items:center; gap:8px; margin:6px 0; cursor:pointer; user-select:none; }
+#legendRail .legend-item .dot { display:inline-block; width:12px; height:12px; border-radius:50%; }
+#legendRail .legend-item .l1 { font-weight:800; color:var(--text-primary); font-size:13px; line-height:18px; }
+#legendRail .legend-item .l2 { color:var(--text-); font-size:11px; line-height:14px; }
+#legendRail .legend-item.is-off .dot { filter: grayscale(100%); opacity: .35; }
+#legendRail .legend-item.is-off .l1, #legendRail .legend-item.is-off .l2 { opacity: .55; }
+
+/* rail 中的拟合按钮使用流式布局 */
+#legendRail .fit-buttons { position: static !important; box-shadow: none; }
+
+/* 非全屏 transform 缩放动画（内容层，纯视觉） */
+#spectrumHost.anim-scale .spectrum-inner { will-change: transform, opacity; transition: transform var(--transition-speed, .25s) ease, opacity .25s ease; }
+#spectrumHost.anim-scale.reveal-from-0 .spectrum-inner { transform: scaleY(0.001); opacity: 0; }
+#spectrumHost.anim-scale.revealed .spectrum-inner { transform: scaleY(1); opacity: 1; }
+#spectrumHost.anim-scale.collapse-to-0 .spectrum-inner { transform: scaleY(0.001); opacity: 0; }
+
+/* 频谱 Loading 覆盖层样式 */
+#spectrumHost .spectrum-loading {
+  position: absolute;
+  inset: 0;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  z-index: 5;
+  pointer-events: none;
+  background: transparent;
+}
+#spectrumHost .spectrum-loading.is-active { display: flex; }
+#spectrumHost .spectrum-loading .spinner {
+  width: 18px; height: 18px; border-radius: 50%;
+  border: 2px solid var(--border-color);
+  border-top-color: var(--accent);
+  animation: spectrum-spin 0.9s linear infinite;
+  margin-right: 8px;
+}
+#spectrumHost .spectrum-loading .text {
+  font-size: 12px;
+  color: var(--text-);
+  user-select: none;
+  white-space: nowrap;
+}
+@keyframes spectrum-spin { to { transform: rotate(360deg); } }

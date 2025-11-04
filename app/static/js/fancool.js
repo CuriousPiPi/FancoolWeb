@@ -1685,14 +1685,12 @@ function scheduleAdjust(){
    ========================================================= */
 (function mountChartRendererEarly(){
   function doMount(){
-    const el = document.getElementById('chartHost');
+    const el = document.getElementById('chartRoot');
     if (el && window.ChartRenderer && typeof ChartRenderer.mount === 'function') {
       ChartRenderer.mount(el);
 
-      // NEW: 监听 X 轴切换，写回 LocalState，并按新轴刷新曲线
       if (typeof ChartRenderer.setOnXAxisChange === 'function') {
         ChartRenderer.setOnXAxisChange((next) => {
-          // 规范化
           const nx = (next === 'noise') ? 'noise_db' : next;
           try { localStorage.setItem('x_axis_type', nx); } catch(_) {}
           frontXAxisType = nx;
