@@ -36,7 +36,8 @@
 
   const NF_MAIN_H_PX = 600;  // 非全屏：主图固定高度
   const NF_SPEC_H_PX = 600;  // 非全屏：频谱固定高度
-  
+  const NARROW_BREAKPOINT = 1024;   // 窄屏阈值（可按需调整）
+  const NARROW_HYSTERESIS = 48;     // 迟滞窗口（像素），用于防抖
   const LEGEND_OFFSET = 50;     // Legend 顶部下移像素
 
   let __specToggleCooldownUntil = 0;
@@ -83,8 +84,8 @@ function ensureLegendRail(){
 
   const rail = document.createElement('aside');
   rail.id = 'legendRail';
+  // 移除 legend-spacer，只保留 legend-scroll 与 rail-actions
   rail.innerHTML = `
-    <div class="legend-spacer" id="legendRailSpacer" style="height:${LEGEND_OFFSET}px"></div>
     <div class="legend-scroll" id="legendRailScroll"></div>
     <div class="rail-actions"><!-- #fitButtons 将被挂到这里 --></div>
   `;
@@ -96,23 +97,43 @@ function ensureLegendRail(){
   return rail;
 }
 
-// 修改：Legend rail 的布局计算 —— 去掉“随按钮增宽”的约束，减小左右内边距与最大宽度
 function updateLegendRailLayout(){
   const shell = document.getElementById('chart-settings') || (root && root.closest('.fc-chart-container')) || null;
   if (!shell) return;
   shell.classList.add('chart-flex');
-  if (layoutIsNarrow()) shell.classList.add('is-narrow'); else shell.classList.remove('is-narrow');
+  const narrow = layoutIsNarrow();
+  if (narrow) shell.classList.add('is-narrow'); else shell.classList.remove('is-narrow');
 
   if (!__legendRailEl) return;
 
-  // 占位器保持
-  const spacer = __legendRailEl.querySelector('#legendRailSpacer');
-  if (spacer) spacer.style.height = `${LEGEND_OFFSET}px`;
+  // 1) 主图高度：窄屏把 --main-chart-h 调成一半（600 -> 400）
+  try {
+    const mainH = narrow ? Math.round(NF_MAIN_H_PX / 1.5) : NF_MAIN_H_PX;
+    shell.style.setProperty('--main-chart-h', `${mainH}px`);
+  } catch(_){}
 
-  // 不再让按钮区影响最小宽度
+  // 2) 频谱高度：非全屏且已展开时，实时把 #spectrumHost 的高度调整到当前模式对应的固定值
+  try {
+    if (!isFs && spectrumRoot && spectrumEnabled) {
+      spectrumRoot.style.height = `${getNonFullscreenSpecHeight()}px`;
+    }
+  } catch(_){}
+
+  // 3) 桌面模式：给 legend-scroll 增加顶部边距；窄屏不加
+  // 用 CSS 变量喂给样式层（也可以直接靠选择器实现，这里两种方式都兼容）
+  try {
+    const topGap = narrow ? 0 : LEGEND_OFFSET; // e.g. 50px
+    __legendRailEl.style.setProperty('--legend-top-gap', `${topGap}px`);
+  } catch(_){}
+
+  // 4) rail 宽度：窄屏铺满，桌面按文本测量收敛
+  if (narrow) {
+    __legendRailEl.style.width = '100%';
+    return;
+  }
+
+  // 桌面：仍按文本宽度收敛 rail
   let minW = 160;
-
-  // 文本测量
   let textMax = 0;
   try {
     const t = tokens((lastPayload && lastPayload.theme) || (document.documentElement.getAttribute('data-theme') || 'light'));
@@ -126,6 +147,7 @@ function updateLegendRailLayout(){
       const model = s.model || s.model_name || '';
       const cond  = s.condition_name_zh || s.condition || '';
       const line1 = [brand, model].filter(Boolean).join(' ') || (s.name || '');
+
       ctx.font = l1Font;
       const w1 = ctx.measureText(line1).width || 0;
       let w2 = 0;
@@ -134,13 +156,10 @@ function updateLegendRailLayout(){
     });
   } catch(_){}
 
-  // icon + gap + 文本 + 左右内边距
   const iconW = 12, gap = 8, pad = 12;
   const need = Math.ceil(iconW + gap + textMax + pad);
   const targetW = Math.max(minW, Math.min(320, need));
-
-  if (!layoutIsNarrow()) __legendRailEl.style.width = `${Math.round(targetW)}px`;
-  else __legendRailEl.style.width = '100%';
+  __legendRailEl.style.width = `${Math.round(targetW)}px`;
 }
 
 function renderLegendRailItems(){
@@ -148,23 +167,46 @@ function renderLegendRailItems(){
   if (!__legendScrollEl) return;
   const sList = Array.isArray(lastPayload?.chartData?.series) ? lastPayload.chartData.series : [];
   const selMap = getLegendSelectionMap();
+  const isNarrowNow = layoutIsNarrow();
+
   const items = sList.map(s => ({
-    name: s.name, brand: s.brand || s.brand_name_zh || s.brand_name || '',
-    model: s.model || s.model_name || '', condition: s.condition_name_zh || s.condition || '',
-    color: s.color, selected: selMap ? (selMap[s.name] !== false) : true
+    name: s.name,
+    brand: s.brand || s.brand_name_zh || s.brand_name || '',
+    model: s.model || s.model_name || '',
+    condition: s.condition_name_zh || s.condition || '',
+    color: s.color,
+    selected: selMap ? (selMap[s.name] !== false) : true
   }));
 
-  __legendScrollEl.innerHTML = items.map(it => `
-    <div class="legend-item ${it.selected ? '' : 'is-off'}" data-name="${it.name}">
-      <span class="dot" style="background:${it.color}"></span>
-      <span style="flex:1 1 auto; display:flex; flex-direction:column; min-width:0;">
-        <span class="l1">${(it.brand || it.model) ? `${it.brand} ${it.model}` : it.name}</span>
-        ${it.condition ? `<span class="l2">${it.condition}</span>` : ``}
-      </span>
-    </div>
-  `).join('');
+  __legendScrollEl.innerHTML = items.map(it => {
+    const base = (it.brand || it.model) ? `${it.brand} ${it.model}` : it.name;
 
-    __legendScrollEl.querySelectorAll('.legend-item').forEach(node => {
+    if (isNarrowNow) {
+      // 窄屏：单行省略，工况拼接，工况字体和颜色与常规 .l2 一致
+      return `
+        <div class="legend-item ${it.selected ? '' : 'is-off'}" data-name="${it.name}">
+          <span class="dot" style="background:${it.color}"></span>
+          <span class="merged" style="flex:1 1 auto; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
+            <span class="l1">${base}</span>
+            ${it.condition ? `<span class="sep"> - </span><span class="l2-inline">${it.condition}</span>` : ``}
+          </span>
+        </div>
+      `;
+    } else {
+      // 桌面：两行展示
+      return `
+        <div class="legend-item ${it.selected ? '' : 'is-off'}" data-name="${it.name}">
+          <span class="dot" style="background:${it.color}"></span>
+          <span style="flex:1 1 auto; display:flex; flex-direction:column; min-width:0;">
+            <span class="l1">${base}</span>
+            ${it.condition ? `<span class="l2">${it.condition}</span>` : ``}
+          </span>
+        </div>
+      `;
+    }
+  }).join('');
+
+  __legendScrollEl.querySelectorAll('.legend-item').forEach(node => {
     const name = node.getAttribute('data-name') || '';
     node.addEventListener('click', () => {
       if (!name || !chart) return;
@@ -181,7 +223,7 @@ function renderLegendRailItems(){
 
       if (showFitCurves) refreshFitBubble();
     });
-    
+
     node.addEventListener('mouseenter', () => { if (name && chart) try { chart.dispatchAction({ type: 'highlight', seriesName: name }); } catch(_){ } });
     node.addEventListener('mouseleave', () => { if (name && chart) try { chart.dispatchAction({ type: 'downplay', seriesName: name }); } catch(_){ } });
   });
@@ -532,17 +574,34 @@ function installChartResizeObserver(){
       || (window.matchMedia && window.matchMedia('(pointer:coarse)').matches);
   }
 
-  function layoutIsNarrow() {
-    // 以“图表容器实际宽度”判定（优先 root 的实际可见宽度，其次 chart.getWidth）
-    const w =
-      (root && root.getBoundingClientRect ? Math.floor(root.getBoundingClientRect().width) : 0) ||
-      (chart && typeof chart.getWidth === 'function' ? chart.getWidth() : 0);
+function layoutIsNarrow() {
+  // 以“图表外层容器”的实际宽度判定，避免 rail 改变自身宽度导致的反馈抖动
+  const host = document.getElementById('chart-settings') || (root && root.closest('.fc-chart-container')) || document.documentElement;
+  const w =
+    (host && host.getBoundingClientRect && Math.floor(host.getBoundingClientRect().width)) ||
+    (window.innerWidth || 0);
 
-    let narrow = w > 0 ? (w < 800) : false;
-    // 全屏 + 移动端不视为窄屏
-    if (isFs && isMobile()) narrow = false;
-    return narrow;
+  // 迟滞窗口：进入阈值略小、退出阈值略大，避免边界来回切换
+  const half = Math.max(0, Math.floor(NARROW_HYSTERESIS / 2));
+  const enterNarrowAt = NARROW_BREAKPOINT - half; // 进入窄屏阈值
+  const exitNarrowAt  = NARROW_BREAKPOINT + half; // 退出窄屏阈值
+
+  let narrow;
+  if (lastIsNarrow === true) {
+    // 已经是窄屏 → 只有当宽度明显超过退出阈值才切回桌面
+    narrow = (w < exitNarrowAt);
+  } else if (lastIsNarrow === false) {
+    // 已经是桌面 → 只有当宽度明显小于进入阈值才切换到窄屏
+    narrow = (w < enterNarrowAt);
+  } else {
+    // 初次判定
+    narrow = (w < NARROW_BREAKPOINT);
   }
+
+  // 全屏 + 移动端不视为窄屏（保持原规则）
+  if (isFs && isMobile()) narrow = false;
+  return narrow;
+}
 
 function mount(rootEl) {
   if (!rootEl) {
@@ -666,7 +725,6 @@ function setTheme(theme) {
   if (lastPayload) render(lastPayload);
 }
 
-// 修改：render —— 渲染后刷新 rail
 function render(payload){
   lastPayload = payload || lastPayload;
   if (!root){ warnOnce('[ChartRenderer] 请先调用 mount(rootEl)'); return; }
@@ -692,6 +750,10 @@ function render(payload){
   chart.setOption(option, true);
   chart.resize();
 
+  // 先更新 lastOption，再同步频谱背景，避免读取到旧背景（修复 Esc 退出全屏时的漏网）
+  lastOption = option;
+  syncSpectrumBgWithMain(option && option.backgroundColor);
+
   requestAnimationFrame(() => updateAxisSwitchPosition({ force:true, animate:false }));
   if (option.__empty) {
     try { chart.dispatchAction({ type: 'updateAxisPointer', currTrigger: 'leave' }); } catch(_){}
@@ -700,13 +762,11 @@ function render(payload){
   const { x, y, visible } = computePrefixCenter(option);
   placeAxisOverlayAt(x, y, visible && !option.__empty);
 
-  lastOption = option;
   lastIsNarrow = layoutIsNarrow();
 
   toggleFitUI(showFitCurves);
   placeFitUI();
 
-  // NEW：rail 刷新（Legend 渲染与尺寸）
   updateLegendRail();
 
   primeRootRect();
@@ -720,13 +780,11 @@ function render(payload){
 
       if (spectrumEnabled) {
         if (__skipSpectrumOnce || performance.now() < __suppressSpectrumUntil) {
-          // do nothing
         } else {
           requestAndRenderSpectrum();
         }
       }
       setTimeout(() => { __skipSpectrumOnce = false; }, 450);
-      // NEW：成帧后再同步一次 rail 勾选态（避免 setOption 后首次不同步）
       try { syncLegendRailFromChart(); } catch(_){}
     };
     chart.on('finished', onFinished);
@@ -905,9 +963,9 @@ function buildOption(payload) {
   const titleMeasure = measureText(titleText, titleFontSize, titleFontWeight, t.fontFamily);
   const gridTop = Math.max(54, titleTop + Math.ceil(titleMeasure.height) + 12);
 
-  const gridRight = 40;
-  const narrowBottomAuto = Math.min(320, 50 + (sList.length || 1) * 22);
-  const gridBottom = isNarrow ? Math.max(140, narrowBottomAuto) : 40;
+  const gridRight = 30;
+  // 窄屏不再为 legend 预留大底部空间，统一 40
+  const gridBottom = isNarrow ? 40 : 40;
 
   const legendCfg = { show: false, data: sList.map(s=>s.name) };
   try {
@@ -2014,10 +2072,9 @@ async function toggleSpectrumUI(show) {
         spectrumRoot.style.setProperty('max-height', targetPx + 'px');
       });
     } else {
-      // 非全屏：只增长 #spectrumHost 的高度；去掉透明度过渡，仅保留变形/尺寸过渡
-      const spec = NF_SPEC_H_PX;
+      // 非全屏：窄屏固定高度减半
+      const spec = getNonFullscreenSpecHeight();
 
-      // 强制去掉透明度过渡与淡入淡出
       if (spectrumInner) {
         spectrumInner.style.transition = 'transform var(--transition-speed, .25s) ease';
         spectrumInner.style.opacity = '1';
@@ -2041,7 +2098,6 @@ async function toggleSpectrumUI(show) {
           try { spectrumRoot.removeEventListener('transitionend', onEnd); } catch(_) {}
           spectrumRoot.classList.remove('anim-scale', 'reveal-from-0', 'revealed');
           spectrumRoot.style.transition = '';
-          // 复位 inner 的内联样式（不再保留透明度过渡）
           if (spectrumInner) {
             spectrumInner.style.transition = '';
             spectrumInner.style.opacity = '';
@@ -2076,7 +2132,6 @@ async function toggleSpectrumUI(show) {
       if (root) try { root.style.minHeight = ''; } catch(_) {}
 
       spectrumRoot.classList.remove('anim-scale', 'revealed', 'reveal-from-0', 'collapse-to-0');
-      // 复位 inner 的内联样式（无透明度过渡/无淡出）
       if (spectrumInner) {
         spectrumInner.style.transition = '';
         spectrumInner.style.opacity = '';
@@ -2114,10 +2169,9 @@ async function toggleSpectrumUI(show) {
 
       specSetTimeout(() => { try { cleanupAfter(); updateFullscreenHeights(); } catch(_) {} }, Math.max(900, (getCssTransitionMs()||350)+300));
     } else {
-      // 非全屏：只收缩 #spectrumHost 的高度到 0；去掉透明度过渡
+      // 非全屏：固定高度到 0（无透明度过渡）
       const curSpec = Math.round((spectrumRoot?.getBoundingClientRect().height || 0));
 
-      // 强制去掉透明度过渡与淡出
       if (spectrumInner) {
         spectrumInner.style.transition = 'transform var(--transition-speed, .25s) ease';
         spectrumInner.style.opacity = '1';
@@ -2810,7 +2864,6 @@ function unlockMainChartHeight() {
 
 }
 
-// 新增：在当前模式（全屏/非全屏）下把频谱展开/收起状态同步到 DOM，保持状态一致
 function syncSpectrumStateAcrossModes({ animate = false } = {}) {
   ensureSpectrumHost();
   const shell =
@@ -2843,7 +2896,8 @@ function syncSpectrumStateAcrossModes({ animate = false } = {}) {
         spectrumRoot.style.transition = '';
       }
     } else {
-      // 非全屏：直接设 #spectrumHost 的像素高
+      // 非全屏：根据当前是否窄屏选择高度（窄屏减半）
+      const h = getNonFullscreenSpecHeight();
       spectrumRoot.style.removeProperty('max-height');
       spectrumRoot.style.removeProperty('flex');
 
@@ -2852,10 +2906,10 @@ function syncSpectrumStateAcrossModes({ animate = false } = {}) {
         spectrumRoot.style.transition = 'height var(--transition-speed, .25s) ease';
         spectrumRoot.style.height = cur + 'px';
         void spectrumRoot.offsetHeight;
-        spectrumRoot.style.height = NF_SPEC_H_PX + 'px';
+        spectrumRoot.style.height = h + 'px';
       } else {
         spectrumRoot.style.transition = 'none';
-        spectrumRoot.style.height = NF_SPEC_H_PX + 'px';
+        spectrumRoot.style.height = h + 'px';
         void spectrumRoot.offsetHeight;
         spectrumRoot.style.transition = '';
       }
@@ -2950,6 +3004,23 @@ function __measureLegendForExport(items, t) {
   const colW = Math.min(maxCol, Math.max(minCol, Math.ceil(padX + dotW + gapDotText + textMax + padX)));
   return { colW, totalH, line1H, line2H, itemGap, dotW, gapDotText, padX, line1Font, line2Font };
 }
+
+// 新增：根据当前是否窄屏，返回非全屏时频谱应使用的固定高度
+function getNonFullscreenSpecHeight(){
+  const narrow = layoutIsNarrow();
+  return narrow ? Math.round(NF_SPEC_H_PX / 1.5) : NF_SPEC_H_PX; // 600 -> 400
+}
+
+// NEW: 将频谱背景与主图一致（仅更新 backgroundColor，不动其它配置）
+function syncSpectrumBgWithMain(bgOverride){
+  try {
+    if (!spectrumEnabled || !spectrumChart) return;
+    const fallback = (lastOption && lastOption.backgroundColor) || (isFs ? getExportBg() : 'transparent');
+    const targetBg = (bgOverride !== undefined && bgOverride !== null) ? bgOverride : fallback;
+    spectrumChart.setOption({ backgroundColor: targetBg });
+  } catch(_) {}
+}
+
   // 挂到全局
   window.ChartRenderer = API;
 

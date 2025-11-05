@@ -176,6 +176,14 @@
 .fc-chart-container.chart-flex .chart-stack > * { flex: 0 0 auto; min-height: 0; }
 
 /* rail 外观与布局（提升层级，避免被覆盖导致按钮无响应） */
+/* 桌面模式：用 margin-top 实现 legend 顶部留白；窄屏不加 */
+.fc-chart-container.chart-flex:not(.is-narrow) #legendRail .legend-scroll {
+  margin-top: 5vh;
+}
+.fc-chart-container.chart-flex.is-narrow #legendRail .legend-scroll {
+  margin-top: 0;
+}
+
 #legendRail {
   position: relative;
   z-index: 300;
@@ -186,10 +194,60 @@
 #legendRail .legend-scroll { flex: 1 1 auto; overflow: auto; margin-bottom: 8px; }
 #legendRail .rail-actions { flex: 0 0 auto; display: flex; gap: 6px; justify-content: flex-end; }
 
-/* 窄屏：上下分栏，rail 移到下方 */
+/* Rail窄屏模式 */
 .fc-chart-container.chart-flex.is-narrow { flex-direction: column; }
 .fc-chart-container.chart-flex.is-narrow #legendRail { width: 100%; min-width: 0; max-width: none; padding: 0; }
-.fc-chart-container.chart-flex.is-narrow #legendRail .legend-scroll { max-height: 32vh; }
+
+/* 窄屏：rail 改为两列 Grid：左=legend 文案，右=操作按钮列（纵向），按钮列贴右下 */
+.fc-chart-container.chart-flex.is-narrow #legendRail {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-auto-rows: auto;
+  align-items: end;                  /* 让内容按底对齐 */
+  min-height: calc(var(--fit-btn-min-h) * 1.5 * 2 + 8px); /* 至少两颗按钮高度 + 间距 */
+}
+
+/* 左列：legend-scroll 自然增长，不滚动，不限高 */
+.fc-chart-container.chart-flex.is-narrow #legendRail .legend-scroll {
+  grid-column: 1 / 2;
+  grid-row: 1 / 2;
+  overflow: visible;
+  max-height: none;
+  margin-bottom: 0;
+}
+
+/* 右列：rail-actions 纵向，靠右下 */
+.fc-chart-container.chart-flex.is-narrow #legendRail .rail-actions {
+  grid-column: 2 / 3;
+  grid-row: 1 / 2;
+  align-self: end;
+  justify-self: end;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+/* 窄屏：rail 内拟合按钮组纵向排列，靠右，不拉伸宽度 */
+.fc-chart-container.chart-flex.is-narrow #legendRail .fit-buttons {
+  flex-direction: column !important;
+  align-items: flex-end !important;
+  gap: 8px !important;
+}
+.fc-chart-container.chart-flex.is-narrow #legendRail .fit-buttons .btn {
+  width: auto;
+}
+
+/* 窄屏 legend 单行省略（第二行拼接），工况文字样式与常规 .l2 一致 */
+.fc-chart-container.chart-flex.is-narrow #legendRail .legend-item .merged {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#legendRail .legend-item .l2-inline {
+  color: var(--text-);
+  font-size: 11px;
+  line-height: 14px;
+}
 
 /* rail legend 项 */
 #legendRail .legend-item { display:flex; align-items:center; gap:8px; margin:6px 0; cursor:pointer; user-select:none; }
