@@ -43,7 +43,7 @@ html, body { height:100%; overflow-x:hidden; }
   --dark-rand-base:#111827;
 
   --transition-speed:.25s;
-  --transition-speed-bg:.5s;
+  --transition-speed-bg:.25s;
 
   --toast-bg:#ffffff;
   --toast-border:#e5e7eb;

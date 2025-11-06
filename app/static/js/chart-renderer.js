@@ -34,8 +34,8 @@
   let __specFetchInFlight = false;
   let __lastFetchKeyHash = '';
 
-  const NF_MAIN_H_PX = 600;  // 非全屏：主图固定高度
-  const NF_SPEC_H_PX = 600;  // 非全屏：频谱固定高度
+  const NF_MAIN_H_PX = 500;  // 非全屏：主图固定高度
+  const NF_SPEC_H_PX = 500;  // 非全屏：频谱固定高度
   const NARROW_BREAKPOINT = 1024;   // 窄屏阈值（可按需调整）
   const NARROW_HYSTERESIS = 48;     // 迟滞窗口（像素），用于防抖
   const LEGEND_OFFSET = 50;     // Legend 顶部下移像素
@@ -43,6 +43,77 @@
   let __specToggleCooldownUntil = 0;
   let __mainHLocked = false;
   
+  let spectrumDockEl = null;
+  let __dockCooldownUntil = 0;
+
+function ensureSpectrumDock() {
+  if (spectrumDockEl && spectrumDockEl.isConnected) return spectrumDockEl;
+
+  const btn = document.createElement('button');
+  btn.id = 'spectrumDock';
+  btn.type = 'button';
+  btn.className = 'spectrum-dock';
+  btn.setAttribute('aria-label', '展开/收起频谱');
+
+  btn.innerHTML = `
+    <svg class="chev" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+      <path d="M3.2 6.2a1 1 0 0 1 1.4 0L8 9.6l3.4-3.4a1 1 0 1 1 1.4 1.4L8.7 11.7a1 1 0 0 1-1.4 0L3.2 7.6a1 1 0 0 1 0-1.4z" fill="currentColor"></path>
+    </svg>
+    <span class="label">展开频谱</span>
+  `;
+
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    const now = performance.now();
+    if (now < __dockCooldownUntil) return;
+    __dockCooldownUntil = now + 250;
+
+    spectrumEnabled = !spectrumEnabled;
+    syncSpectrumDockUi();
+    toggleSpectrumUI(spectrumEnabled);
+
+    setTimeout(() => { __dockCooldownUntil = 0; }, 250);
+  });
+
+  const shell =
+    document.getElementById('chart-settings') ||
+    (root && root.closest('.fc-chart-container')) ||
+    document.body;
+
+  try { shell.appendChild(btn); } catch(_) { document.body.appendChild(btn); }
+
+  spectrumDockEl = btn;
+  syncSpectrumDockUi();
+  return spectrumDockEl;
+}
+
+function syncSpectrumDockUi() {
+  if (!spectrumDockEl) return;
+  const open = !!spectrumEnabled;
+  spectrumDockEl.classList.toggle('is-open', open);
+  const label = spectrumDockEl.querySelector('.label');
+  if (label) label.textContent = open ? '收起频谱' : '展开频谱';
+
+  // 统一行为：全屏与非全屏都显示 dock 按钮
+  spectrumDockEl.style.visibility = 'visible';
+}
+
+function placeSpectrumDock() {
+  // 统一行为：全屏与非全屏都放置到容器内
+  const el = ensureSpectrumDock();
+  const shell =
+    document.getElementById('chart-settings') ||
+    (root && root.closest('.fc-chart-container')) ||
+    null;
+
+  if (!el || !shell) { if (el) el.style.visibility = 'hidden'; return; }
+
+  if (el.parentElement !== shell) {
+    try { shell.appendChild(el); } catch(_) {}
+  }
+  el.style.visibility = 'visible';
+}
+
   // 新增：频谱动画“轮次”与定时器管理，根除竞态
   let __specEpoch = 0;
   const __specTimers = new Set();
@@ -106,33 +177,18 @@ function updateLegendRailLayout(){
 
   if (!__legendRailEl) return;
 
-  // 1) 主图高度：窄屏把 --main-chart-h 调成一半（600 -> 400）
   try {
-    const mainH = narrow ? Math.round(NF_MAIN_H_PX / 1.5) : NF_MAIN_H_PX;
-    shell.style.setProperty('--main-chart-h', `${mainH}px`);
-  } catch(_){}
-
-  // 2) 频谱高度：非全屏且已展开时，实时把 #spectrumHost 的高度调整到当前模式对应的固定值
-  try {
-    if (!isFs && spectrumRoot && spectrumEnabled) {
-      spectrumRoot.style.height = `${getNonFullscreenSpecHeight()}px`;
-    }
-  } catch(_){}
-
-  // 3) 桌面模式：给 legend-scroll 增加顶部边距；窄屏不加
-  // 用 CSS 变量喂给样式层（也可以直接靠选择器实现，这里两种方式都兼容）
-  try {
-    const topGap = narrow ? 0 : LEGEND_OFFSET; // e.g. 50px
+    const topGap = narrow ? 0 : LEGEND_OFFSET;
     __legendRailEl.style.setProperty('--legend-top-gap', `${topGap}px`);
   } catch(_){}
 
-  // 4) rail 宽度：窄屏铺满，桌面按文本测量收敛
   if (narrow) {
     __legendRailEl.style.width = '100%';
+    try { shell.style.setProperty('--legend-rail-w', '0px'); } catch(_){}
     return;
   }
 
-  // 桌面：仍按文本宽度收敛 rail
+  // 桌面：测量文本以确定“展开时”的目标宽度
   let minW = 160;
   let textMax = 0;
   try {
@@ -147,7 +203,6 @@ function updateLegendRailLayout(){
       const model = s.model || s.model_name || '';
       const cond  = s.condition_name_zh || s.condition || '';
       const line1 = [brand, model].filter(Boolean).join(' ') || (s.name || '');
-
       ctx.font = l1Font;
       const w1 = ctx.measureText(line1).width || 0;
       let w2 = 0;
@@ -160,6 +215,13 @@ function updateLegendRailLayout(){
   const need = Math.ceil(iconW + gap + textMax + pad);
   const targetW = Math.max(minW, Math.min(320, need));
   __legendRailEl.style.width = `${Math.round(targetW)}px`;
+
+  // 可选：保留变量（目前不再用于 chart-stack padding），不影响功能
+  try {
+    const measured = (__legendRailEl.getBoundingClientRect?.().width) || targetW || 0;
+    const w = Math.ceil(measured);
+    shell.style.setProperty('--legend-rail-w', `${w}px`);
+  } catch(_){}
 }
 
 function renderLegendRailItems(){
@@ -312,7 +374,9 @@ function getTargetSpectrumHeight(){
     const r = root.getBoundingClientRect();
     return { left: Math.round(r.left), top: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) };
   }
+
   function primeRootRect(){ __lastRootRect = getRootRect(); }
+
   function maybeStartRootPosWatch(ms=800){
     const until = performance.now() + Math.max(0, ms|0);
     __posWatchUntil = Math.max(__posWatchUntil, until);
@@ -321,11 +385,11 @@ function getTargetSpectrumHeight(){
         __posWatchRaf = null;
         const now = performance.now();
         const cur = getRootRect();
-        // 当 root 的位置或尺寸变化时，重放置拟合 UI（bubble/指针）
+        // 当 root 的位置或尺寸变化时，重放置拟合 UI 与外置频谱按钮
         if (cur.left !== __lastRootRect.left || cur.top !== __lastRootRect.top ||
             cur.width !== __lastRootRect.width || cur.height !== __lastRootRect.height) {
           __lastRootRect = cur;
-          try { placeFitUI(); repaintPointer(); } catch(_){}
+          try { placeFitUI(); repaintPointer(); placeSpectrumDock(); } catch(_){}
         }
         if (now < __posWatchUntil) {
           __posWatchRaf = requestAnimationFrame(tick);
@@ -371,96 +435,101 @@ function getTargetSpectrumHeight(){
     bubble.style.position = 'fixed';
   }
 
-  function bindGlobalListeners(){
-    window.addEventListener('resize', onWindowResize, { passive:true });
-  
-    // 滚动时基于“相对图表偏移”重算一次气泡位置（rAF 节流）
-    let __scrollRaf = null;
-    const onAnyScroll = () => {
-      if (__scrollRaf) return;
-      __scrollRaf = requestAnimationFrame(() => {
-        __scrollRaf = null;
-        try { placeFitUI(); } catch(_) {}
+function bindGlobalListeners(){
+  window.addEventListener('resize', onWindowResize, { passive:true });
+
+  // 滚动时基于“相对图表偏移”重算一次位置（rAF 节流）
+  let __scrollRaf = null;
+  const onAnyScroll = () => {
+    if (__scrollRaf) return;
+    __scrollRaf = requestAnimationFrame(() => {
+      __scrollRaf = null;
+      try { placeFitUI(); placeSpectrumDock(); } catch(_) {}
+    });
+  };
+  window.addEventListener('scroll', onAnyScroll, { passive: true, capture: true });
+
+  (function hookLayoutMovers(){
+    const watchMovement = () => { try { placeFitUI(); repaintPointer(); placeSpectrumDock(); } catch(_) {} };
+    const kickWatch = () => { watchMovement(); maybeStartRootPosWatch(900); };
+
+    const sidebar = document.getElementById('sidebar');
+    if (sidebar) {
+      ['transitionrun','transitionstart','transitionend'].forEach(ev=>{
+        sidebar.addEventListener(ev, kickWatch, { passive:true });
       });
-    };
-    window.addEventListener('scroll', onAnyScroll, { passive: true, capture: true });
-  
-    (function hookLayoutMovers(){
-      const watchMovement = () => { try { placeFitUI(); repaintPointer(); } catch(_) {} };
-      const kickWatch = () => { watchMovement(); maybeStartRootPosWatch(900); };
-  
-      const sidebar = document.getElementById('sidebar');
-      if (sidebar) {
-        ['transitionrun','transitionstart','transitionend'].forEach(ev=>{
-          sidebar.addEventListener(ev, kickWatch, { passive:true });
-        });
-        try {
-          const mo = new MutationObserver(kickWatch);
-          mo.observe(sidebar, { attributes:true, attributeFilter:['class','style'] });
-        } catch(_){}
-      }
-      const mainPanels = document.getElementById('main-panels');
-      if (mainPanels) {
-        ['transitionrun','transitionstart','transitionend'].forEach(ev=>{
-          mainPanels.addEventListener(ev, kickWatch, { passive:true });
-        });
-        try {
-          const mo2 = new MutationObserver(kickWatch);
-          mo2.observe(mainPanels, { attributes:true, attributeFilter:['class','style'] });
-        } catch(_){}
-      }
-    })();
-  
+      try {
+        const mo = new MutationObserver(kickWatch);
+        mo.observe(sidebar, { attributes:true, attributeFilter:['class','style'] });
+      } catch(_){}
+    }
+    const mainPanels = document.getElementById('main-panels');
+    if (mainPanels) {
+      ['transitionrun','transitionstart','transitionend'].forEach(ev=>{
+        mainPanels.addEventListener(ev, kickWatch, { passive:true });
+      });
+      try {
+        const mo2 = new MutationObserver(kickWatch);
+        mo2.observe(mainPanels, { attributes:true, attributeFilter:['class','style'] });
+      } catch(_){}
+    }
+  })();
+
   document.addEventListener('fullscreenchange', async () => {
     isFs = !!document.fullscreenElement;
-  
+
     const modeHost =
       document.getElementById('chart-settings') ||
       (root && root.closest('.fc-chart-container')) ||
       document.documentElement;
-  
+
     adoptBubbleHost();
     bubbleUserMoved = false;
-  
+
     if (window.visualViewport) {
       try { window.visualViewport.removeEventListener('resize', onWindowResize); } catch(_) {}
       if (isFs) {
         try { window.visualViewport.addEventListener('resize', onWindowResize, { passive: true }); } catch(_) {}
       }
     }
-  
+
     try { chart && chart.dispatchAction({ type: 'hideTip' }); } catch(_) {}
     try { spectrumChart && spectrumChart.dispatchAction({ type: 'hideTip' }); } catch(_) {}
-  
+
     if (!isFs) {
       if (spectrumRoot) spectrumRoot.style.marginTop = '0px';
-  
+
       if (!spectrumEnabled) {
         try { modeHost.removeAttribute('data-chart-mode'); } catch(_) {}
         if (root) try { root.style.minHeight = ''; } catch(_) {}
       } else {
         __ensureMainChartMinHeightForSpectrumMode();
       }
-  
+
       if (screen.orientation && screen.orientation.unlock) {
         try { screen.orientation.unlock(); } catch(_) {}
       }
     }
-  
+
     updateFullscreenHeights();
-  
+
     if (lastPayload) render(lastPayload); else if (chart) chart.resize();
-  
+
     requestAnimationFrame(() => {
       try {
         // 切换全屏模式后，同步频谱展开/收起状态（不做二次动画）
         syncSpectrumStateAcrossModes({ animate: false });
-      
+
         placeFitUI();
         repaintPointer();
         updateSpectrumLayout();
         updateLegendRailLayout();
         updateLegendRail();
+        updateRailParkedState();
+        // 外置按钮：全屏下暂时隐藏，常规模式显示并重放置
+        syncSpectrumDockUi();
+        placeSpectrumDock();
+
         if (chart) chart.resize();
         if (spectrumChart) spectrumChart.resize();
       } catch(_) {}
@@ -499,7 +568,6 @@ function bindChartListeners(){
 function onWindowResize(){
   if (!chart) return;
 
-  // 在连续 resize 期间压制频谱请求，停止后 ~500ms 才允许
   __suppressSpectrumUntil = Math.max(__suppressSpectrumUntil, performance.now() + 500);
 
   updateFullscreenHeights();
@@ -512,6 +580,8 @@ function onWindowResize(){
     if (lastPayload) render(lastPayload); else chart.resize();
   } else {
     chart.resize();
+    try { spectrumEnabled && spectrumChart && spectrumChart.resize(); } catch(_) {}
+
     if (lastOption) {
       const { x, y, visible } = computePrefixCenter(lastOption);
       placeAxisOverlayAt(x, y, visible && !lastOption.__empty);
@@ -523,6 +593,9 @@ function onWindowResize(){
   updateSpectrumLayout();
   updateLegendRailLayout();
   __refreshFsSpecMaxHeightIfExpanded();
+  updateRailParkedState();
+  // 关键：外置按钮随窗口变化重放置
+  placeSpectrumDock();
 }
 
   let __chartRO = null;
@@ -532,7 +605,6 @@ function installChartResizeObserver(){
     for (const entry of entries) {
       const cr = entry.contentRect || {};
       if (chart && cr.width > 0 && cr.height > 0) {
-        // 在连续尺寸变化期间压制频谱请求
         __suppressSpectrumUntil = Math.max(__suppressSpectrumUntil, performance.now() + 500);
 
         primeRootRect();
@@ -548,10 +620,15 @@ function installChartResizeObserver(){
           } catch(_){}
           updateSpectrumLayout();
           updateLegendRailLayout();
+          updateRailParkedState();
+          // 外置按钮
+          placeSpectrumDock();
           continue;
         }
 
         try { chart.resize(); } catch(_){}
+        try { spectrumEnabled && spectrumChart && spectrumChart.resize(); } catch(_){}
+
         try {
           if (lastOption) {
             const { x, y, visible } = computePrefixCenter(lastOption);
@@ -563,6 +640,9 @@ function installChartResizeObserver(){
         } catch(_){}
         updateSpectrumLayout();
         updateLegendRailLayout();
+
+        // 外置按钮
+        placeSpectrumDock();
       }
     }
   });
@@ -750,7 +830,6 @@ function render(payload){
   chart.setOption(option, true);
   chart.resize();
 
-  // 先更新 lastOption，再同步频谱背景，避免读取到旧背景（修复 Esc 退出全屏时的漏网）
   lastOption = option;
   syncSpectrumBgWithMain(option && option.backgroundColor);
 
@@ -766,6 +845,12 @@ function render(payload){
 
   toggleFitUI(showFitCurves);
   placeFitUI();
+  updateRailParkedState();
+
+  // 外置按钮：常规模式显示，位置与文案同步
+  ensureSpectrumDock();
+  syncSpectrumDockUi();
+  placeSpectrumDock();
 
   updateLegendRail();
 
@@ -965,7 +1050,7 @@ function buildOption(payload) {
 
   const gridRight = 30;
   // 窄屏不再为 legend 预留大底部空间，统一 40
-  const gridBottom = isNarrow ? 40 : 40;
+  const gridBottom = isNarrow ? 60 : 60;
 
   const legendCfg = { show: false, data: sList.map(s=>s.name) };
   try {
@@ -1311,7 +1396,7 @@ function buildOption(payload) {
     requestAnimationFrame(() => updateAxisSwitchPosition({ force:true, animate:false }));
   }
 
-// 1) 确保 fit UI 不再依赖自定义 rail（回退到 Version185）
+// 在 ensureFitUI 内，更新 bubble.innerHTML，新增 footer 与“关闭”按钮，并绑定点击事件。
 function ensureFitUI(){
   let btns = getById('fitButtons');
   if (!btns){
@@ -1320,15 +1405,12 @@ function ensureFitUI(){
     btns.className = 'fit-buttons';
     btns.innerHTML = `
       <button class="btn" id="btnFit" type="button">实时拟合</button>
-      <button class="btn" id="btnSpectrum" type="button">动态频谱</button>
     `;
     appendToRoot(btns);
 
     const btnFit = btns.querySelector('#btnFit');
-    const btnSpectrum = btns.querySelector('#btnSpectrum');
     function syncButtons(){
       btnFit.classList.toggle('active', showFitCurves);
-      btnSpectrum.classList.toggle('active', spectrumEnabled);
     }
 
     btnFit.addEventListener('click', (e)=>{
@@ -1347,29 +1429,6 @@ function ensureFitUI(){
         const bubble = getById('fitBubble');
         if (bubble) bubble.style.visibility = 'hidden';
       }
-    });
-
-    btnSpectrum.addEventListener('click', async (e)=>{
-      e.preventDefault();
-      e.stopPropagation();
-
-      const now = performance.now();
-      if (now < __specToggleCooldownUntil) return; // 冷却中，忽略点击
-
-      __specToggleCooldownUntil = now + 250;
-      // 不可交互 0.3s，避免动画未完成时重复触发
-      btnSpectrum.disabled = true;
-      btnSpectrum.style.pointerEvents = 'none';
-      btnSpectrum.setAttribute('aria-disabled', 'true');
-      setTimeout(() => {
-        btnSpectrum.disabled = false;
-        btnSpectrum.style.pointerEvents = '';
-        btnSpectrum.removeAttribute('aria-disabled');
-      }, 250);
-
-      spectrumEnabled = !spectrumEnabled;
-      syncButtons();
-      await toggleSpectrumUI(spectrumEnabled);
     });
 
     syncButtons();
@@ -1391,7 +1450,10 @@ function ensureFitUI(){
         </div>
       </div>
       <div id="fitBubbleRows"></div>
-      <div class="hint">按系列可见性（Legend）过滤，按风量从大到小排序</div>
+      <div class="foot">
+        <div class="hint">按系列可见性（Legend）过滤，按风量从大到小排序</div>
+        <button id="fitCloseBtn" class="btn-close" type="button">关闭</button>
+      </div>
     `;
     document.body.appendChild(bubble);
     bubble.style.position = 'fixed';
@@ -1403,6 +1465,23 @@ function ensureFitUI(){
     xInput.addEventListener('input', onBubbleInputLive);
     xInput.addEventListener('change', onBubbleInputCommit);
     xInput.addEventListener('keydown', (e)=>{ if (e.key === 'Enter') { onBubbleInputCommit(); } });
+
+    // 关闭按钮：关闭拟合（等效于取消“实时拟合”）
+    const btnsRoot = getById('fitButtons');
+    const btnFit = btnsRoot ? btnsRoot.querySelector('#btnFit') : null;
+    const btnClose = bubble.querySelector('#fitCloseBtn');
+    if (btnClose){
+        btnClose.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          showFitCurves = false;
+          if (btnFit) btnFit.classList.remove('active');
+          toggleFitUI(false);
+          // 新增：复原 rail
+          updateRailParkedState();
+          repaintPointer();
+        });
+    }
   }
 
   // 指针
@@ -1498,17 +1577,20 @@ function ensureFitUI(){
   }
 
   function toggleFitUI(showFit){
-    const btns = getById('fitButtons');
-    const bubble = getById('fitBubble');
-    const ptr = getById('fitPointer');
-    const empty  = !lastOption || lastOption.__empty;
+      const btns = getById('fitButtons');
+      const bubble = getById('fitBubble');
+      const ptr = getById('fitPointer');
+      const empty  = !lastOption || lastOption.__empty;
 
-    if (btns) btns.style.visibility = empty ? 'hidden' : 'visible';
+      if (btns) btns.style.visibility = empty ? 'hidden' : 'visible';
 
-    const showFloating = showFit && !empty; // 窄屏也允许
-    if (bubble) bubble.style.visibility = showFloating ? 'visible' : 'hidden';
-    if (ptr)    ptr.style.visibility    = showFloating ? 'visible' : 'hidden';
-  }
+      const showFloating = showFit && !empty; // 窄屏也允许
+      if (bubble) bubble.style.visibility = showFloating ? 'visible' : 'hidden';
+      if (ptr)    ptr.style.visibility    = showFloating ? 'visible' : 'hidden';
+
+      // 新增：根据气泡状态切换 rail 是否停靠
+      updateRailParkedState();
+    }
 
 // 修改：placeFitUI —— 有 rail 时，按钮不再用绝对/固定定位
 function placeFitUI(){
@@ -1738,122 +1820,155 @@ function placeFitUI(){
     if (spectrumEnabled && spectrumChart) scheduleSpectrumRebuild();
   }
 
-  function refreshFitBubble(){
-    const bubble = getById('fitBubble');
-    if (!bubble || !showFitCurves || !lastPayload || !chart) return;
-    if (lastOption && lastOption.__empty) { bubble.style.visibility = 'hidden'; return; }
-    const rowsEl = bubble.querySelector('#fitBubbleRows');
-    const mode = currentXModeFromPayload(lastPayload);
-    const x = xQueryByMode[mode];
-    if (x == null) return;
+function refreshFitBubble(){
+  const bubble = getById('fitBubble');
+  if (!bubble || !showFitCurves || !lastPayload || !chart) return;
+  if (lastOption && lastOption.__empty) { bubble.style.visibility = 'hidden'; return; }
+  const rowsEl = bubble.querySelector('#fitBubbleRows');
+  const mode = currentXModeFromPayload(lastPayload);
+  const x = xQueryByMode[mode];
+  if (x == null) return;
 
-    const sList = Array.isArray(lastPayload?.chartData?.series) ? lastPayload.chartData.series : [];
-    ensureFitModels(sList, mode);
+  const sList = Array.isArray(lastPayload?.chartData?.series) ? lastPayload.chartData.series : [];
+  ensureFitModels(sList, mode);
 
-    const opt = chart.getOption() || {};
-    const selMap = (opt.legend && opt.legend[0] && opt.legend[0].selected) || {};
-    const items = [];
-    sList.forEach(s => {
-      const visible = (selMap[s.name] !== false);
-      if (!visible) return;
+  const opt = chart.getOption() || {};
+  const selMap = (opt.legend && opt.legend[0] && opt.legend[0].selected) || {};
 
-      // 主曲线：X -> airflow
-      const model = fitModelsCache[mode].get(s.name);
-      // 辅助曲线：rpm -> dB 或 noise -> rpm
-      const crossModel = (s && s.pchip)
-        ? (mode === 'rpm' ? s.pchip?.rpm_to_noise_db : s.pchip?.noise_to_rpm)
-        : null;
+  const items = [];
+  sList.forEach(s => {
+    const selected = (selMap[s.name] !== false);
+    const model = fitModelsCache[mode].get(s.name);
+    const crossModel = (s && s.pchip)
+      ? (mode === 'rpm' ? s.pchip?.rpm_to_noise_db : s.pchip?.noise_to_rpm)
+      : null;
 
-      let y = NaN;
-      if (model && model.x0 != null && model.x1 != null) {
-        const dom0 = Math.min(model.x0, model.x1);
-        const dom1 = Math.max(model.x0, model.x1);
-        if (x >= dom0 && x <= dom1) y = evalPchipJS(model, x);
+    let y = NaN;
+    if (model && model.x0 != null && model.x1 != null) {
+      const dom0 = Math.min(model.x0, model.x1);
+      const dom1 = Math.max(model.x0, model.x1);
+      if (x >= dom0 && x <= dom1) y = evalPchipJS(model, x);
+    }
+
+    let crossVal = NaN;
+    if (crossModel && crossModel.x0 != null && crossModel.x1 != null) {
+      const c0 = Math.min(crossModel.x0, crossModel.x1);
+      const c1 = Math.max(crossModel.x0, crossModel.x1);
+      if (x >= c0 && x <= c1) crossVal = evalPchipJS(crossModel, x);
+    }
+
+    items.push({ name: s.name, color: s.color, selected, y, cross: crossVal });
+  });
+
+  const fmtCFM = (v)=> Math.round(v);
+  const withVal = items.filter(it => Number.isFinite(it.y)).sort((a,b)=> b.y - a.y);
+  const noVal   = items.filter(it => !Number.isFinite(it.y));
+
+  const base = (withVal.length && withVal[0].y > 0) ? withVal[0].y : 0;
+  const pctVal = (v)=> (Number.isFinite(v) && base > 0) ? Math.round((v / base) * 100) : null;
+
+  const valTexts = items.map(it => Number.isFinite(it.y) ? `${fmtCFM(it.y)} CFM` : '-');
+  const maxValChars = valTexts.reduce((m,s)=>Math.max(m, s.length), 1);
+  const pctWidthCh = 6;
+
+  const pad4 = (n) => {
+    const s = String(Math.round(Number(n)));
+    return s.length < 4 ? (' '.repeat(4 - s.length) + s) : s;
+  };
+
+  const ordered = withVal.concat(noVal);
+  rowsEl.innerHTML = ordered.map(it => {
+    const hasY = Number.isFinite(it.y);
+    const valText = hasY ? `${fmtCFM(it.y)} CFM` : '-';
+    const pct = hasY ? pctVal(it.y) : null;
+    const pctText = (pct==null) ? '-' : `(${pct}%)`;
+
+    const hasCross = Number.isFinite(it.cross);
+    let crossHTML = '';
+    if (hasCross) {
+      if (mode === 'noise_db') {
+        const rpmDigits = pad4(it.cross);
+        crossHTML = `<span style="display:inline-block; width:4ch; text-align:right; font-variant-numeric:tabular-nums;">${rpmDigits}</span> RPM`;
+      } else {
+        crossHTML = `${Number(it.cross).toFixed(1)} dB`;
       }
+    }
 
-      let crossVal = NaN;
-      if (crossModel && crossModel.x0 != null && crossModel.x1 != null) {
-        const c0 = Math.min(crossModel.x0, crossModel.x1);
-        const c1 = Math.max(crossModel.x0, crossModel.x1);
-        if (x >= c0 && x <= c1) crossVal = evalPchipJS(crossModel, x);
-      }
+    const crossBlock = hasCross
+      ? `
+          <span class="sep" style="color:var(--text-); opacity:.5; margin:0 8px;">│</span>
+          <span style="color:var(--text-); font-variant-numeric:tabular-nums;">${crossHTML}</span>
+        `
+      : '';
 
-      items.push({ name: s.name, color: s.color, y, cross: crossVal });
-    });
-
-    const fmtCFM = (v)=> Math.round(v);
-    const withVal = items.filter(it => Number.isFinite(it.y)).sort((a,b)=> b.y - a.y);
-    const noVal   = items.filter(it => !Number.isFinite(it.y));
-
-    const base = (withVal.length && withVal[0].y > 0) ? withVal[0].y : 0;
-    const pctVal = (v)=> (Number.isFinite(v) && base > 0) ? Math.round((v / base) * 100) : null;
-
-    const valTexts = items.map(it => Number.isFinite(it.y) ? `${fmtCFM(it.y)} CFM` : '-');
-    const maxValChars = valTexts.reduce((m,s)=>Math.max(m, s.length), 1);
-    const pctWidthCh = 6;
-
-    // 工具：RPM 数字左侧补空至 4 位
-    const pad4 = (n) => {
-      const s = String(Math.round(Number(n)));
-      return s.length < 4 ? (' '.repeat(4 - s.length) + s) : s;
-    };
-
-    const ordered = withVal.concat(noVal);
-    rowsEl.innerHTML = ordered.map(it => {
-      const hasY = Number.isFinite(it.y);
-      const valText = hasY ? `${fmtCFM(it.y)} CFM` : '-';
-      const pct = hasY ? pctVal(it.y) : null;
-      const pctText = (pct==null) ? '-' : `(${pct}%)`;
-
-      const hasCross = Number.isFinite(it.cross);
-      // 交叉值：转速/噪音
-      let crossHTML = '';
-      if (hasCross) {
-        if (mode === 'noise_db') {
-          // X=噪音 → 显示拟合转速：以 4 位数为基准左补空
-          const rpmDigits = pad4(it.cross);
-          crossHTML = `<span style="display:inline-block; width:4ch; text-align:right; font-variant-numeric:tabular-nums;">${rpmDigits}</span> RPM`;
-        } else {
-          // X=转速 → 显示拟合噪音，1 位小数
-          crossHTML = `${Number(it.cross).toFixed(1)} dB`
-        }
-      }
-
-      // 无有效拟合值（主风量无效）→ 仅显示一个 “-”，不要分隔符与其它占位
-      if (!hasY) {
-        return `
-          <div class="row">
-            <span class="dot" style="background:${it.color}"></span>
-            <span>${it.name}</span>
-            <span style="margin-left:auto; display:inline-flex; align-items:center; gap:0;">
-              <span style="color:var(--text-muted); font-variant-numeric:tabular-nums;">-</span>
-            </span>
-          </div>
-        `;
-      }
-
-      // 有主值：永远显示“风量+百分比”，与之前相同；
-      // 仅当有交叉值时才显示分隔竖线与交叉值；没有交叉值时不显示竖线与额外的 “-”
-      const crossBlock = hasCross
-        ? `
-            <span class="sep" style="color:var(--text-muted); opacity:.5; margin:0 8px;">│</span>
-            <span style="color:var(--text-muted); font-variant-numeric:tabular-nums;">${crossHTML}</span>
-          `
-        : '';
-
+    if (!hasY) {
       return `
-        <div class="row">
+        <div class="row ${it.selected ? '' : 'is-off'}" data-name="${it.name}">
           <span class="dot" style="background:${it.color}"></span>
           <span>${it.name}</span>
           <span style="margin-left:auto; display:inline-flex; align-items:center; gap:0;">
-            <span style="min-width:${maxValChars}ch; text-align:right; font-weight:800; font-variant-numeric:tabular-nums;">${valText}</span>
-            <span style="width:${pctWidthCh}ch; text-align:right; font-variant-numeric:tabular-nums;">${pctText}</span>
-            ${crossBlock}
+            <span style="color:var(--text-); font-variant-numeric:tabular-nums;">-</span>
           </span>
         </div>
       `;
-    }).join('');
-  }
+    }
+
+    return `
+      <div class="row ${it.selected ? '' : 'is-off'}" data-name="${it.name}">
+        <span class="dot" style="background:${it.color}"></span>
+        <span>${it.name}</span>
+        <span style="margin-left:auto; display:inline-flex; align-items:center; gap:0;">
+          <span style="min-width:${maxValChars}ch; text-align:right; font-weight:800; font-variant-numeric:tabular-nums;">${valText}</span>
+          <span style="width:${pctWidthCh}ch; text-align:right; font-variant-numeric:tabular-nums;">${pctText}</span>
+          ${crossBlock}
+        </span>
+      </div>
+    `;
+  }).join('');
+
+  // 绑定交互：悬停高亮、点击切换显隐；并避免触发气泡拖拽
+  rowsEl.querySelectorAll('.row[data-name]').forEach(node => {
+    const name = node.getAttribute('data-name') || '';
+
+    node.addEventListener('pointerdown', (e) => { e.stopPropagation(); }, { passive:true });
+
+    node.addEventListener('mouseenter', () => {
+      if (!name) return;
+      try { chart.dispatchAction({ type: 'highlight', seriesName: name }); } catch(_){}
+      if (spectrumEnabled && spectrumChart) {
+        try { spectrumChart.dispatchAction({ type: 'highlight', seriesName: name }); } catch(_){}
+      }
+    }, { passive:true });
+
+    node.addEventListener('mouseleave', () => {
+      if (!name) return;
+      try { chart.dispatchAction({ type: 'downplay', seriesName: name }); } catch(_){}
+      if (spectrumEnabled && spectrumChart) {
+        try { spectrumChart.dispatchAction({ type: 'downplay', seriesName: name }); } catch(_){}
+      }
+    }, { passive:true });
+
+    node.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!name) return;
+
+      const sel = getLegendSelectionMap();
+      const isCurrentlyVisible = sel ? (sel[name] !== false) : true;
+      const actionType = isCurrentlyVisible ? 'legendUnSelect' : 'legendSelect';
+
+      // 主图与频谱图都用 dispatchAction 切换显隐（会有动画）
+      try { chart.dispatchAction({ type: actionType, name }); } catch(_){}
+      if (spectrumEnabled && spectrumChart) {
+        try { spectrumChart.dispatchAction({ type: actionType, name }); } catch(_){}
+        // 删除：scheduleSpectrumRebuild();  // 这会触发整图重建，导致动画丢失
+      }
+
+      try { syncLegendRailFromChart(); } catch(_){}
+      refreshFitBubble();
+    });
+  });
+}
 
   function ensureFitModels(sList, xMode){
     const models = fitModelsCache[xMode];
@@ -2041,12 +2156,13 @@ async function toggleSpectrumUI(show) {
   const myEpoch = __specEpoch;
 
   if (show) {
-    try { shell.setAttribute('data-chart-mode', 'spectrum'); } catch(_) {}
-
     ensureSpectrumChart();
 
     if (isFs) {
-      // 全屏：沿用 max-height 逻辑（移除透明度过渡）
+      // 关键：先标记为 spectrum 模式，避免 :fullscreen:not([data-chart-mode="spectrum"]) 把高度钳成 0
+      try { shell.setAttribute('data-chart-mode', 'spectrum'); } catch(_) {}
+
+      // 全屏：沿用 max-height 逻辑
       spectrumRoot.style.setProperty('flex', '0 0 auto', 'important');
       spectrumRoot.style.setProperty('max-height', '0px');
 
@@ -2072,24 +2188,20 @@ async function toggleSpectrumUI(show) {
         spectrumRoot.style.setProperty('max-height', targetPx + 'px');
       });
     } else {
-      // 非全屏：窄屏固定高度减半
-      const spec = getNonFullscreenSpecHeight();
-
+      // 非全屏：先把 inner 固定到“目标像素高”，立即 resize 一次；父容器靠 CSS 过渡做揭示
+      const targetPx = __computeNfSpecTargetPx();
       if (spectrumInner) {
+        spectrumInner.style.height = targetPx + 'px';
+        try { ensureSpectrumChart(); spectrumChart && spectrumChart.resize(); } catch(_) {}
         spectrumInner.style.transition = 'transform var(--transition-speed, .25s) ease';
         spectrumInner.style.opacity = '1';
       }
-
       spectrumRoot.classList.add('anim-scale', 'reveal-from-0');
-      spectrumRoot.style.transition = 'none';
-      spectrumRoot.style.height = '0px';
-      void spectrumRoot.offsetHeight;
-
+      try { shell.setAttribute('data-chart-mode', 'spectrum'); } catch(_) {}
       requestAndRenderSpectrum().catch(()=>{}).then(() => {
         if (myEpoch !== __specEpoch) return;
         try { spectrumChart && spectrumChart.resize(); } catch(_) {}
       });
-
       requestAnimationFrame(() => {
         if (myEpoch !== __specEpoch) return;
         const onEnd = (e) => {
@@ -2097,44 +2209,38 @@ async function toggleSpectrumUI(show) {
           if (e && e.propertyName !== 'height') return;
           try { spectrumRoot.removeEventListener('transitionend', onEnd); } catch(_) {}
           spectrumRoot.classList.remove('anim-scale', 'reveal-from-0', 'revealed');
-          spectrumRoot.style.transition = '';
           if (spectrumInner) {
             spectrumInner.style.transition = '';
             spectrumInner.style.opacity = '';
+            spectrumInner.style.height = '';
           }
           try { spectrumChart && spectrumChart.resize(); } catch(_) {}
           revealSpectrumIfNeeded();
         };
         try { spectrumRoot.addEventListener('transitionend', onEnd, { once:true }); } catch(_) {}
-
-        spectrumRoot.style.transition = `height var(--transition-speed, .25s) ease`;
-        void spectrumRoot.offsetHeight;
-        spectrumRoot.style.height = spec + 'px';
         spectrumRoot.classList.add('revealed');
-
         specSetTimeout(() => {
           if (myEpoch !== __specEpoch) return;
           spectrumRoot.classList.remove('anim-scale', 'reveal-from-0', 'revealed');
-          spectrumRoot.style.transition = '';
           if (spectrumInner) {
             spectrumInner.style.transition = '';
             spectrumInner.style.opacity = '';
+            spectrumInner.style.height = '';
           }
         }, safetyMs);
       });
     }
   } else {
+    // 收起分支保持原实现（cleanupAfter 会移除 data-chart-mode）
     const cleanupAfter = () => {
       if (myEpoch !== __specEpoch) return;
-      try {
-        shell.removeAttribute('data-chart-mode');
-      } catch(_) {}
+      try { shell.removeAttribute('data-chart-mode'); } catch(_) {}
       if (root) try { root.style.minHeight = ''; } catch(_) {}
-
       spectrumRoot.classList.remove('anim-scale', 'revealed', 'reveal-from-0', 'collapse-to-0');
       if (spectrumInner) {
         spectrumInner.style.transition = '';
         spectrumInner.style.opacity = '';
+        spectrumInner.style.height = '';
       }
       try {
         spectrumRoot.style.removeProperty('max-height');
@@ -2169,52 +2275,51 @@ async function toggleSpectrumUI(show) {
 
       specSetTimeout(() => { try { cleanupAfter(); updateFullscreenHeights(); } catch(_) {} }, Math.max(900, (getCssTransitionMs()||350)+300));
     } else {
-      // 非全屏：固定高度到 0（无透明度过渡）
-      const curSpec = Math.round((spectrumRoot?.getBoundingClientRect().height || 0));
-
+      // 非全屏：先把 inner 固定为“当前像素高”，随后仅靠父容器 height 过渡做收起
+      const curH = Math.max(1, Math.round((spectrumRoot.getBoundingClientRect().height || 1)));
       if (spectrumInner) {
+        spectrumInner.style.height = curH + 'px';        // 画布保持最终内容尺寸，只是被父容器逐步遮住
         spectrumInner.style.transition = 'transform var(--transition-speed, .25s) ease';
         spectrumInner.style.opacity = '1';
       }
 
       spectrumRoot.classList.add('anim-scale', 'collapse-to-0');
-      spectrumRoot.style.transition = 'none';
-      spectrumRoot.style.height = curSpec + 'px';
 
       requestAnimationFrame(() => {
         if (myEpoch !== __specEpoch) return;
+
         const onEnd = (e) => {
           if (myEpoch !== __specEpoch) return;
           if (e && e.propertyName !== 'height') return;
           try { spectrumRoot.removeEventListener('transitionend', onEnd); } catch(_) {}
           cleanupAfter();
           spectrumRoot.classList.remove('anim-scale', 'collapse-to-0');
-          spectrumRoot.style.transition = '';
-          if (spectrumInner) {
-            spectrumInner.style.transition = '';
-            spectrumInner.style.opacity = '';
-          }
         };
-        try { spectrumRoot.addEventListener('transitionend', onEnd, { once:true }); } catch(_) {}
 
-        spectrumRoot.style.transition = `height var(--transition-speed, .25s) ease`;
-        void spectrumRoot.offsetHeight;
-        spectrumRoot.style.height = '0px';
+        try { spectrumRoot.addEventListener('transitionend', onEnd, { once:true }); } catch(_) {}
+        try { shell.removeAttribute('data-chart-mode'); } catch(_) {}   // 触发 height 从 dvh → 0 的 CSS 过渡
       });
     }
   }
+
+  // 同步外置按钮
+  try {
+    syncSpectrumDockUi();
+  } catch(_) {}
+  try {
+    placeSpectrumDock();
+  } catch(_) {}
 }
   
-// 非全屏：不再改 --main-chart-h（主图固定）；全屏仍旧由 flex 驱动
 function updateSpectrumLayout() {
   if (!spectrumRoot || !spectrumInner) return;
 
   if (isFs) {
     if (spectrumRoot) spectrumRoot.style.height = '';
     if (spectrumInner) spectrumInner.style.height = '';
-    if (spectrumChart) { try { spectrumChart.resize(); } catch(_) {} }
-    return;
   }
+  // NEW: 任何模式下都尽量触发频谱 resize，使其跟随容器宽度
+  if (spectrumChart) { try { spectrumChart.resize(); } catch(_) {} }
 }
 
 function getXQueryOrDefault(mode){
@@ -2477,7 +2582,7 @@ function buildAndSetSpectrumOption() {
       yAxis: { show: false, min: 0, max: Math.max(0, Number(lastSpectrumOption?.__yMaxFixed) || 60) },
       legend: { show: false, selected: selMapFromMain },
       series: []
-    }, { notMerge: false, replaceMerge: ['series'] });
+    }, { notMerge: false, replaceMerge: ['series','tooltip'] }); // 关键：合并 tooltip，保证模式切换后定位策略更新
     spectrumChart.resize();
     return;
   }
@@ -2493,7 +2598,7 @@ function buildAndSetSpectrumOption() {
       textStyle: { color: t.axisLabel, fontWeight: 700, fontSize: 16, fontFamily: t.fontFamily }
     },
 
-    grid: { left, right: rightGap, top: 38, bottom: 40 },
+    grid: { left, right: rightGap, top: 38, bottom: 60 },
 
     xAxis: {
       type: 'log',
@@ -2523,7 +2628,7 @@ function buildAndSetSpectrumOption() {
     },
 
     tooltip: {
-      appendToBody: !isFs,
+      appendToBody: !isFs,          // 非全屏：挂到 body；全屏：挂容器内，避免 Top Layer 遮挡
       confine: false,
       trigger: 'axis',
       triggerOn: 'mousemove|click|touchstart|touchmove',
@@ -2533,7 +2638,12 @@ function buildAndSetSpectrumOption() {
       borderRadius: 10,
       textStyle: { color: t.tooltipText },
       axisPointer: { type: 'line', snap: true, label: { formatter: (obj) => fmtHz(obj?.value) } },
-      position: function (pos) { const x = Array.isArray(pos) ? pos[0] : 0; const y = Array.isArray(pos) ? pos[1] : 0; const gap = 12; return [Math.round(x + gap), Math.round(y + gap)]; },
+      position: function (pos) {
+        const x = Array.isArray(pos) ? pos[0] : 0;
+        const y = Array.isArray(pos) ? pos[1] : 0;
+        const gap = 12;
+        return [Math.round(x + gap), Math.round(y + gap)];
+      },
       extraCssText: `
         position: ${isFs ? 'absolute' : 'fixed'};
         backdrop-filter: blur(4px) saturate(120%);
@@ -2582,7 +2692,7 @@ function buildAndSetSpectrumOption() {
       universalTransition: true,
       emphasis: { focus: 'series', blurScope: 'coordinateSystem' }
     }))
-  }, { notMerge: false, replaceMerge: ['series'] });
+  }, { notMerge: false, replaceMerge: ['series','tooltip'] }); // 关键：每次都同时刷新 tooltip 配置
 
   spectrumChart.resize();
 }
@@ -2877,7 +2987,7 @@ function syncSpectrumStateAcrossModes({ animate = false } = {}) {
     try { shell.setAttribute('data-chart-mode', 'spectrum'); } catch (_) {}
 
     if (isFs) {
-      // 全屏：用 max-height + --fs-spec-h 表达展开高度
+      // 全屏：仍用 max-height + --fs-spec-h 表达展开高度
       const targetPx = __computeFsSpecTargetPx();
       spectrumRoot.style.removeProperty('height');
       spectrumRoot.style.setProperty('flex', '0 0 auto', 'important');
@@ -2896,26 +3006,17 @@ function syncSpectrumStateAcrossModes({ animate = false } = {}) {
         spectrumRoot.style.transition = '';
       }
     } else {
-      // 非全屏：根据当前是否窄屏选择高度（窄屏减半）
-      const h = getNonFullscreenSpecHeight();
+      // 非全屏：不再写入 px；依靠 CSS 的 dvh 规则和 height 过渡
+      if (animate) {
+        spectrumRoot.classList.add('anim-scale');
+        requestAnimationFrame(() => {
+          try { spectrumRoot.classList.remove('anim-scale'); } catch(_) {}
+        });
+      }
       spectrumRoot.style.removeProperty('max-height');
       spectrumRoot.style.removeProperty('flex');
-
-      if (animate) {
-        const cur = Math.max(0, Math.round(spectrumRoot.getBoundingClientRect().height || 0));
-        spectrumRoot.style.transition = 'height var(--transition-speed, .25s) ease';
-        spectrumRoot.style.height = cur + 'px';
-        void spectrumRoot.offsetHeight;
-        spectrumRoot.style.height = h + 'px';
-      } else {
-        spectrumRoot.style.transition = 'none';
-        spectrumRoot.style.height = h + 'px';
-        void spectrumRoot.offsetHeight;
-        spectrumRoot.style.transition = '';
-      }
     }
   } else {
-    // 收起：根据模式设到 0
     try { shell.removeAttribute('data-chart-mode'); } catch (_) {}
 
     if (isFs) {
@@ -2928,16 +3029,24 @@ function syncSpectrumStateAcrossModes({ animate = false } = {}) {
       spectrumRoot.style.setProperty('max-height', '0px');
       if (!animate) spectrumRoot.style.transition = '';
     } else {
+      // 非全屏：移除属性即回到 height:0（CSS 过渡生效）
       spectrumRoot.style.removeProperty('max-height');
+      spectrumRoot.style.removeProperty('flex');
       if (animate) {
-        spectrumRoot.style.transition = 'height var(--transition-speed, .25s) ease';
-      } else {
-        spectrumRoot.style.transition = 'none';
+        spectrumRoot.classList.add('anim-scale');
+        requestAnimationFrame(() => {
+          try { spectrumRoot.classList.remove('anim-scale'); } catch(_) {}
+        });
       }
-      spectrumRoot.style.height = '0px';
-      if (!animate) spectrumRoot.style.transition = '';
     }
   }
+
+  // 关键补丁：模式切换后立刻刷新频谱配置（含 tooltip），避免沿用旧的 appendToBody/fixed
+  try {
+    if (spectrumEnabled && spectrumChart) {
+      buildAndSetSpectrumOption();  // 内部已根据 isFs 设置 appendToBody 和位置语义，并 replaceMerge tooltip
+    }
+  } catch(_) {}
 
   try { chart && chart.resize(); } catch (_) {}
   try { spectrumEnabled && spectrumChart && spectrumChart.resize(); } catch (_) {}
@@ -3019,6 +3128,36 @@ function syncSpectrumBgWithMain(bgOverride){
     const targetBg = (bgOverride !== undefined && bgOverride !== null) ? bgOverride : fallback;
     spectrumChart.setOption({ backgroundColor: targetBg });
   } catch(_) {}
+}
+
+// 新增：与 CSS dvh 规则一致的“非常规模式下频谱目标像素高”
+function __computeNfSpecTargetPx() {
+  const vv = (window.visualViewport && Math.round(window.visualViewport.height)) || 0;
+  const vh = vv > 0 ? vv : (window.innerHeight || document.documentElement.clientHeight || 800);
+  const narrow = layoutIsNarrow();
+  const frac = narrow ? 0.30 : 0.45;    // 窄屏 30dvh，桌面 45dvh
+  let px = Math.round(vh * frac);
+  // 与 CSS 约束对齐：上限 600；桌面最小 300
+  px = Math.min(600, px);
+  if (!narrow) px = Math.max(300, px);
+  return Math.max(1, px);
+}
+
+// 停靠状态切换后，补一次宽度测量，确保变量与当前布局一致
+function updateRailParkedState(){
+  const shell =
+    document.getElementById('chart-settings') ||
+    (root && root.closest('.fc-chart-container')) ||
+    null;
+  if (!shell) return;
+
+  const narrow = layoutIsNarrow();
+  const empty  = !lastOption || lastOption.__empty;
+  const shouldPark = !!(showFitCurves && !empty && !narrow);
+  shell.classList.toggle('rail-parked', shouldPark);
+
+  // 新增：切换后立刻刷新一次 rail 宽度变量，避免边界分辨率下变量与实际显示不一致
+  try { updateLegendRailLayout(); } catch(_) {}
 }
 
   // 挂到全局

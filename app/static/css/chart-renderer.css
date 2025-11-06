@@ -16,6 +16,7 @@
   /* 全屏分栏比例（默认主图:频谱 = 3:2），仅用于计算目标像素高 */
   --fs-main-flex: 1;
   --fs-spec-flex: 1;
+  --rail-slide-overshoot: 8px; /* 滑出超量，防止子像素/缩放下漏出细边 */
 }
 [data-theme="dark"]{
   --bg-bubble:#1f293700;
@@ -33,40 +34,49 @@
 /* 图表容器基础：容器自适应高度，提供一个下限，展开频谱时“向下扩展” */
 .fc-chart-container {
   position: relative !important;
-  min-height: clamp(480px, 62vh, 620px);
+  min-height: clamp(480px, 62vh, 500px);
   height: auto;
   background: var(--bg-secondary) !important;
   scrollbar-gutter: stable both-edges;
 }
 
-/* 非全屏：主图固定高度（用变量，可由 JS 统一设定或使用默认 600px）；避免 100% 跟随容器拉伸 */
-.fc-chart-container:not(:fullscreen) .chart-stack > #chartRoot {
-  height: var(--main-chart-h, 600px) !important;
-  min-height: 0 !important;
-}
+/* 非全屏高度完全交给 CSS（桌面 45dvh，窄屏 30dvh） */
+.fc-chart-container.chart-flex:not(.is-narrow) { --nf-chart-h: 45dvh; }
+.fc-chart-container.chart-flex.is-narrow      { --nf-chart-h: 30dvh; }
 
+/* 非全屏：主图高度使用 dvh（不再使用 --main-chart-h 像素变量） */
+.fc-chart-container:not(:fullscreen) .chart-stack > #chartRoot {
+  height: var(--nf-chart-h, 45dvh) !important;
+  max-height: 600px !important;
+}
+.fc-chart-container:not(:fullscreen):not(.is-narrow) .chart-stack > #chartRoot {
+  min-height: 500px !important;
+}
 /* 全屏时主图吃掉剩余高度（保持原逻辑） */
 :fullscreen .chart-stack > #chartRoot {
   flex: 1 1 auto !important;
   min-height: 0 !important;
 }
 
-/* 移除对 #chartRoot/#chartHost 的 100% 高度，避免跟随容器拉伸产生“压缩/反弹” */
-#chartRoot, #chartHost { /* height: 100% !important;  删除这一行为 */ }
-
 /* 明确允许锚定，避免滚动抖动 */
 #chartRoot, #spectrumHost { overflow-anchor: auto; }
 
-/* 频谱 Host（非全屏：直接做像素级高度动画；无剪裁层） */
 #spectrumHost {
   position: relative;
   height: 0;                     /* 收起态 */
   overflow: hidden;              /* 收起与展开过程避免内容溢出 */
-  transition: height var(--transition-speed, .25s) ease;
+  transition: height var(--transition-speed, .25s) ease; /* 原来是 2s，改为变量以统一调速 */
 }
+.fc-chart-container:not(:fullscreen):not(.is-narrow)[data-chart-mode="spectrum"] #spectrumHost {
+  height: clamp(300px, var(--nf-chart-h, 45dvh), 600px);
+}
+.fc-chart-container:not(:fullscreen).is-narrow[data-chart-mode="spectrum"] #spectrumHost {
+  height: clamp(0px, var(--nf-chart-h, 30dvh), 600px);
+}
+
 #spectrumHost > .spectrum-inner {
   width: 100%;
-  height: 100%;                  /* 内层随 Host 高度 */
+  height: 100%;                  /* 内层随 Host 高度（展开/收起期间通过 JS 临时改为固定 px） */
   position: relative;
   overflow: visible;
   transform-origin: top;
@@ -131,7 +141,29 @@
 .fit-bubble .title{ font-weight:800; color:var(--text-primary); font-size:13px; line-height:1.2; white-space:nowrap; }
 .fit-bubble .x-input{ margin-left:auto; display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-); white-space:nowrap; }
 .fit-bubble input[type="number"]{ width:10ch; font-size:12px; padding:4px 6px; border:1px solid var(--border-color); border-radius:8px; background:transparent; color:var(--text-primary); outline:none; }
-.fit-bubble .row{ display:flex; align-items:center; gap:8px; margin:4px 0; color:var(--text-primary); font-size:13px; }
+.fit-bubble .row{
+  display: flex;                 
+  align-items: center;           
+  gap: 8px;                      
+  margin: 4px 0;                 
+  color: var(--text-primary);    
+  font-size: 13px;               
+
+  cursor: pointer;               
+  border-radius: 6px;            
+  padding: 2px 4px;              
+  transition: background-color .15s ease, opacity .15s ease; 
+}
+.fit-bubble .row:hover{
+  background: rgba(0,0,0,0.04);
+}
+[data-theme="dark"] .fit-bubble .row:hover{
+  background: rgba(255,255,255,0.06);
+}
+/* 隐藏态低亮，和侧栏 legend 一致的感觉 */
+.fit-bubble .row.is-off{
+  opacity: .55;
+}
 .fit-bubble .row .dot{ width:10px; height:10px; border-radius:50%; flex:0 0 auto; }
 .fit-bubble .hint{ color: var(--text-); font-size: 11px; }
 
@@ -141,8 +173,6 @@
 .fit-pointer .handle{ position:absolute; bottom:-22px; left:-8px; width:16px; height:24px; border-radius:4px; background: var(--accent); box-shadow: var(--shadow); cursor: grab; touch-action: none; pointer-events: auto; }
 .fit-pointer .handle::after{ content:""; position:absolute; left:50%; transform: translateX(-50%); top:-7px; width:0; height:0; border-left:8px solid transparent; border-right:8px solid transparent; border-bottom:9px solid var(--accent); }
 .fit-pointer .handle::before{ content:""; position:absolute; left:50%; top:50%; width: var(--fit-hitbox); height: var(--fit-hitbox); transform: translate(-50%, -50%); background: transparent; pointer-events: auto; }
-
-.fit-narrow-hint{ position:absolute; z-index:2147483643; font-size:11px; color: var(--text-); pointer-events:none; user-select:none; white-space:nowrap; }
 
 /* 全屏：用 max-height 驱动频谱展开/收起；主图吃掉剩余高度 */
 .fc-chart-container:fullscreen {
@@ -171,8 +201,17 @@
 :fullscreen #chartHost, :fullscreen #chartRoot { height:auto !important; min-height:0 !important; flex-shrink:0; }
 
 /* 图表容器：左右/上下布局（左=主图+频谱，右=rail） */
-.fc-chart-container.chart-flex { display: flex; align-items: stretch; gap: 12px; }
-.fc-chart-container.chart-flex:not(.is-narrow) .chart-stack { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; }
+.fc-chart-container.chart-flex { display: flex; align-items: stretch; overflow: hidden;}
+.fc-chart-container.chart-flex:not(.is-narrow) .chart-stack {
+  flex: 1 1 auto; 
+  min-width: 0; 
+  display: flex; 
+  flex-direction: column;
+}
+/* “停靠”状态：去掉右侧预留，平滑扩展占满 */
+.fc-chart-container.chart-flex:not(.is-narrow).rail-parked .chart-stack {
+  padding-right: 0;
+}
 .fc-chart-container.chart-flex .chart-stack > * { flex: 0 0 auto; min-height: 0; }
 
 /* rail 外观与布局（提升层级，避免被覆盖导致按钮无响应） */
@@ -183,13 +222,42 @@
 .fc-chart-container.chart-flex.is-narrow #legendRail .legend-scroll {
   margin-top: 0;
 }
-
+.fc-chart-container.chart-flex #legendRail .legend-scroll{
+  margin-left: 16px; 
+}
+/* 窄屏：给 legendRail 底部预留空间，避免与底部的频谱切换按钮（.spectrum-dock）重叠 */
+.fc-chart-container.chart-flex.is-narrow #legendRail {
+  margin-bottom: 16px; 
+}
 #legendRail {
+  /* 独立于全局的 rail 过渡时长 */
+  --rail-transition: .25s;
   position: relative;
-  z-index: 300;
+  z-index: auto;          
   flex: 0 0 auto; width: 240px; max-width: min(42vw, 360px); min-width: 160px;
-  box-sizing: border-box; border: none; border-radius: 0; background: transparent; box-shadow: none; padding: 0;
+  box-sizing: border-box; background: transparent; padding: 0;
   display: flex; flex-direction: column; overflow: hidden;
+  transition:
+    transform var(--rail-transition) cubic-bezier(.22,.61,.36,1),
+    margin-right var(--rail-transition) cubic-bezier(.22,.61,.36,1);
+  will-change: transform, margin-right;
+}
+/* 全屏下明确复用 rail 自己的过渡变量，避免被 :fullscreen 环境的全局变量拖慢 */
+:fullscreen #legendRail {
+  transition:
+    transform var(--rail-transition, .25s) cubic-bezier(.22,.61,.36,1),
+    margin-right var(--rail-transition, .25s) cubic-bezier(.22,.61,.36,1);
+}
+.fc-chart-container.chart-flex:not(.is-narrow).rail-parked #legendRail {
+  transform: translate3d(calc(var(--legend-rail-w, 240px) + var(--rail-slide-overshoot, 16px)), 0, 0);
+  margin-right: calc(-1 * var(--legend-rail-w, 240px));
+  pointer-events: none;
+}
+
+/* 补充：确保占位区域铺满（一般不需要，但作为保险） */
+.fc-chart-container.chart-flex.rail-parked .chart-stack {
+  flex: 1 1 auto;
+  width: 100%;
 }
 #legendRail .legend-scroll { flex: 1 1 auto; overflow: auto; margin-bottom: 8px; }
 #legendRail .rail-actions { flex: 0 0 auto; display: flex; gap: 6px; justify-content: flex-end; }
@@ -292,3 +360,117 @@
   white-space: nowrap;
 }
 @keyframes spectrum-spin { to { transform: rotate(360deg); } }
+
+/* 频谱切换按钮：本体不再直接设置背景渐变，改用 ::after 绘制更宽的背景带 */
+.spectrum-dock{
+  position: absolute;
+  z-index: 240;
+  left: 50%;
+  bottom: 0;
+  transform: translateX(-50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  background: transparent;               /* 移除原先的背景渐变 */
+  border: none;
+  box-shadow: none;
+  color: var(--text-primary);
+  font-size: 14px;
+  font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+  visibility: hidden;                    /* 仍由 JS 控制显示 */
+  user-select: none;
+  cursor: pointer;
+
+  /* 定义统一宽度变量：与装饰条一致，都是容器宽度的 150%，同时可加上上限以防过宽 */
+  --dock-band-w: min(150%, 480px);
+}
+
+/* 箭头方向：非全屏展开时向上；全屏时反向（开合方向相反） */
+.spectrum-dock .chev{
+  width: 18px; height: 18px;
+  transition: transform .2s ease;
+}
+.spectrum-dock.is-open .chev{ transform: rotate(180deg); }
+:fullscreen .spectrum-dock .chev{ transform: rotate(180deg); }
+:fullscreen .spectrum-dock.is-open .chev{ transform: rotate(0deg); }
+.spectrum-dock .label{ white-space: nowrap; }
+
+/* 顶部装饰条：改用与背景带相同的宽度变量，保持两者视觉一致 */
+.spectrum-dock::before{
+  content: "";
+  position: absolute;
+  top: -2px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: var(--dock-band-w);
+  height: 2px;
+  border-radius: 2px;
+  pointer-events: none;
+  background: linear-gradient(to right, rgba(0,0,0,0), var(--border-color), rgba(0,0,0,0));
+}
+
+/* 新增：更宽的渐隐背景带（放在按钮内容后面，宽度=容器宽度的 150%） */
+.spectrum-dock::after{
+  content: "";
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  /* 让背景带高度略高于按钮，提高容错，或改为 top/bottom 都贴齐按钮即可 */
+  top: -2px;
+  bottom: 0;
+  width: var(--dock-band-w);
+  border-radius: 10px;
+  pointer-events: none;
+  z-index: -1;  /* 位于按钮内容下方，但仍在按钮这个层级内 */
+
+  /* 颜色按需用 --bg-secondary；两端渐隐到透明 */
+  background: linear-gradient(
+    to right,
+    rgba(0,0,0,0) 0%,
+    var(--bg-secondary) 20%,
+    var(--bg-secondary) 80%,
+    rgba(0,0,0,0) 100%
+  );
+}
+
+/* 拟合气泡底部工具区（右下角“关闭”） */
+  .fit-bubble .foot{
+  position: sticky;
+  bottom: 0;
+  background: var(--bg-bubble);
+  padding-top: 0;
+  margin-top: 0;
+  display: flex;
+  align-items: center;           /* 垂直居中 */
+  justify-content: space-between;/* 左=hint，右=按钮 */
+  gap: 8px;
+  box-shadow: 0 -4px 10px rgba(0,0,0,0.03);
+}
+.fit-bubble .foot .hint{
+  color: var(--text-);
+  font-size: 11px;
+  margin: 0;
+  line-height: 1.2;
+}
+
+/* “关闭”按钮样式，和右侧拟合按钮视觉一致的小号按钮 */
+.fit-bubble .btn-close{
+  appearance: none;
+  border: 1px solid var(--border-color);
+  background: var(--bg-bubble);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  user-select: none;
+  box-shadow: var(--shadow);
+  transition: transform .02s ease-in-out, background-color .15s ease, color .15s ease;
+}
+.fit-bubble .btn-close:active{
+  transform: translateY(1px);
+}
