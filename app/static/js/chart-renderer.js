@@ -15,32 +15,26 @@
   let spectrumRoot = null;
   let spectrumInner = null;
   let spectrumChart = null;
-  let spectrumClip = null;
   let spectrumEnabled = false;
   let lastSpectrumOption = null;
   const spectrumModelCache = new Map();
   const SPECTRUM_X_MIN = 20;
   const SPECTRUM_X_MAX = 20000;
   let __spectrumRaf = null;
-  let __specLegendSyncing = false;
   let __skipSpectrumOnce = false;
   let __suppressSpectrumUntil = 0;
 
   let __legendRailEl = null;
   let __legendScrollEl = null;
   let __legendActionsEl = null;
-  let spectrumLoadingEl = null;
   let __specPending = false;
   let __specFetchInFlight = false;
   let __lastFetchKeyHash = '';
 
-  const NF_MAIN_H_PX = 500;  // 非全屏：主图固定高度
-  const NF_SPEC_H_PX = 500;  // 非全屏：频谱固定高度
   const NARROW_BREAKPOINT = 1024;   // 窄屏阈值（可按需调整）
   const NARROW_HYSTERESIS = 48;     // 迟滞窗口（像素），用于防抖
   const LEGEND_OFFSET = 50;     // Legend 顶部下移像素
 
-  let __specToggleCooldownUntil = 0;
   let __mainHLocked = false;
   
   let spectrumDockEl = null;
@@ -64,15 +58,10 @@ function ensureSpectrumDock() {
 
   btn.addEventListener('click', (e) => {
     e.preventDefault();
-    const now = performance.now();
-    if (now < __dockCooldownUntil) return;
-    __dockCooldownUntil = now + 250;
-
+    // 直接切换，不做冷却节流
     spectrumEnabled = !spectrumEnabled;
     syncSpectrumDockUi();
     toggleSpectrumUI(spectrumEnabled);
-
-    setTimeout(() => { __dockCooldownUntil = 0; }, 250);
   });
 
   const shell =
@@ -93,13 +82,10 @@ function syncSpectrumDockUi() {
   spectrumDockEl.classList.toggle('is-open', open);
   const label = spectrumDockEl.querySelector('.label');
   if (label) label.textContent = open ? '收起频谱' : '展开频谱';
-
-  // 统一行为：全屏与非全屏都显示 dock 按钮
   spectrumDockEl.style.visibility = 'visible';
 }
 
 function placeSpectrumDock() {
-  // 统一行为：全屏与非全屏都放置到容器内
   const el = ensureSpectrumDock();
   const shell =
     document.getElementById('chart-settings') ||
@@ -107,7 +93,6 @@ function placeSpectrumDock() {
     null;
 
   if (!el || !shell) { if (el) el.style.visibility = 'hidden'; return; }
-
   if (el.parentElement !== shell) {
     try { shell.appendChild(el); } catch(_) {}
   }
@@ -184,7 +169,7 @@ function updateLegendRailLayout(){
     __legendRailEl.style.setProperty('--legend-top-gap', `${topGap}px`);
   } catch(_){}
 
-  // 窄屏且非全屏：直接 100%
+  // 窄屏且非全屏直接 100%
   if (narrow && !isFs) {
     const prev = __legendRailEl.getAttribute('data-last-width');
     if (prev !== '0') {
@@ -195,136 +180,24 @@ function updateLegendRailLayout(){
     return;
   }
 
-  // 统一容器参考宽度
   const hostW = Math.max(0, Math.round(shell.getBoundingClientRect().width || 0));
   const baseW = (hostW < 200)
     ? Math.max(window.innerWidth || 0, document.documentElement.clientWidth || 0)
     : hostW;
 
-  let applied = null;
+  const sList = Array.isArray(lastPayload?.chartData?.series) ? lastPayload.chartData.series : [];
+  const themeName = (lastPayload && lastPayload.theme) || (document.documentElement.getAttribute('data-theme') || 'light');
+  const t = tokens(themeName);
+  const fitOn = !!showFitCurves && !!sList.length && integrated;
 
-  if (integrated) {
-    const themeName = (lastPayload && lastPayload.theme) || (document.documentElement.getAttribute('data-theme') || 'light');
-    const t = tokens(themeName);
-    const sList = Array.isArray(lastPayload?.chartData?.series) ? lastPayload.chartData.series : [];
-    const fitOn = !!showFitCurves && !!sList.length;
+  const applied = computeLegendRailWidth({ sList, integrated, fitOn, t, baseW });
 
-    // 仅测一次名称最大宽（两行取最大）
-    const ctx = document.createElement('canvas').getContext('2d');
-    const l1Font = `800 13px ${t.fontFamily}`;
-    const l2Font = `500 11px ${t.fontFamily}`;
-    let maxNamePx = 100;
-    if (sList.length) {
-      let mx = 0;
-      sList.forEach(s => {
-        const brand = s.brand || s.brand_name_zh || s.brand_name || '';
-        const model = s.model || s.model_name || '';
-        const cond  = s.condition_name_zh || s.condition || '';
-        const line1 = (brand || model) ? `${brand} ${model}` : (s.name || '');
-        ctx.font = l1Font;
-        const w1 = ctx.measureText(line1).width || 0;
-        let w2 = 0;
-        if (cond) { ctx.font = l2Font; w2 = ctx.measureText(cond).width || 0; }
-        mx = Math.max(mx, w1, w2);
-      });
-      if (Number.isFinite(mx) && mx > 0) maxNamePx = mx;
-    }
-
-    // 公共常量（保持算法不变）
-    const wrapperPadX = 4 + 8;
-    const rowPadX     = 4 + 4;
-    const dotW        = 12;
-    const gapDotName  = 8;
-    const safety      = 4;
-
-    if (!fitOn) {
-      // 非拟合（保持原公式）
-      const structural = dotW + gapDotName + wrapperPadX + rowPadX + safety;
-      const MIN_NAME = 100;
-      const minRail  = structural + MIN_NAME;
-      let idealTotal = structural + maxNamePx;
-
-      applied = Math.round(Math.max(minRail, idealTotal));
-      const maxW = 460;
-      if (applied > maxW) applied = maxW;
-      if (applied > baseW - 24) applied = Math.max(minRail, baseW - 24);
-    } else {
-      // 拟合（保持原公式：ch→px、一致 gap、固定列等）
-      ctx.font = `500 11px ${t.fontFamily}`;
-      const chW   = ctx.measureText('0').width || 7;
-      const valPx = 7 * chW;
-      const pctPx = 7 * chW;
-      const crossPx = 8 * chW;
-      const sepW = 8;
-
-      // 实际 column-gap（默认 4）
-      let colGap = 4;
-      try {
-        const testRow = __legendScrollEl?.querySelector('.legend-fit-grid.is-fit-on .legend-row');
-        if (testRow) {
-          const cs = getComputedStyle(testRow);
-          colGap = parseFloat(cs.columnGap || cs.gap || '4') || 4;
-        }
-      } catch(_){}
-      const gapsTotal = colGap * 6;
-
-      const fixedStructural =
-        dotW + gapDotName +
-        valPx + pctPx + sepW + crossPx +
-        gapsTotal +
-        wrapperPadX + rowPadX +
-        safety;
-
-      const MIN_NAME = 110;
-      const nameNeed = Math.max(MIN_NAME, maxNamePx);
-      applied = Math.round(fixedStructural + nameNeed);
-
-      const maxW = 560;
-      const minRail = fixedStructural + MIN_NAME;
-      if (applied < minRail) applied = minRail;
-      if (applied > maxW) applied = maxW;
-      if (applied > baseW - 24) applied = Math.min(maxW, Math.max(minRail, baseW - 24));
-    }
-
-    // 统一写 DOM（只写一次）
-    const lastW = __legendRailEl.getAttribute('data-last-width');
-    if (lastW !== String(applied)) {
-      __legendRailEl.style.width = `${applied}px`;
-      __legendRailEl.style.minWidth = '0px';
-      try { shell.style.setProperty('--legend-rail-w', `${applied}px`); } catch(_){}
-      __legendRailEl.setAttribute('data-last-width', String(applied));
-    }
-    return;
-  }
-
-  // 桌面模式：保持原逻辑（不动算法）
-  let textMax = 0;
-  try {
-    const t = tokens((lastPayload && lastPayload.theme) || (document.documentElement.getAttribute('data-theme') || 'light'));
-    const sList = Array.isArray(lastPayload?.chartData?.series) ? lastPayload.chartData.series : [];
-    const ctx = document.createElement('canvas').getContext('2d');
-    const l1Font = `600 13px ${t.fontFamily}`;
-    const l2Font = `500 11px ${t.fontFamily}`;
-    sList.forEach(s=>{
-      const brand = s.brand || s.brand_name_zh || s.brand_name || '';
-      const model = s.model || s.model_name || '';
-      const cond  = s.condition_name_zh || s.condition || '';
-      const line1 = (brand || model) ? `${brand} ${model}` : (s.name || '');
-      ctx.font = l1Font; const w1 = ctx.measureText(line1).width || 0;
-      let w2 = 0;
-      if (cond) { ctx.font = l2Font; w2 = ctx.measureText(cond).width || 0; }
-      textMax = Math.max(textMax, w1, w2);
-    });
-  } catch(_){}
-
-  const iconW = 12, gap = 8, pad = 12;
-  const need = Math.ceil(iconW + gap + textMax + pad);
-  const minW = 160, maxW = 320;
-  applied = Math.max(minW, Math.min(maxW, need));
-
-  const lastDesktop = __legendRailEl.getAttribute('data-last-width');
-  if (lastDesktop !== String(applied)) {
+  const lastW = __legendRailEl.getAttribute('data-last-width');
+  if (lastW !== String(applied)) {
     __legendRailEl.style.width = `${applied}px`;
+    if (integrated) {
+      __legendRailEl.style.minWidth = '0px';
+    }
     try { shell.style.setProperty('--legend-rail-w', `${applied}px`); } catch(_){}
     __legendRailEl.setAttribute('data-last-width', String(applied));
   }
@@ -373,7 +246,7 @@ function renderLegendRailItems(){
         <span class="col-cross" data-name="${it.name}">—</span>
       ` : '';
       return `
-        <div class="legend-row ${offClass}" data-name="${it.name}">
+        <div class="legend-row hoverable-row ${offClass}" data-name="${it.name}">
           <span class="dot" style="background:${it.color}"></span>
           <span class="name${hasL2 ? ' has-l2' : ''}" title="${base}${it.condition ? ' / ' + it.condition : ''}">
             ${nameSpan}${hasL2 ? `<span class="l2">${it.condition}</span>`:''}
@@ -392,16 +265,14 @@ function renderLegendRailItems(){
       </div>
     `;
 
-    __legendWidthSettled = false;  // 新渲染后，等待下一次 refresh 做一次性收敛
-
     __legendScrollEl.querySelectorAll('.legend-row').forEach(node => {
       const name = node.getAttribute('data-name') || '';
       node.addEventListener('click', () => {
         if (!name || !chart) return;
         const sel = getLegendSelectionMap();
-        const isCurrentlyVisible = sel ? (sel[name] !== false) : true;
-        const actionType = isCurrentlyVisible ? 'legendUnSelect' : 'legendSelect';
-        node.classList.toggle('is-off', isCurrentlyVisible);
+        const currentlyVisible = sel ? (sel[name] !== false) : true;
+        const actionType = currentlyVisible ? 'legendUnSelect' : 'legendSelect';
+        node.classList.toggle('is-off', currentlyVisible);
         try { chart.dispatchAction({ type: actionType, name }); } catch(_){}
         if (spectrumEnabled && spectrumChart) {
           try { spectrumChart.dispatchAction({ type: actionType, name }); } catch(_){}
@@ -433,24 +304,26 @@ function renderLegendRailItems(){
     return;
   }
 
-  // 非集成（桌面）原逻辑
+  // 非集成模式（桌面/窄屏），统一 legend-row
   __legendScrollEl.innerHTML = items.map(it => {
     const base = (it.brand || it.model) ? `${it.brand} ${it.model}` : it.name;
+    const offClass = it.selected ? '' : 'is-off';
     if (isNarrowNow) {
+      // condition 内联
+      const condInline = it.condition ? `<span class="cond-inline"> - ${it.condition}</span>` : '';
       return `
-        <div class="legend-item ${it.selected ? '' : 'is-off'}" data-name="${it.name}">
+        <div class="legend-row hoverable-row ${offClass}" data-name="${it.name}">
           <span class="dot" style="background:${it.color}"></span>
-          <span class="merged" style="flex:1 1 auto; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">
-            <span class="l1">${base}</span>
-            ${it.condition ? `<span class="sep"> - </span><span class="l2-inline">${it.condition}</span>` : ``}
+          <span class="name" title="${base}${it.condition ? ' / ' + it.condition : ''}">
+            <span class="l1">${base}</span>${condInline}
           </span>
         </div>
       `;
     } else {
       return `
-        <div class="legend-item ${it.selected ? '' : 'is-off'}" data-name="${it.name}">
+        <div class="legend-row hoverable-row ${offClass}" data-name="${it.name}">
           <span class="dot" style="background:${it.color}"></span>
-          <span style="flex:1 1 auto; display:flex; flex-direction:column; min-width:0;">
+          <span class="name has-l2" title="${base}${it.condition ? ' / ' + it.condition : ''}">
             <span class="l1">${base}</span>
             ${it.condition ? `<span class="l2">${it.condition}</span>` : ``}
           </span>
@@ -459,14 +332,14 @@ function renderLegendRailItems(){
     }
   }).join('');
 
-  __legendScrollEl.querySelectorAll('.legend-item').forEach(node => {
+  __legendScrollEl.querySelectorAll('.legend-row').forEach(node => {
     const name = node.getAttribute('data-name') || '';
     node.addEventListener('click', () => {
       if (!name || !chart) return;
       const sel = getLegendSelectionMap();
-      const isCurrentlyVisible = sel ? (sel[name] !== false) : true;
-      const actionType = isCurrentlyVisible ? 'legendUnSelect' : 'legendSelect';
-      node.classList.toggle('is-off', isCurrentlyVisible);
+      const currentlyVisible = sel ? (sel[name] !== false) : true;
+      const actionType = currentlyVisible ? 'legendUnSelect' : 'legendSelect';
+      node.classList.toggle('is-off', currentlyVisible);
       try { chart.dispatchAction({ type: actionType, name }); } catch(_){}
       if (spectrumEnabled && spectrumChart) {
         try { spectrumChart.dispatchAction({ type: actionType, name }); } catch(_){}
@@ -478,11 +351,10 @@ function renderLegendRailItems(){
   });
 }
 
-
 function syncLegendRailFromChart(){
   if (!__legendScrollEl) return;
   const sel = getLegendSelectionMap();
-  __legendScrollEl.querySelectorAll('.legend-item, .legend-row').forEach(node => {
+  __legendScrollEl.querySelectorAll('.legend-row').forEach(node => {
     const name = node.getAttribute('data-name');
     const selected = sel ? (sel[name] !== false) : true;
     node.classList.toggle('is-off', !selected);
@@ -499,14 +371,6 @@ function updateLegendRail(){
   if (btns && __legendActionsEl && btns.parentElement !== __legendActionsEl) {
     try { __legendActionsEl.appendChild(btns); } catch(_){}
   }
-}
-
-function getTargetSpectrumHeight(){
-  // 非全屏：参考主图高度
-  const mainH =
-    (root && root.getBoundingClientRect ? root.getBoundingClientRect().height : 0) ||
-    (chart && chart.getHeight && chart.getHeight()) || 600;
-  return Math.max(140, Math.round(mainH / 1.5));
 }
 
   function getCssTransitionMs(){
@@ -745,10 +609,10 @@ function bindChartListeners(){
 
   chart.on('dataZoom', () => {
     clampXQueryIntoVisibleRange();
-    repaintPointer();
-    if (showFitCurves) refreshFitBubble();
+    layoutScheduler.mark('pointer');           // repaintPointer()
+    if (showFitCurves) layoutScheduler.mark('fitUI'); // refreshFitBubble 由 repaintPointer 内部触发
 
-    if (__skipSpectrumOnce || performance.now() < __suppressSpectrumUntil) return;
+    if (__skipSpectrumOnce || suppress.active('spectrum')) return;
     if (spectrumEnabled && spectrumChart) scheduleSpectrumRebuild();
   });
 }
@@ -756,7 +620,7 @@ function bindChartListeners(){
 function onWindowResize(){
   if (!chart) return;
 
-  __suppressSpectrumUntil = Math.max(__suppressSpectrumUntil, performance.now() + 500);
+  suppress.run('spectrum', 500);
 
   updateFullscreenHeights();
   const nowNarrow = layoutIsNarrow();
@@ -773,17 +637,12 @@ function onWindowResize(){
     if (lastOption) {
       const { x, y, visible } = computePrefixCenter(lastOption);
       placeAxisOverlayAt(x, y, visible && !lastOption.__empty);
-      placeFitUI();
-      repaintPointer();
     }
+    layoutScheduler.mark('fitUI','pointer');
   }
 
-  updateSpectrumLayout();
-  updateLegendRailLayout();
+  layoutScheduler.mark('spectrum','legend','railPark','dock','axisSwitch');
   __refreshFsSpecMaxHeightIfExpanded();
-  updateRailParkedState();
-  // 关键：外置按钮随窗口变化重放置
-  placeSpectrumDock();
 }
 
   let __chartRO = null;
@@ -793,7 +652,7 @@ function installChartResizeObserver(){
     for (const entry of entries) {
       const cr = entry.contentRect || {};
       if (chart && cr.width > 0 && cr.height > 0) {
-        __suppressSpectrumUntil = Math.max(__suppressSpectrumUntil, performance.now() + 500);
+        suppress.run('spectrum', 500);
 
         primeRootRect();
         maybeStartRootPosWatch(900);
@@ -802,15 +661,8 @@ function installChartResizeObserver(){
         if (lastIsNarrow === null) lastIsNarrow = nowNarrow;
         if (nowNarrow !== lastIsNarrow) {
           lastIsNarrow = nowNarrow;
-          try {
-            if (lastPayload) { render(lastPayload); }
-            else { chart.resize(); }
-          } catch(_){}
-          updateSpectrumLayout();
-          updateLegendRailLayout();
-          updateRailParkedState();
-          // 外置按钮
-          placeSpectrumDock();
+          try { if (lastPayload) { render(lastPayload); } else { chart.resize(); } } catch(_){}
+          layoutScheduler.mark('spectrum','legend','railPark','dock');
           continue;
         }
 
@@ -822,15 +674,9 @@ function installChartResizeObserver(){
             const { x, y, visible } = computePrefixCenter(lastOption);
             placeAxisOverlayAt(x, y, visible && !lastOption.__empty);
           }
-          placeFitUI();
-          repaintPointer();
-          updateAxisSwitchPosition({ force: true, animate: false });
-        } catch(_){}
-        updateSpectrumLayout();
-        updateLegendRailLayout();
+        } catch(_) {}
 
-        // 外置按钮
-        placeSpectrumDock();
+        layoutScheduler.mark('fitUI','pointer','axisSwitch','spectrum','legend','dock');
       }
     }
   });
@@ -1075,31 +921,27 @@ function render(payload){
     document.documentElement.setAttribute('data-theme', t);
   }
 
-  function tokens(theme) {
-    const dark = (theme||'').toLowerCase()==='dark';
-    return {
-      fontFamily:'system-ui,-apple-system,"Segoe UI","Helvetica Neue","Microsoft YaHei",Arial,sans-serif',
-      axisLabel: dark ? '#d1d5db' : '#4b5563',
-      axisName:  dark ? '#9ca3af' : '#6b7280',
-      axisLine:  dark ? '#374151' : '#e5e7eb',
-      gridLine:  dark ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.08)',
-      tooltipBg: dark ? 'var(--bg-bubble)' : 'rgba(255,255,255,0.98)',
-      tooltipBorder: dark ? '#374151' : '#e5e7eb',
-      tooltipText: dark ? '#f3f4f6' : '#1f2937',
-      tooltipShadow: dark ? '0 6px 20px rgba(0,0,0,0.35)' : '0 6px 20px rgba(0,0,0,0.12)',
-      pagerIcon: dark ? '#93c5fd' : '#2563eb'
-    };
-  }
+function tokens(theme) {
+  const dark = (String(theme||'').toLowerCase() === 'dark');
+  // 颜色仍用原逻辑；阴影与背板由 CSS 变量控制
+  return {
+    fontFamily:'system-ui,-apple-system,"Segoe UI","Helvetica Neue","Microsoft YaHei",Arial,sans-serif',
+    axisLabel: dark ? '#d1d5db' : '#4b5563',
+    axisName:  dark ? '#9ca3af' : '#6b7280',
+    axisLine:  dark ? '#374151' : '#e5e7eb',
+    gridLine:  dark ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.08)',
+    tooltipBg: 'var(--tooltip-bg, var(--bg-bubble))',
+    tooltipBorder: dark ? '#374151' : '#e5e7eb',
+    tooltipText: dark ? '#f3f4f6' : '#1f2937',
+    tooltipShadow: 'var(--shadow-lg)',
+    pagerIcon: dark ? '#93c5fd' : '#2563eb'
+  };
+}
 
-  function measureText(text, size, weight, family){
-    const ctx = __textMeasureCtx;
-    ctx.font = `${String(weight||400)} ${Number(size||14)}px ${family||'sans-serif'}`;
-    const m = ctx.measureText(text || '');
-    const width = m.width || 0;
-    const ascent = (typeof m.actualBoundingBoxAscent === 'number') ? m.actualBoundingBoxAscent : size * 0.8;
-    const descent = (typeof m.actualBoundingBoxDescent === 'number') ? m.actualBoundingBoxDescent : size * 0.2;
-    return { width, height: ascent + descent };
-  }
+function measureText(text, size, weight, family){
+  const font = `${String(weight||400)} ${Number(size||14)}px ${family||'sans-serif'}`;
+  return TextMeasurer.measure(font, text || '');
+}
 
   const TITLE_GLUE = '  -  ';
   function computePrefixCenter(option){
@@ -1287,7 +1129,6 @@ function buildOption(payload) {
   let xMaxForAxis = Math.ceil(rawMax);
   if (!(xMaxForAxis > xMinForAxis)) xMaxForAxis = xMinForAxis + 1;
 
-  // 自定义导出
   const exportAllFeature = {
     show: true,
     title: '导出为图片',
@@ -1295,8 +1136,7 @@ function buildOption(payload) {
     onclick: () => { try { exportCombinedImage(); } catch(e){ console.warn('导出失败', e); } }
   };
 
-  // 新增：拟合开关集成到 toolbox（移动端/窄屏也可用）
-  const fitIcon = 'path://M2 18 L8 12 L12 16 L22 6 L22 9 L12 19 L8 15 L2 21 Z'; // 简易折线/趋势图形
+  const fitIcon = 'path://M2 18 L8 12 L12 16 L22 6 L22 9 L12 19 L8 15 L2 21 Z';
   const myFitToggle = {
     show: true,
     title: showFitCurves ? '关闭拟合' : '实时拟合',
@@ -1308,13 +1148,12 @@ function buildOption(payload) {
       placeFitUI();
       repaintPointer();
       refreshFitBubble();
-      updateLegendRailLayout();    // 关键：移动端全屏切换拟合时立刻重排 legend 宽度
+      updateLegendRailLayout();
       updateRailParkedState();
       try { chart && chart.resize(); } catch(_) {}
     }
   };
 
-  // 全屏按钮
   const fsEnterIcon = 'path://M4 4h6v2H6v4H4V4Zm10 0h6v6h-2V6h-4V4Zm6 10v6h-6v-2h4v-4h2ZM4 14h2v4h4v2H4v-6z';
   const fsExitIcon  = 'path://M6 6h4v2H8v2H6V6Zm10 0h2v4h-2V8h-2V6h2Zm2 10v2h-4v-2h2v-2h2v2ZM6 16h2v2h4v2H6v-4z';
   const myFullscreen = {
@@ -1326,7 +1165,7 @@ function buildOption(payload) {
 
   const toolboxFeatures = isNarrow ? {
     restore: {},
-    myFitToggle,                // 窄屏也可直接切换拟合
+    myFitToggle,
     myExportAll: exportAllFeature,
     myFullscreen
   } : {
@@ -1371,16 +1210,12 @@ function buildOption(payload) {
     },
 
     tooltip: {
-      appendToBody: !isFs,
+      ...buildTooltipBase(t, { appendToBody: !isFs }),
       confine: false,
       trigger: 'item',
       triggerOn: 'mousemove|click|touchstart|touchmove',
       axisPointer: { type: 'cross', label: { color: t.tooltipText } },
-      backgroundColor: t.tooltipBg,
-      borderColor: t.tooltipBorder,
-      borderWidth: 1,
       borderRadius: 12,
-      textStyle: { color: t.tooltipText },
       position: function (pos, _params, dom) {
         const x = Array.isArray(pos) ? pos[0] : 0;
         const y = Array.isArray(pos) ? pos[1] : 0;
@@ -1400,13 +1235,6 @@ function buildOption(payload) {
 
         return [Math.round(left), Math.round(top)];
       },
-      extraCssText: `
-        position: fixed;
-        backdrop-filter: blur(4px) saturate(120%);
-        -webkit-backdrop-filter: blur(4px) saturate(120%);
-        box-shadow: ${t.tooltipShadow};
-        z-index: 1000000;
-      `,
       formatter: function(p){
         const xModeNow = currentXModeFromPayload(lastPayload);
         const xLabel = xModeNow==='rpm' ? 'RPM, ' : 'dB, ';
@@ -1418,7 +1246,7 @@ function buildOption(payload) {
       }
     },
 
-    toolbox:{ top: 0, right: 0, feature:toolboxFeatures },
+    toolbox:{ top: 0, right: 10, feature:toolboxFeatures },
 
     dataZoom: [
       { type: 'inside', xAxisIndex: 0, throttle: 50, zoomOnMouseWheel: true, moveOnMouseWheel: true, moveOnMouseMove: true ,filterMode: "none", startValue: xMinForAxis, endValue: xMaxForAxis*0.85 },
@@ -1461,133 +1289,136 @@ function buildOption(payload) {
     return overlay;
   }
 
-  function updateAxisSwitchPosition(opts = {}) {
-    const { force = false, animate = false } = opts;
-    // 修改点：去掉“force 例外”，在保护窗口内一律跳过，避免 render() 的刷新把动画干掉
-    if (performance.now() < axisSnapSuppressUntil) return;
+function updateAxisSwitchPosition(opts = {}) {
+  const { animate = false } = opts;
 
-    const track  = getById('xAxisSwitchTrack');
-    const slider = getById('xAxisSwitchSlider');
-    if (!track || !slider) return;
+  const track  = getById('xAxisSwitchTrack');
+  const slider = getById('xAxisSwitchSlider');
+  if (!track || !slider) return;
 
-    const sliderWidth = slider.offsetWidth || 0;
-    const trackWidth  = track.offsetWidth || 0;
-    const maxX = Math.max(0, trackWidth - sliderWidth);
+  const sliderWidth = slider.offsetWidth || 0;
+  const trackWidth  = track.offsetWidth || 0;
+  const maxX = Math.max(0, trackWidth - sliderWidth);
 
-    const currType = currentXModeFromPayload(lastPayload);
-    const toNoise  = (currType === 'noise_db');
+  const currType = currentXModeFromPayload(lastPayload);
+  const toNoise  = (currType === 'noise_db');
 
-    slider.style.transition = animate ? 'transform .25s ease' : slider.style.transition || ''; // 不强行抹掉已存在的过渡
-    slider.style.transform  = `translateX(${toNoise ? maxX : 0}px)`;
-    track.setAttribute('aria-checked', String(toNoise));
+  // 只有需要动画时才覆盖 transition，避免把之前设置的过渡清掉
+  if (animate) {
+    slider.style.transition = 'transform .25s ease';
+  }
+  slider.style.transform  = `translateX(${toNoise ? maxX : 0}px)`;
+  track.setAttribute('aria-checked', String(toNoise));
+}
+
+function bindXAxisSwitch(){
+  const xAxisSwitchTrack = getById('xAxisSwitchTrack');
+  const xAxisSwitchSlider = getById('xAxisSwitchSlider');
+  if (!xAxisSwitchTrack || !xAxisSwitchSlider) return;
+
+  let sliderWidth = 0, trackWidth = 0, maxX = 0;
+  let dragging = false, dragMoved = false, startX = 0, base = 0, activePointerId = null;
+
+  try {
+    xAxisSwitchTrack.setAttribute('role', 'switch');
+    xAxisSwitchTrack.setAttribute('aria-checked', String((currentXModeFromPayload(lastPayload) || 'rpm') !== 'rpm'));
+  } catch(_) {}
+
+  function measure() {
+    sliderWidth = xAxisSwitchSlider.offsetWidth || 0;
+    trackWidth  = xAxisSwitchTrack.offsetWidth || 0;
+    maxX = Math.max(0, trackWidth - sliderWidth);
   }
 
-  function bindXAxisSwitch(){
-    const xAxisSwitchTrack = getById('xAxisSwitchTrack');
-    const xAxisSwitchSlider = getById('xAxisSwitchSlider');
-    if (!xAxisSwitchTrack || !xAxisSwitchSlider) return;
+  function pos(type, animate = true) {
+    const toNoise = (type === 'noise_db' || type === 'noise');
+    const x = toNoise ? maxX : 0;
+    // 统一 0.25s ease
+    xAxisSwitchSlider.style.transition = animate ? 'transform .25s ease' : xAxisSwitchSlider.style.transition || '';
+    xAxisSwitchSlider.style.transform  = `translateX(${x}px)`;
+    xAxisSwitchTrack.setAttribute('aria-checked', String(toNoise));
+  }
 
-    let sliderWidth = 0, trackWidth = 0, maxX = 0;
-    let dragging = false, dragMoved = false, startX = 0, base = 0, activePointerId = null;
+  function applyType(newType) {
+    const normalized = (newType === 'noise') ? 'noise_db' : newType;
+    if (normalized !== 'rpm' && normalized !== 'noise_db') return;
+    if (xAxisOverride === normalized) return;
+    xAxisOverride = normalized;
+    try { localStorage.setItem('x_axis_type', normalized); } catch(_){}
+    pos(normalized, true);
 
-    try {
-      xAxisSwitchTrack.setAttribute('role', 'switch');
-      xAxisSwitchTrack.setAttribute('aria-checked', String((currentXModeFromPayload(lastPayload) || 'rpm') !== 'rpm'));
-    } catch(_) {}
+    __skipSpectrumOnce = true;
+    if (lastPayload) render(lastPayload);
+    if (typeof onXAxisChange === 'function') { try { onXAxisChange(normalized); } catch(_) {} }
+  }
 
-    function measure() { sliderWidth = xAxisSwitchSlider.offsetWidth || 0; trackWidth  = xAxisSwitchTrack.offsetWidth || 0; maxX = Math.max(0, trackWidth - sliderWidth); }
-    function pos(type, animate = true) {
-      const toNoise = (type === 'noise_db' || type === 'noise');
-      const x = toNoise ? maxX : 0;
-      xAxisSwitchSlider.style.transition = animate ? 'transform .5s ease' : 'none';
-      xAxisSwitchSlider.style.transform  = `translateX(${x}px)`;
-      xAxisSwitchTrack.setAttribute('aria-checked', String(toNoise));
-    }
-    function protectSliderAnimationWindow() {
-      axisSnapSuppressUntil = performance.now() + 360;
-      clearTimeout(axisSnapSuppressTimer);
-      axisSnapSuppressTimer = setTimeout(() => { axisSnapSuppressUntil = 0; }, 400);
-    }
-    xAxisSwitchSlider.addEventListener('transitionend', () => { axisSnapSuppressUntil = 0; });
+  function nearestType() {
+    const m = new DOMMatrix(getComputedStyle(xAxisSwitchSlider).transform);
+    const cur = m.m41 || 0;
+    return cur > maxX / 2 ? 'noise_db' : 'rpm';
+  }
 
-    function applyType(newType) {
-      const normalized = (newType === 'noise') ? 'noise_db' : newType;
-      if (normalized !== 'rpm' && normalized !== 'noise_db') return;
-      if (xAxisOverride === normalized) return;
-      xAxisOverride = normalized;
-      try { localStorage.setItem('x_axis_type', normalized); } catch(_){}
-      pos(normalized, true);
-      protectSliderAnimationWindow();
-
-      __skipSpectrumOnce = true;
-      __suppressSpectrumUntil = performance.now() + 420;  // 抑制 ~420ms，覆盖 ECharts 异步 dataZoom
-      if (lastPayload) render(lastPayload);
-      if (typeof onXAxisChange === 'function') { try { onXAxisChange(normalized); } catch(_) {} }
-    }
-
-    function nearestType() {
-      const m = new DOMMatrix(getComputedStyle(xAxisSwitchSlider).transform);
-      const cur = m.m41 || 0;
-      return cur > maxX / 2 ? 'noise_db' : 'rpm';
-    }
-
-    function onPointerDown(e) {
-      if (e.button !== undefined && e.button !== 0) return;
-      measure();
-      dragging = true; dragMoved = false;
-      activePointerId = e.pointerId ?? null;
-      startX = e.clientX;
-      const m = new DOMMatrix(getComputedStyle(xAxisSwitchSlider).transform);
-      base = m.m41 || 0;
-      xAxisSwitchSlider.style.transition = 'none';
-      try { if (activePointerId != null) xAxisSwitchSlider.setPointerCapture(activePointerId); } catch(_){}
-      e.preventDefault?.();
-    }
-    function onPointerMove(e) {
-      if (!dragging) return;
-      const dx = e.clientX - startX;
-      if (!dragMoved && Math.abs(dx) > 2) dragMoved = true;
-      let x = base + dx;
-      x = Math.max(0, Math.min(x, maxX));
-      xAxisSwitchSlider.style.transform = `translateX(${x}px)`;
-    }
-    function finishDrag() {
-      if (!dragging) return;
-      dragging = false;
-      try { if (activePointerId != null) xAxisSwitchSlider.releasePointerCapture(activePointerId); } catch(_){}
-      activePointerId = null;
-      const newType = nearestType();
-      pos(newType, true);
-      applyType(newType);
-    }
-    function cancelDrag() {
-      if (!dragging) return;
-      dragging = false;
-      try { if (activePointerId != null) xAxisSwitchSlider.releasePointerCapture(activePointerId); } catch(_){}
-      activePointerId = null;
-      pos(currentXModeFromPayload(lastPayload), true);
-    }
-
-    xAxisSwitchTrack.addEventListener('click', (e) => {
-      e.preventDefault();     // 关键：阻止任何潜在默认行为（例如提交）
-      e.stopPropagation();    // 关键：不让点击冒泡到上层表单或容器
-      if (dragMoved) { dragMoved = false; return; }
-      const curr = currentXModeFromPayload(lastPayload);
-      const next = (curr === 'rpm') ? 'noise_db' : 'rpm';
-      pos(next, true);
-      applyType(next);
-    });
-
-    xAxisSwitchTrack.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('pointermove', onPointerMove, { passive: true });
-    window.addEventListener('pointerup', finishDrag, { passive: true });
-    window.addEventListener('pointercancel', cancelDrag);
-    window.addEventListener('blur', cancelDrag);
-
+  function onSliderPointerDown(e) {
+    if (e.button !== undefined && e.button !== 0) return;
     measure();
-    pos(currentXModeFromPayload(lastPayload), false);
-    window.addEventListener('resize', () => { const keep = currentXModeFromPayload(lastPayload); measure(); pos(keep, false); }, { passive:true });
+    dragging = true; dragMoved = false;
+    activePointerId = e.pointerId ?? null;
+    startX = e.clientX;
+    const m = new DOMMatrix(getComputedStyle(xAxisSwitchSlider).transform);
+    base = m.m41 || 0;
+    // 拖拽过程中取消过渡，避免跟随出现惯性
+    xAxisSwitchSlider.style.transition = 'none';
+    try { if (activePointerId != null) xAxisSwitchSlider.setPointerCapture(activePointerId); } catch(_){}
+    e.preventDefault?.();
   }
+  function onSliderPointerMove(e) {
+    if (!dragging) return;
+    const dx = e.clientX - startX;
+    if (!dragMoved && Math.abs(dx) > 2) dragMoved = true;
+    let x = base + dx;
+    x = Math.max(0, Math.min(x, maxX));
+    xAxisSwitchSlider.style.transform = `translateX(${x}px)`;
+  }
+  function onSliderPointerUp() {
+    if (!dragging) return;
+    dragging = false;
+    try { if (activePointerId != null) xAxisSwitchSlider.releasePointerCapture(activePointerId); } catch(_){}
+    activePointerId = null;
+    const newType = nearestType();
+    pos(newType, true);
+    applyType(newType);
+  }
+  function onSliderPointerCancel() {
+    if (!dragging) return;
+    dragging = false;
+    try { if (activePointerId != null) xAxisSwitchSlider.releasePointerCapture(activePointerId); } catch(_){}
+    activePointerId = null;
+    pos(currentXModeFromPayload(lastPayload), true);
+  }
+
+  xAxisSwitchTrack.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (dragMoved) { dragMoved = false; return; }
+    const curr = currentXModeFromPayload(lastPayload);
+    const next = (curr === 'rpm') ? 'noise_db' : 'rpm';
+    pos(next, true);
+    applyType(next);
+  });
+
+  xAxisSwitchTrack.addEventListener('pointerdown', onSliderPointerDown);
+  window.addEventListener('pointermove', onSliderPointerMove, { passive: true });
+  window.addEventListener('pointerup', onSliderPointerUp, { passive: true });
+  window.addEventListener('pointercancel', onSliderPointerCancel);
+  window.addEventListener('blur', onSliderPointerCancel);
+
+  measure();
+  pos(currentXModeFromPayload(lastPayload), false);
+  window.addEventListener('resize', () => {
+    const keep = currentXModeFromPayload(lastPayload);
+    measure(); pos(keep, false);
+  }, { passive:true });
+}
 
   function placeAxisOverlayAt(x, y, show){
     const overlay = ensureAxisOverlay();
@@ -1704,55 +1535,30 @@ function ensureFitUI(){
   let bubbleUserMoved = false;
   const bubblePos = { left: null, top: null };
 
-  function bindBubbleDrag(bubble){
-    if (!bubble) return;
+function bindBubbleDrag(bubble){
+  if (!bubble) return;
 
-    let activePointerId = null;
-    let startX = 0, startY = 0;
-    let baseLeftFixed = 0, baseTopFixed = 0;
-    let rStart = null;
-    let dragging = false;
-    const DRAG_THRESHOLD = 4;
-    const pad = 6;
+  const pad = 6;
 
-    function isInteractiveTarget(el){
-      return !!(el && (el.closest('input, textarea, select, button, [contenteditable=""], [contenteditable="true"]')));
-    }
-    function onPointerDown(e){
-      if (e.button !== undefined && e.button !== 0) return;
-      if (isInteractiveTarget(e.target)) return;
-
-      // 记录拖拽起点（以 viewport/fixed 坐标）
+  createDragController(bubble, {
+    axis: 'both',
+    threshold: 4,
+    onStart: (e) => {
+      // 忽略输入等交互控件
+      if (e.target && e.target.closest('input, textarea, select, button, [contenteditable]')) return false;
       const rect = bubble.getBoundingClientRect();
-      baseLeftFixed = rect.left;
-      baseTopFixed  = rect.top;
-      startX = e.clientX; startY = e.clientY;
-      rStart = root ? root.getBoundingClientRect() : { left:0, top:0 };
-
-      dragging = false;
-      activePointerId = e.pointerId ?? null;
-      try { if (activePointerId != null) bubble.setPointerCapture(activePointerId); } catch(_){}
-    }
-    function onPointerMove(e){
-      if (activePointerId != null && (e.pointerId ?? null) !== activePointerId) return;
-      if (activePointerId == null) return;
-
-      const dx = e.clientX - startX;
-      const dy = e.clientY - startY;
-
-      if (!dragging && Math.hypot(dx, dy) > DRAG_THRESHOLD){
-        dragging = true;
-        bubble.classList.add('dragging');
-      }
-      if (!dragging) return;
-
-      // 允许拖出图表区域：只对可视区做轻微钳制，避免完全丢失
+      bubble.__baseLeftFixed = rect.left;
+      bubble.__baseTopFixed  = rect.top;
+      bubble.__rootRectStart = root ? root.getBoundingClientRect() : { left:0, top:0 };
+      bubble.classList.add('dragging');
+    },
+    onMove: ({ dx, dy }) => {
+      const vw = window.innerWidth, vh = window.innerHeight;
       const bw = bubble.offsetWidth  || 0;
       const bh = bubble.offsetHeight || 0;
-      const vw = window.innerWidth, vh = window.innerHeight;
 
-      let newLeft = baseLeftFixed + dx;
-      let newTop  = baseTopFixed  + dy;
+      let newLeft = bubble.__baseLeftFixed + dx;
+      let newTop  = bubble.__baseTopFixed  + dy;
 
       newLeft = Math.min(Math.max(-bw + pad, newLeft), Math.max(pad, vw - pad));
       newTop  = Math.min(Math.max(-bh + pad, newTop ), Math.max(pad, vh - pad));
@@ -1762,24 +1568,16 @@ function ensureFitUI(){
       bubble.style.right  = 'auto';
       bubble.style.bottom = 'auto';
 
-      // 将 fixed 坐标换算为“相对图表”的偏移，后续滚动/缩放时据此还原
-      const rNow = rStart || (root ? root.getBoundingClientRect() : { left:0, top:0 });
+      const rNow = bubble.__rootRectStart || (root ? root.getBoundingClientRect() : { left:0, top:0 });
       bubblePos.left = newLeft - rNow.left;
       bubblePos.top  = newTop  - rNow.top;
       bubbleUserMoved = true;
+    },
+    onEnd: () => {
+      bubble.classList.remove('dragging');
     }
-    function endDrag(){
-      if (activePointerId == null) return;
-      try { bubble.releasePointerCapture(activePointerId); } catch(_){}
-      activePointerId = null; dragging = false; bubble.classList.remove('dragging');
-    }
-
-    bubble.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('pointermove', onPointerMove, { passive:true });
-    window.addEventListener('pointerup',   endDrag,       { passive:true  });
-    window.addEventListener('pointercancel', endDrag,     { passive:true  });
-    window.addEventListener('blur', endDrag);
-  }
+  });
+}
 
 function toggleFitUI(showFit){
   const btns = getById('fitButtons');
@@ -1791,7 +1589,6 @@ function toggleFitUI(showFit){
   if (btns) btns.style.visibility = empty ? 'hidden' : 'visible';
 
   if (integrated) {
-    __legendWidthSettled = false;                 // 重置
     if (bubble) bubble.style.visibility = 'hidden';
     if (ptr) ptr.style.visibility = (showFit && !empty) ? 'visible' : 'hidden';
     renderLegendRailItems();
@@ -1887,42 +1684,35 @@ function placeFitUI(){
   }
 }
 
+function bindPointerDrag(){
+  const handle = getById('fitPointerHandle');
+  if (!handle) return;
 
-  function bindPointerDrag(){
-    const handle = getById('fitPointerHandle');
-    if (!handle) return;
+  let baseX = 0;
 
-    let dragging=false, startX=0, baseX=0, activePointerId=null;
-
-    function measureGrid(){
-      if (!lastOption) return { left:40, right: (chart ? chart.getWidth() - 260 : 800), top: 60, height: 300 };
-      const grid = lastOption.grid || { left:40, right: 260, top: 60, bottom: 40 };
-      const chartW = chart ? chart.getWidth() : (root ? root.clientWidth : 800);
-      const chartH = chart ? chart.getHeight() : (root ? root.clientHeight : 600);
-      const left = (typeof grid.left==='number') ? grid.left : 40;
-      const rightGap = (typeof grid.right==='number') ? grid.right : 260;
-      const top = (typeof grid.top==='number') ? grid.top : 60;
-      const bottomGap = (typeof grid.bottom==='number') ? grid.bottom : 40;
-      const right = chartW - rightGap;
-      const height = chartH - top - bottomGap;
-      return { left, right, top, height };
-    }
-
-    function onDown(e){
-      if (e.button !== undefined && e.button !== 0) return;
-      dragging = true;
-      activePointerId = e.pointerId ?? null;
-      startX = e.clientX;
+  createDragController(handle, {
+    axis: 'x',
+    threshold: 2,
+    onStart: (e) => {
       const ptr = getById('fitPointer');
       baseX = parseFloat(ptr?.style.left || '0');
       handle.style.cursor = 'grabbing';
-      try { if (activePointerId != null) handle.setPointerCapture(activePointerId); } catch(_){}
-      e.preventDefault?.();
-    }
-    function onMove(e){
-      if (!dragging) return;
-      const grid = measureGrid();
-      const dx = e.clientX - startX;
+    },
+    onMove: ({ dx }) => {
+      const grid = (function measureGrid(){
+        if (!lastOption) return { left:40, right: (chart ? chart.getWidth() - 260 : 800), top: 60, height: 300 };
+        const grid = lastOption.grid || { left:40, right: 260, top: 60, bottom: 40 };
+        const chartW = chart ? chart.getWidth() : (root ? root.clientWidth : 800);
+        const chartH = chart ? chart.getHeight() : (root ? root.clientHeight : 600);
+        const left = (typeof grid.left==='number') ? grid.left : 40;
+        const rightGap = (typeof grid.right==='number') ? grid.right : 260;
+        const top = (typeof grid.top==='number') ? grid.top : 60;
+        const bottomGap = (typeof grid.bottom==='number') ? grid.bottom : 40;
+        const right = chartW - rightGap;
+        const height = chartH - top - bottomGap;
+        return { left, right, top, height };
+      })();
+
       let x = baseX + dx;
       x = Math.max(grid.left, Math.min(x, grid.right));
       const ptr = getById('fitPointer');
@@ -1934,31 +1724,14 @@ function placeFitUI(){
         xQueryByMode[mode] = clampXDomain(xVal);
         syncBubbleInput();
         if (showFitCurves) refreshFitBubble();
-        // 实时同步频谱
         if (spectrumEnabled && spectrumChart) scheduleSpectrumRebuild();
       }
-    }
-    function onUp(){
-      if (!dragging) return;
-      dragging=false;
+    },
+    onEnd: () => {
       handle.style.cursor = 'grab';
-      try { if (activePointerId != null) handle.releasePointerCapture(activePointerId); } catch(_){}
-      activePointerId=null;
     }
-    function onCancel(){
-      if (!dragging) return;
-      dragging=false;
-      handle.style.cursor = 'grab';
-      try { if (activePointerId != null) handle.releasePointerCapture(activePointerId); } catch(_){}
-      activePointerId=null;
-    }
-
-    handle.addEventListener('pointerdown', onDown);
-    window.addEventListener('pointermove', onMove, { passive:true });
-    window.addEventListener('pointerup', onUp, { passive:true });
-    window.addEventListener('pointercancel', onCancel);
-    window.addEventListener('blur', onCancel);
-  }
+  });
+}
 
   function scheduleSpectrumRebuild(){
     if (!spectrumEnabled || !spectrumChart) return;
@@ -2051,93 +1824,75 @@ function placeFitUI(){
 
 function refreshFitBubble() {
   const integrated = isIntegratedLegendMode();
-  if (integrated) {
-    if (!showFitCurves || !lastPayload || !chart || lastOption?.__empty) {
+  const sList = Array.isArray(lastPayload?.chartData?.series) ? lastPayload.chartData.series : [];
+  if (!showFitCurves || !lastPayload || !chart || (lastOption && lastOption.__empty)) {
+    if (integrated) {
       const gridWrap = __legendScrollEl?.querySelector('.legend-fit-grid');
       if (gridWrap) {
         gridWrap.classList.remove('is-fit-on');
         gridWrap.querySelectorAll('.col-val,.col-pct,.col-cross').forEach(el => { el.textContent = '—'; });
       }
-      return;
+    } else {
+      const bubble = getById('fitBubble');
+      if (bubble) bubble.style.visibility = 'hidden';
     }
+    return;
+  }
 
-    const mode = currentXModeFromPayload(lastPayload);
-    const x = xQueryByMode[mode];
-    if (x == null) return;
+  const mode = currentXModeFromPayload(lastPayload);
+  const x = xQueryByMode[mode];
+  if (x == null) return;
 
-    const sList = Array.isArray(lastPayload?.chartData?.series) ? lastPayload.chartData.series : [];
-    ensureFitModels(sList, mode);
+  const opt = chart.getOption() || {};
+  const selMap = (opt.legend && opt.legend[0] && opt.legend[0].selected) || {};
+  const items = computeFitRows(mode, x, sList, selMap);
 
-    const opt = chart.getOption() || {};
-    const selMap = (opt.legend && opt.legend[0] && opt.legend[0].selected) || {};
+  // 基准与排序
+  const visibleItems = items.filter(it => it.selected);
+  const withVal = visibleItems.filter(it => Number.isFinite(it.y)).sort((a,b)=>b.y - a.y);
+  const base = (withVal.length && withVal[0].y > 0) ? withVal[0].y : 0;
+  const pctVal = (v)=> (Number.isFinite(v) && base > 0) ? Math.round((v / base) * 100) : null;
+
+  // 集成模式：写入 legend 行
+  if (integrated) {
+    __legendScrollEl.style.setProperty('--fit-col-val-ch',   '7');
+    __legendScrollEl.style.setProperty('--fit-col-pct-ch',   '7');
+    __legendScrollEl.style.setProperty('--fit-col-cross-ch', '8');
+
     const rowsMap = {};
     __legendScrollEl.querySelectorAll('.legend-row[data-name]').forEach(r => {
       rowsMap[r.getAttribute('data-name')] = r;
     });
 
-    const items = [];
-    sList.forEach(s => {
-      const selected = (selMap[s.name] !== false);
-      const model = fitModelsCache[mode].get(s.name);
-      const crossModel = (s && s.pchip)
-        ? (mode === 'rpm' ? s.pchip?.rpm_to_noise_db : s.pchip?.noise_to_rpm)
-        : null;
-
-      let y = NaN, crossVal = NaN;
-      if (model && model.x0 != null && model.x1 != null) {
-        const dom0 = Math.min(model.x0, model.x1);
-        const dom1 = Math.max(model.x0, model.x1);
-        if (x >= dom0 && x <= dom1) y = evalPchipJS(model, x);
-      }
-      if (crossModel && crossModel.x0 != null && crossModel.x1 != null) {
-        const c0 = Math.min(crossModel.x0, crossModel.x1);
-        const c1 = Math.max(crossModel.x0, crossModel.x1);
-        if (x >= c0 && x <= c1) crossVal = evalPchipJS(crossModel, x);
-      }
-      items.push({ name: s.name, selected, y, cross: crossVal });
-    });
-
-    // 百分比基准
-    const visibleItems = items.filter(it => it.selected);
-    const withVal = visibleItems.filter(it => Number.isFinite(it.y)).sort((a,b)=>b.y - a.y);
-    const base = (withVal.length && withVal[0].y > 0) ? withVal[0].y : 0;
-    const pctVal = (v)=> (Number.isFinite(v) && base > 0) ? Math.round((v / base) * 100) : null;
-
-    // 固定列宽变量
-    __legendScrollEl.style.setProperty('--fit-col-val-ch',   '7');
-    __legendScrollEl.style.setProperty('--fit-col-pct-ch',   '7');
-    __legendScrollEl.style.setProperty('--fit-col-cross-ch', '8');
-
-    // 回填
     items.forEach(it => {
       const row = rowsMap[it.name];
       if (!row) return;
       const valEl = row.querySelector('.col-val');
       const pctEl = row.querySelector('.col-pct');
       const crossEl = row.querySelector('.col-cross');
-      if (!valEl || !pctEl || !crossEl) return;
-
-      if (Number.isFinite(it.y)) {
-        valEl.textContent = `${Math.round(it.y)} CFM`;
-        const pct = pctVal(it.y);
-        pctEl.textContent = (pct == null) ? '—' : `(${pct}%)`;
-      } else {
-        valEl.textContent = '—';
-        pctEl.textContent = '—';
+      if (valEl) {
+        if (Number.isFinite(it.y)) {
+          valEl.textContent = `${Math.round(it.y)} CFM`;
+          const pct = pctVal(it.y);
+          if (pctEl) pctEl.textContent = (pct == null) ? '—' : `(${pct}%)`;
+        } else {
+          valEl.textContent = '—';
+          if (pctEl) pctEl.textContent = '—';
+        }
       }
-
-      if (Number.isFinite(it.cross)) {
-        crossEl.textContent = (mode === 'noise_db')
-          ? `${String(Math.round(it.cross)).padStart(4,'0')} RPM`
-          : `${Number(it.cross).toFixed(1)} dB`;
-      } else {
-        crossEl.textContent = '—';
+      if (crossEl) {
+        if (Number.isFinite(it.cross)) {
+          crossEl.textContent = (mode === 'noise_db')
+            ? `${String(Math.round(it.cross)).padStart(4,'0')} RPM`
+            : `${Number(it.cross).toFixed(1)} dB`;
+        } else {
+          crossEl.textContent = '—';
+        }
       }
-
       row.classList.toggle('is-off', !it.selected);
     });
 
-    // 排序
+    // 排序（有值在前）
     try {
       const parent = __legendScrollEl.querySelector('.legend-fit-grid');
       if (parent) {
@@ -2150,13 +1905,10 @@ function refreshFitBubble() {
       }
     } catch(_) {}
 
-    // 输入与单位
     const unitSpan = getById('fitXUnitLegend');
     if (unitSpan) unitSpan.textContent = (mode === 'rpm') ? 'RPM' : 'dB';
     const inp = getById('fitXInputLegend');
-    if (inp && x != null) {
-      inp.value = (mode === 'noise_db') ? Number(x).toFixed(1) : String(Math.round(x));
-    }
+    if (inp && x != null) inp.value = (mode === 'noise_db') ? Number(x).toFixed(1) : String(Math.round(x));
 
     const gridWrap = __legendScrollEl.querySelector('.legend-fit-grid');
     if (gridWrap) gridWrap.classList.add('is-fit-on');
@@ -2165,64 +1917,18 @@ function refreshFitBubble() {
 
   // 浮动气泡（桌面）
   const bubble = getById('fitBubble');
-  if (!bubble || !showFitCurves || !lastPayload || !chart) return;
-  if (lastOption && lastOption.__empty) { bubble.style.visibility = 'hidden'; return; }
+  if (!bubble) return;
+
   const rowsEl = bubble.querySelector('#fitBubbleRows');
-  const mode = currentXModeFromPayload(lastPayload);
-  const x = xQueryByMode[mode];
-  if (x == null) return;
-
-  const sList = Array.isArray(lastPayload?.chartData?.series) ? lastPayload.chartData.series : [];
-  ensureFitModels(sList, mode);
-
-  const opt = chart.getOption() || {};
-  const selMap = (opt.legend && opt.legend[0] && opt.legend[0].selected) || {};
-
-  const items = [];
-  sList.forEach(s => {
-    const selected = (selMap[s.name] !== false);
-    const model = fitModelsCache[mode].get(s.name);
-    const crossModel = (s && s.pchip)
-      ? (mode === 'rpm' ? s.pchip?.rpm_to_noise_db : s.pchip?.noise_to_rpm)
-      : null;
-
-    let y = NaN;
-    if (model && model.x0 != null && model.x1 != null) {
-      const dom0 = Math.min(model.x0, model.x1);
-      const dom1 = Math.max(model.x0, model.x1);
-      if (x >= dom0 && x <= dom1) y = evalPchipJS(model, x);
-    }
-
-    let crossVal = NaN;
-    if (crossModel && crossModel.x0 != null && crossModel.x1 != null) {
-      const c0 = Math.min(crossModel.x0, crossModel.x1);
-      const c1 = Math.max(crossModel.x0, crossModel.x1);
-      if (x >= c0 && x <= c1) crossVal = evalPchipJS(crossModel, x);
-    }
-
-    items.push({
-      name: s.name,
-      color: s.color,
-      brand: s.brand || s.brand_name_zh || s.brand_name || '',
-      model: s.model || s.model_name || '',
-      condition: s.condition_name_zh || s.condition || '',
-      selected,
-      y,
-      cross: crossVal
-    });
-  });
-
-  const withVal = items.filter(it => Number.isFinite(it.y)).sort((a,b)=> b.y - a.y);
-  const noVal   = items.filter(it => !Number.isFinite(it.y));
-  const base = withVal.length ? withVal[0].y : 0;
-  const pctVal = (v)=> (Number.isFinite(v) && base > 0) ? Math.round(v / base * 100) : null;
-
-  // 固定列宽（不测量）
+  // 列宽固定（不测量）
   bubble.style.setProperty('--fit-col-val-ch', '7');
   bubble.style.setProperty('--fit-col-pct-ch', '7');
   bubble.style.setProperty('--fit-col-cross-ch', '8');
 
-  const ordered = [...withVal, ...noVal];
+  const withValAll = items.filter(it => Number.isFinite(it.y)).sort((a,b)=> b.y - a.y);
+  const noValAll   = items.filter(it => !Number.isFinite(it.y));
+  const ordered = [...withValAll, ...noValAll];
+
   rowsEl.innerHTML = ordered.map(it => {
     const hasY = Number.isFinite(it.y);
     const valText = hasY ? `${Math.round(it.y)} CFM` : '—';
@@ -2234,7 +1940,6 @@ function refreshFitBubble() {
         ? `${String(Math.round(it.cross)).padStart(4,'0')} RPM`
         : `${Number(it.cross).toFixed(1)} dB`;
     }
-
     const baseName = (it.brand || it.model) ? `${it.brand} ${it.model}`.trim() : it.name;
     const condInline = it.condition
       ? `<span class="sep"> - </span><span class="cond-inline" style="color:var(--text-);white-space:nowrap;">${it.condition}</span>`
@@ -2798,8 +2503,6 @@ function rpmMaxForSeries(s, model) {
   return 0;
 }
 
-  let __spectrumWasEmpty = true;
-
 function buildAndSetSpectrumOption() {
   if (!spectrumChart) return;
 
@@ -2823,7 +2526,6 @@ function buildAndSetSpectrumOption() {
     .sort()
     .join('|');
 
-  // 统计“可见系列中已就绪模型”的数量（用于决定是否重算 Y max）
   let modelReadyCount = 0;
   visibleSeries.forEach(s => {
     const k = `${Number(s.model_id)}_${Number(s.condition_id)}`;
@@ -2878,14 +2580,8 @@ function buildAndSetSpectrumOption() {
 
   const canvasBg = (lastOption && lastOption.backgroundColor) || getExportBg();
 
-  // 注意：等待期内如果没有任何可渲染数据，则不渲染空态，避免与 Loading 叠加
   if (!hasAnyData) {
-    if (__specPending) {
-      // 正在等待重建/加载：保持现有画面，不更新为空态
-      return;
-    }
-
-    // 非等待期：可以安全显示空态
+    if (__specPending) return; // 等待期内不更新为空态
     spectrumChart.setOption({
       backgroundColor: canvasBg,
       title: {
@@ -2899,7 +2595,7 @@ function buildAndSetSpectrumOption() {
       yAxis: { show: false, min: 0, max: Math.max(0, Number(lastSpectrumOption?.__yMaxFixed) || 60) },
       legend: { show: false, selected: selMapFromMain },
       series: []
-    }, { notMerge: false, replaceMerge: ['series','tooltip'] }); // 关键：合并 tooltip，保证模式切换后定位策略更新
+    }, { notMerge: false, replaceMerge: ['series','tooltip'] });
     spectrumChart.resize();
     return;
   }
@@ -2945,15 +2641,11 @@ function buildAndSetSpectrumOption() {
     },
 
     tooltip: {
-      appendToBody: !isFs,          // 非全屏：挂到 body；全屏：挂容器内，避免 Top Layer 遮挡
+      ...buildTooltipBase(t, { appendToBody: !isFs }),
       confine: false,
       trigger: 'axis',
       triggerOn: 'mousemove|click|touchstart|touchmove',
-      backgroundColor: t.tooltipBg,
-      borderColor: t.tooltipBorder,
-      borderWidth: 1,
       borderRadius: 10,
-      textStyle: { color: t.tooltipText },
       axisPointer: { type: 'line', snap: true, label: { formatter: (obj) => fmtHz(obj?.value) } },
       position: function (pos) {
         const x = Array.isArray(pos) ? pos[0] : 0;
@@ -2961,13 +2653,6 @@ function buildAndSetSpectrumOption() {
         const gap = 12;
         return [Math.round(x + gap), Math.round(y + gap)];
       },
-      extraCssText: `
-        position: ${isFs ? 'absolute' : 'fixed'};
-        backdrop-filter: blur(4px) saturate(120%);
-        -webkit-backdrop-filter: blur(4px) saturate(120%);
-        box-shadow: ${t.tooltipShadow};
-        z-index: 1000000;
-      `,
       formatter: function (params) {
         if (!Array.isArray(params) || !params.length) return '';
         const x = params[0]?.axisValue;
@@ -3009,7 +2694,7 @@ function buildAndSetSpectrumOption() {
       universalTransition: true,
       emphasis: { focus: 'series', blurScope: 'coordinateSystem' }
     }))
-  }, { notMerge: false, replaceMerge: ['series','tooltip'] }); // 关键：每次都同时刷新 tooltip 配置
+  }, { notMerge: false, replaceMerge: ['series','tooltip'] });
 
   spectrumChart.resize();
 }
@@ -3273,24 +2958,6 @@ function setSpectrumLoading(on, text) {
   el.classList.toggle('is-active', !!on);
 }
 
-// 锁定/解锁主图高度，避免非全屏动画期间抖动
-function lockMainChartHeight() {
-  if (!root) return;
-  const h = Math.round((root.getBoundingClientRect && root.getBoundingClientRect().height) || root.clientHeight || 0);
-  if (h > 0) {
-    root.style.height = h + 'px';
-    root.style.minHeight = h + 'px';
-    __mainHLocked = true;
-  }
-}
-function unlockMainChartHeight() {
-  if (!root || !__mainHLocked) return;
-  try { root.style.removeProperty('height'); } catch(_) {}
-  try { root.style.removeProperty('min-height'); } catch(_) {}
-  __mainHLocked = false;
-
-}
-
 function syncSpectrumStateAcrossModes({ animate = false } = {}) {
   ensureSpectrumHost();
   const shell =
@@ -3394,50 +3061,38 @@ function __buildLegendItemsForExport() {
   });
 }
 
-// 新增：测量导出用 Legend 的列宽与总高（CSS 像素）
 function __measureLegendForExport(items, t) {
-  const measureCtx = document.createElement('canvas').getContext('2d');
-  const padX = 10;            // 文本内边距
-  const dotW = 12;            // 圆点直径
-  const gapDotText = 8;       // 点到文字的水平间隔
+  const padX = 10;
+  const dotW = 12;
+  const gapDotText = 8;
   const minCol = 160, maxCol = 360;
-
   const line1Font = `600 13px ${t.fontFamily}`;
   const line2Font = `500 11px ${t.fontFamily}`;
-  const line1H = 22;          // 第一行行高
-  const line2H = 16;          // 第二行行高
-  const itemGap = 8;          // 条目之间的垂直间距
+  const line1H = 22;
+  const line2H = 16;
+  const itemGap = 8;
 
   let textMax = 0;
   let totalH = 0;
 
   items.forEach(it => {
-    measureCtx.font = line1Font;
-    const w1 = measureCtx.measureText(it.line1 || '').width || 0;
+    const w1 = measureText(it.line1 || '', 13, 600, t.fontFamily).width;
     let w2 = 0;
     if (it.line2) {
-      measureCtx.font = line2Font;
-      w2 = measureCtx.measureText(it.line2).width || 0;
+      w2 = measureText(it.line2, 11, 500, t.fontFamily).width;
     }
     textMax = Math.max(textMax, w1, w2);
-
     const itemH = it.line2 ? (line1H + line2H) : line1H;
     totalH += itemH + itemGap;
   });
 
-  if (items.length > 0) totalH -= itemGap; // 最后一项不加间距
+  if (items.length > 0) totalH -= itemGap;
 
   const colW = Math.min(maxCol, Math.max(minCol, Math.ceil(padX + dotW + gapDotText + textMax + padX)));
   return { colW, totalH, line1H, line2H, itemGap, dotW, gapDotText, padX, line1Font, line2Font };
 }
 
-// 新增：根据当前是否窄屏，返回非全屏时频谱应使用的固定高度
-function getNonFullscreenSpecHeight(){
-  const narrow = layoutIsNarrow();
-  return narrow ? Math.round(NF_SPEC_H_PX / 1.5) : NF_SPEC_H_PX; // 600 -> 400
-}
-
-// NEW: 将频谱背景与主图一致（仅更新 backgroundColor，不动其它配置）
+// 将频谱背景与主图一致（仅更新 backgroundColor，不动其它配置）
 function syncSpectrumBgWithMain(bgOverride){
   try {
     if (!spectrumEnabled || !spectrumChart) return;
@@ -3483,6 +3138,278 @@ function isIntegratedLegendMode() {
   if (narrow) return true;
   if (isFs && isMobile()) return true;
   return false;
+}
+
+const TextMeasurer = (() => {
+  const ctx = document.createElement('canvas').getContext('2d');
+  const cache = new Map(); // key = font + '||' + text
+  function measure(font, text) {
+    const key = font + '||' + (text || '');
+    if (cache.has(key)) return cache.get(key);
+    ctx.font = font;
+    const m = ctx.measureText(text || '');
+    const sizeMatch = /(\d+(?:\.\d+)?)px/.exec(font);
+    const fallbackSize = sizeMatch ? parseFloat(sizeMatch[1]) : 14;
+    const ascent = (typeof m.actualBoundingBoxAscent === 'number') ? m.actualBoundingBoxAscent : fallbackSize * 0.8;
+    const descent = (typeof m.actualBoundingBoxDescent === 'number') ? m.actualBoundingBoxDescent : fallbackSize * 0.2;
+    const info = { width: m.width || 0, height: ascent + descent };
+    cache.set(key, info);
+    return info;
+  }
+  return { measure };
+})();
+
+/* =========================
+ * (8) 布局刷新调度器 LayoutScheduler
+ * ========================= */
+const layoutScheduler = (() => {
+  let rafId = null;
+  const dirty = new Set();
+  function mark(...keys) {
+    keys.forEach(k => dirty.add(k));
+    if (!rafId) rafId = requestAnimationFrame(flush);
+  }
+  function flush() {
+    rafId = null;
+    try {
+      if (dirty.has('legend')) { updateLegendRailLayout(); renderLegendRailItems(); }
+      if (dirty.has('fitUI'))  { placeFitUI(); }
+      if (dirty.has('pointer')){ repaintPointer(); }
+      if (dirty.has('spectrum')){ updateSpectrumLayout(); }
+      if (dirty.has('axisSwitch')) { updateAxisSwitchPosition({ force:true, animate:false }); }
+      if (dirty.has('dock')) { placeSpectrumDock(); }
+      if (dirty.has('railPark')) { updateRailParkedState(); }
+    } catch(_) {}
+    dirty.clear();
+  }
+  return { mark, flush };
+})();
+
+/* =========================
+ * (11) 抑制管理器 SuppressionManager
+ * ========================= */
+const suppress = (() => {
+  const map = new Map();
+  function run(key, ms) { map.set(key, performance.now() + Math.max(0, ms|0)); }
+  function active(key) { return performance.now() < (map.get(key) || 0); }
+  function clear(key) { map.delete(key); }
+  return { run, active, clear };
+})();
+
+/* =========================
+ * (10) 通用拖拽控制器 DragController
+ * ========================= */
+function createDragController(element, opts) {
+  const {
+    axis = 'both',             // 'x' | 'y' | 'both'
+    threshold = 4,             // 像素阈值，超过才判定为拖拽
+    onStart,                   // (e) -> boolean|void，返回 false 可取消本次拖拽
+    onMove,                    // ({dx, dy, e})
+    onEnd                      // () -> void
+  } = opts || {};
+  if (!element) return;
+
+  let activePointerId = null;
+  let startX = 0, startY = 0;
+  let moved = false;
+
+  function onPointerDown(e) {
+    if (e.button !== undefined && e.button !== 0) return;
+    if (activePointerId != null) return;
+    startX = e.clientX; startY = e.clientY;
+    activePointerId = e.pointerId ?? null;
+    moved = false;
+    const ok = (typeof onStart === 'function') ? onStart(e) : true;
+    if (ok === false) { activePointerId = null; return; }
+    try { if (activePointerId != null) element.setPointerCapture(activePointerId); } catch(_) {}
+    e.preventDefault?.();
+  }
+
+  function onPointerMove(e) {
+    if (activePointerId != null && (e.pointerId ?? null) !== activePointerId) return;
+    if (activePointerId == null) return;
+    let dx = e.clientX - startX;
+    let dy = e.clientY - startY;
+    if (!moved && Math.hypot(dx, dy) >= threshold) moved = true;
+    if (!moved) return;
+    if (axis === 'x') dy = 0;
+    if (axis === 'y') dx = 0;
+    if (typeof onMove === 'function') onMove({ dx, dy, e });
+  }
+
+  function onPointerUpOrCancel() {
+    if (activePointerId == null) return;
+    try { element.releasePointerCapture(activePointerId); } catch(_) {}
+    activePointerId = null;
+    moved = false;
+    if (typeof onEnd === 'function') onEnd();
+  }
+
+  element.addEventListener('pointerdown', onPointerDown);
+  window.addEventListener('pointermove', onPointerMove, { passive:true });
+  window.addEventListener('pointerup', onPointerUpOrCancel, { passive:true });
+  window.addEventListener('pointercancel', onPointerUpOrCancel);
+  window.addEventListener('blur', onPointerUpOrCancel);
+}
+
+/* =========================
+ * (12) Base tooltip 生成器（主图与频谱共用）
+ * ========================= */
+function buildTooltipBase(t, { appendToBody }) {
+  return {
+    appendToBody: !!appendToBody,          // 关键：补回该字段
+    backgroundColor: t.tooltipBg,
+    borderColor: t.tooltipBorder,
+    borderWidth: 1,
+    textStyle: { color: t.tooltipText },
+    extraCssText: `
+      position: ${appendToBody ? 'fixed' : 'absolute'};
+      backdrop-filter: blur(4px) saturate(120%);
+      -webkit-backdrop-filter: blur(4px) saturate(120%);
+      box-shadow: ${t.tooltipShadow};
+      z-index: 1000000;
+    `
+  };
+}
+
+/* =========================
+ * (9) 统一拟合数据计算（Legend 与气泡共享）
+ * ========================= */
+function computeFitRows(mode, x, seriesList, selectionMap) {
+  const items = [];
+  ensureFitModels(seriesList, mode);
+  seriesList.forEach(s => {
+    const selected = (selectionMap ? (selectionMap[s.name] !== false) : true);
+    const model = fitModelsCache[mode].get(s.name);
+    const crossModel = (s && s.pchip)
+      ? (mode === 'rpm' ? s.pchip?.rpm_to_noise_db : s.pchip?.noise_to_rpm)
+      : null;
+
+    let y = NaN, crossVal = NaN;
+    if (model && model.x0 != null && model.x1 != null) {
+      const dom0 = Math.min(model.x0, model.x1);
+      const dom1 = Math.max(model.x0, model.x1);
+      if (x >= dom0 && x <= dom1) y = evalPchipJS(model, x);
+    }
+    if (crossModel && crossModel.x0 != null && crossModel.x1 != null) {
+      const c0 = Math.min(crossModel.x0, crossModel.x1);
+      const c1 = Math.max(crossModel.x0, crossModel.x1);
+      if (x >= c0 && x <= c1) crossVal = evalPchipJS(crossModel, x);
+    }
+
+    items.push({
+      name: s.name,
+      color: s.color,
+      brand: s.brand || s.brand_name_zh || s.brand_name || '',
+      model: s.model || s.model_name || '',
+      condition: s.condition_name_zh || s.condition || '',
+      selected,
+      y,
+      cross: crossVal
+    });
+  });
+  return items;
+}
+
+function measureLegendNameMax(sList, { t, integrated, isNarrow }) {
+  const ctx = document.createElement('canvas').getContext('2d');
+  const line1Font = integrated ? `800 13px ${t.fontFamily}` : `600 13px ${t.fontFamily}`;
+  const line2Font = `500 11px ${t.fontFamily}`;
+  let maxPx = 0;
+  sList.forEach(s => {
+    const brand = s.brand || s.brand_name_zh || s.brand_name || '';
+    const model = s.model || s.model_name || '';
+    const cond  = s.condition_name_zh || s.condition || '';
+    const line1 = (brand || model) ? `${brand} ${model}` : (s.name || '');
+    ctx.font = line1Font;
+    const w1 = ctx.measureText(line1).width || 0;
+    let w2 = 0;
+    if (cond) {
+      ctx.font = line2Font;
+      // 集成 + 窄屏模式：条件是内联“ - cond”形式；需要加上分隔符宽度
+      const condText = (integrated && isNarrow) ? ` - ${cond}` : cond;
+      w2 = ctx.measureText(condText).width || 0;
+    }
+    maxPx = Math.max(maxPx, w1, w2);
+  });
+  return maxPx || 0;
+}
+
+/* 新增：统一计算 Legend Rail 宽度 */
+function computeLegendRailWidth({ sList, integrated, fitOn, t, baseW }) {
+  if (!Array.isArray(sList) || !sList.length) {
+    return integrated ? 180 : 160;
+  }
+  const isNarrow = layoutIsNarrow();
+  const maxNamePx = measureLegendNameMax(sList, { t, integrated, isNarrow });
+
+  // 公共常量
+  const dotW = 12;
+  const gapDotName = 8;
+  const wrapperPadLeft = 4;   // legend-integrated-wrapper 左内边距（或行内 padding 左侧部分）
+  const wrapperPadRight = 8;  // legend-integrated-wrapper 右内边距
+  const rowPadX = 4 + 4;      // 行内左右 padding 总和
+  const safetyName = 10;      // 额外安全空间，避免最后字符裁切
+  const containerSafety = 6;  // 容器级余量
+
+  if (integrated) {
+    if (!fitOn) {
+      // 非拟合集成模式：名称列唯一需要动态宽
+      const structural = dotW + gapDotName + wrapperPadLeft + wrapperPadRight + rowPadX;
+      const MIN_NAME = 100;
+      const nameNeed = Math.max(MIN_NAME, maxNamePx + safetyName);
+      let applied = structural + nameNeed + containerSafety;
+      const maxW = 460;
+      if (applied > maxW) applied = maxW;
+      if (applied > baseW - 24) applied = Math.max(structural + MIN_NAME, baseW - 24);
+      return Math.round(applied);
+    } else {
+      // 拟合集成模式：固定值列宽度 + 名称列宽度
+      const ctx = document.createElement('canvas').getContext('2d');
+      ctx.font = `500 11px ${t.fontFamily}`;
+      const chW = ctx.measureText('0').width || 7;
+      const valPx   = 7 * chW;
+      const pctPx   = 7 * chW;
+      const crossPx = 8 * chW;
+      const sepW    = 8;
+
+      // 尝试读取真实列 gap（默认 4）
+      let colGap = 4;
+      try {
+        const testRow = __legendScrollEl?.querySelector('.legend-fit-grid.is-fit-on .legend-row');
+        if (testRow) {
+          const cs = getComputedStyle(testRow);
+          colGap = parseFloat(cs.columnGap || cs.gap || '4') || 4;
+        }
+      } catch(_) {}
+
+      // 列之间的 gap：名称列前有 dot/gap 两个固定元素，后面有 4 个数值区 + 分隔符 + gaps
+      const gapsTotal = colGap * 6;
+      const fixedCols = valPx + pctPx + sepW + crossPx;
+
+      const structural = dotW + gapDotName + wrapperPadLeft + wrapperPadRight + rowPadX + fixedCols + gapsTotal;
+      const MIN_NAME = 110;
+      const nameNeed = Math.max(MIN_NAME, maxNamePx + safetyName);
+      let applied = structural + nameNeed + containerSafety;
+      const maxW = 560;
+      const minRail = structural + MIN_NAME + containerSafety;
+      if (applied < minRail) applied = minRail;
+      if (applied > maxW) applied = maxW;
+      if (applied > baseW - 24) applied = Math.min(maxW, Math.max(minRail, baseW - 24));
+      return Math.round(applied);
+    }
+  } else {
+    // 桌面（非集成）模式
+    const iconW = 12;
+    const gap = 8;
+    const pad = 12;                // 原来的 pad
+    const safetyDesktop = 10;      // 防裁切余量
+    const need = iconW + gap + maxNamePx + safetyName + pad + safetyDesktop;
+    const minW = 160, maxW = 320;
+    let applied = Math.max(minW, Math.min(maxW, Math.ceil(need)));
+    if (applied > baseW - 24) applied = Math.max(minW, baseW - 24);
+    return applied;
+  }
 }
 
   // 挂到全局

@@ -7,17 +7,28 @@
   --accent-weak:#93c5fd;
   --ok:#16a34a;
   --ok-pressed:#15803d;
-  --shadow:0 6px 20px rgba(0,0,0,0.12);
-  --shadow-strong:0 8px 24px rgba(0,0,0,0.18);
+
+  /* 阴影统一（JS tokens 使用 var(--shadow-lg)） */
+  --shadow-sm:0 2px 6px rgba(0,0,0,0.08);
+  --shadow-md:0 4px 12px rgba(0,0,0,0.12);
+  --shadow-lg:0 6px 20px rgba(0,0,0,0.18);
+  --shadow-strong:0 8px 24px rgba(0,0,0,0.22);
+
   --fit-handle-w: 16px;
   --fit-handle-h: 24px;
   --fit-hitbox:   36px;
   --fit-btn-min-h: 24px;
-  /* 全屏分栏比例（默认主图:频谱 = 3:2），仅用于计算目标像素高 */
   --fs-main-flex: 1;
   --fs-spec-flex: 1;
-  --rail-slide-overshoot: 8px; /* 滑出超量，防止子像素/缩放下漏出细边 */
+  --rail-slide-overshoot: 8px;
+
+  /* 统一 hover 背景变量（dark 模式覆写） */
+  --row-hover-bg: rgba(0,0,0,0.04);
+
+  /* tooltip 背景（JS tokens 使用） */
+  --tooltip-bg: rgba(255,255,255,0.98);
 }
+
 [data-theme="dark"]{
   --bg-bubble:#1f293700;
   --border-color:#374151;
@@ -27,11 +38,17 @@
   --accent-weak:#bfdbfe;
   --ok:#16a34a;
   --ok-pressed:#15803d;
-  --shadow:0 6px 20px rgba(0,0,0,0.35);
-  --shadow-strong:0 8px 24px rgba(0,0,0,0.45);
+
+  --shadow-sm:0 2px 6px rgba(0,0,0,0.30);
+  --shadow-md:0 4px 12px rgba(0,0,0,0.38);
+  --shadow-lg:0 6px 20px rgba(0,0,0,0.45);
+  --shadow-strong:0 8px 24px rgba(0,0,0,0.55);
+
+  --row-hover-bg: rgba(255,255,255,0.06);
+  --tooltip-bg: var(--bg-bubble);
 }
 
-/* 图表容器基础：容器自适应高度，提供一个下限，展开频谱时“向下扩展” */
+/* 容器与主图高度规则 */
 .fc-chart-container {
   position: relative !important;
   min-height: clamp(480px, 62vh, 500px);
@@ -40,35 +57,23 @@
   scrollbar-gutter: stable both-edges;
 }
 
-/* 非全屏高度完全交给 CSS（桌面 45dvh，窄屏 30dvh） */
 .fc-chart-container.chart-flex:not(.is-narrow) { --nf-chart-h: 45dvh; }
 .fc-chart-container.chart-flex.is-narrow      { --nf-chart-h: 30dvh; flex-direction: column;}
 
-/* 非全屏：主图高度使用 dvh（不再使用 --main-chart-h 像素变量） */
 .fc-chart-container:not(:fullscreen) .chart-stack > #chartRoot {
   height: var(--nf-chart-h, 45dvh) !important;
-  max-height: 600px ;
 }
-.fc-chart-container:not(:fullscreen):not(.is-narrow) .chart-stack > #chartRoot {
-  min-height: 500px ;
-}
-.fc-chart-container:not(:fullscreen).is-narrow .chart-stack > #chartRoot {
-  min-height: 250px ;
-}
-/* 全屏时主图吃掉剩余高度（保持原逻辑） */
-:fullscreen .chart-stack > #chartRoot {
-  flex: 1 1 auto !important;
-  min-height: 0 !important;
-}
+.fc-chart-container:not(:fullscreen):not(.is-narrow) .chart-stack > #chartRoot { min-height: 500px; }
+.fc-chart-container:not(:fullscreen).is-narrow .chart-stack > #chartRoot { min-height: 250px; }
+:fullscreen .chart-stack > #chartRoot { flex: 1 1 auto !important; min-height: 0 !important; }
 
-/* 明确允许锚定，避免滚动抖动 */
 #chartRoot, #spectrumHost { overflow-anchor: auto; }
 
 #spectrumHost {
   position: relative;
-  height: 0;                     /* 收起态 */
-  overflow: hidden;              /* 收起与展开过程避免内容溢出 */
-  transition: height var(--transition-speed, .25s) ease; /* 原来是 2s，改为变量以统一调速 */
+  height: 0;
+  overflow: hidden;
+  transition: height var(--transition-speed, .25s) ease;
 }
 .fc-chart-container:not(:fullscreen):not(.is-narrow)[data-chart-mode="spectrum"] #spectrumHost {
   height: clamp(300px, var(--nf-chart-h, 45dvh), 600px);
@@ -76,16 +81,11 @@
 .fc-chart-container:not(:fullscreen).is-narrow[data-chart-mode="spectrum"] #spectrumHost {
   height: clamp(250px, var(--nf-chart-h, 30dvh), 600px);
 }
-
 #spectrumHost > .spectrum-inner {
-  width: 100%;
-  height: 100%;                  /* 内层随 Host 高度（展开/收起期间通过 JS 临时改为固定 px） */
-  position: relative;
-  overflow: visible;
-  transform-origin: top;
+  width: 100%; height: 100%; position: relative; overflow: visible; transform-origin: top;
 }
 
-/* x轴切换开关：容器不拦截事件，内部元素可交互，避免遮挡 rail 点击 */
+/* X轴开关 */
 .chart-xaxis-overlay{
   position:absolute; z-index:200; visibility:hidden; transform: translate(-65%, -37%);
   pointer-events: none;
@@ -93,13 +93,12 @@
 .chart-xaxis-overlay .switch-container,
 .chart-xaxis-overlay .switch-track,
 .chart-xaxis-overlay .switch-slider,
-.chart-xaxis-overlay .switch-label {
-  pointer-events: auto;
-}
+.chart-xaxis-overlay .switch-label { pointer-events: auto; }
+
 .switch-container { position:relative; width:76px; height:32px; }
 .switch-track { width:100%; height:100%; background:var(--border-color); border-radius:12px; position:relative; overflow:hidden; }
 .switch-track::before {
-  content: ""; position: absolute; inset: 0; border-radius: inherit; pointer-events: none;
+  content:""; position:absolute; inset:0; border-radius:inherit; pointer-events:none;
   background: linear-gradient(to bottom, rgba(255,255,255,.22), rgba(255,255,255,0));
   box-shadow: inset 0 2px 6px rgba(0,0,0,.10), inset 0 -1px 0 rgba(0,0,0,.05);
 }
@@ -109,592 +108,301 @@
 }
 .switch-slider {
   position:absolute; width:24px; height:100%; background:var(--text-); border-radius:12px; left:0; top:0;
-  transition: transform .25s; will-change: transform;
-  box-shadow: 0 2px 5px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.25), inset 0 -1px 0 rgba(0,0,0,.25);
+  transition: transform .25s; will-change:transform; box-shadow: 0 2px 5px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.25), inset 0 -1px 0 rgba(0,0,0,.25);
   cursor:grab;
 }
-.switch-label { cursor: pointer; position:absolute; top:48%; transform:translateY(-50%); font-weight:600; font-size:20px; color:var(--text-primary); white-space:nowrap; user-select:none; }
+.switch-label {
+  cursor:pointer; position:absolute; top:48%; transform:translateY(-50%);
+  font-weight:600; font-size:20px; color:var(--text-primary); white-space:nowrap; user-select:none;
+}
 .switch-label-left { right:calc(100% + 4px); }
 .switch-label-right { left:calc(100% + 4px); }
 .chart-xaxis-overlay, .switch-container, .switch-track, .switch-slider { touch-action: none; }
 
 /* 拟合按钮与气泡 */
-.fit-buttons{ position: absolute; z-index: 220; visibility: hidden; display: flex; gap: 6px; pointer-events: auto; }
+.fit-buttons{
+  position: absolute; z-index:220; visibility:hidden; display:flex; gap:6px; pointer-events:auto;
+}
 .fit-buttons .btn{
   appearance:none; border:1px solid var(--border-color); background: var(--bg-bubble); color:var(--text-primary);
   font-size:12px; font-weight:700; padding:6px 12px; border-radius:8px; cursor:pointer; user-select:none;
-  box-shadow:var(--shadow);
+  box-shadow: var(--shadow-md);
   transition: transform .02s ease-in-out, background-color .15s ease, color .15s ease;
-  display: inline-flex; align-items: center; justify-content: center;
-  min-height: calc(var(--fit-btn-min-h) * 1.5); line-height: 1.2; box-sizing: border-box; white-space: nowrap;
+  display:inline-flex; align-items:center; justify-content:center;
+  min-height: calc(var(--fit-btn-min-h) * 1.5); line-height:1.2; box-sizing:border-box; white-space:nowrap;
 }
 .fit-buttons .btn:active{ transform: translateY(1px); }
-.fit-buttons .btn.active{ background: var(--ok); color: #fff; border-color: var(--ok); }
+.fit-buttons .btn.active{ background: var(--ok); color:#fff; border-color: var(--ok); }
 .fit-buttons .btn.active:active{ background: var(--ok-pressed); }
 
 .fit-bubble{
-  position: fixed !important; min-width: 320px; max-width: min(480px, 92vw);
-  z-index: 220 !important; visibility: hidden; max-height: 60vh; overflow: auto;
+  position: fixed !important; min-width:320px; max-width:min(480px, 92vw);
+  z-index:220 !important; visibility:hidden; max-height:60vh; overflow:auto;
   background: var(--bg-bubble); backdrop-filter: blur(4px) saturate(120%);
-  border: 1px solid var(--border-color); border-radius: 12px; box-shadow: var(--shadow-strong);
-  padding: 10px 12px; cursor: grab; touch-action: none;
-  --fit-col-val-ch: 6;    /* 例如 12345 CFM -> ~9ch，可由 JS 设置更精确 */
-  --fit-col-pct-ch: 6;    /* 例如 (100%) -> 6ch */
-  --fit-col-cross-ch: 8; /* 例如 "9999 RPM" 或 "99.9 dB" -> ~8~10ch */
+  border:1px solid var(--border-color); border-radius:12px; box-shadow: var(--shadow-strong);
+  padding:10px 12px; cursor:grab; touch-action:none;
+  --fit-col-val-ch:6;
+  --fit-col-pct-ch:6;
+  --fit-col-cross-ch:8;
 }
-.fit-bubble.dragging{ cursor: grabbing; }
-.fit-bubble .head{ display:flex; align-items:center; gap:10px; margin-bottom: 6px; white-space: nowrap; }
+.fit-bubble.dragging{ cursor:grabbing; }
+.fit-bubble .head{ display:flex; align-items:center; gap:10px; margin-bottom:6px; white-space:nowrap; }
 .fit-bubble .title{ font-weight:800; color:var(--text-primary); font-size:13px; line-height:1.2; white-space:nowrap; }
 .fit-bubble .x-input{ margin-left:auto; display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-); white-space:nowrap; }
 .fit-bubble input[type="number"]{ width:10ch; font-size:12px; padding:4px 6px; border:1px solid var(--border-color); border-radius:8px; background:transparent; color:var(--text-primary); outline:none; }
 .fit-bubble .row{
-  display: grid;
-  grid-template-columns:
-    12px                   /* dot */
-    8px                    /* dot 与名称的间距 */
-    minmax(0, 1fr)         /* 名称（弹性，省略） */
-    calc(var(--fit-col-val-ch, 6) * 1ch)   /* 数值列 */
-    calc(var(--fit-col-pct-ch, 6) * 1ch)   /* 百分比列 */
-    8px                    /* 竖线分隔符的固定间距 */
-    calc(var(--fit-col-cross-ch, 10) * 1ch);/* 交叉量纲列（RPM/dB） */
-  column-gap: 6px;
-  align-items: center;
-
-  /* 原有样式保留 */
-  gap: 8px; /* 与旧样式兼容，不影响 grid 布局 */
-  margin: 4px 0;
-  color: var(--text-primary);
-  font-size: 13px;
-  cursor: pointer;
-  border-radius: 6px;
-  padding: 2px 4px;
+  display:grid;
+  grid-template-columns:12px 2px minmax(0,1fr)
+    calc(var(--fit-col-val-ch, 6) * 1ch)
+    calc(var(--fit-col-pct-ch, 6) * 1ch)
+    8px
+    calc(var(--fit-col-cross-ch, 10) * 1ch);
+  column-gap:4px; align-items:center;
+  margin:4px 0; color:var(--text-primary); font-size:13px;
+  cursor:pointer; border-radius:6px; padding:2px 4px;
   transition: background-color .15s ease, opacity .15s ease;
-
-  /* 数字统一用等宽数字，列会更整齐 */
   font-variant-numeric: tabular-nums;
 }
-.fit-bubble .row:hover{
-  background: rgba(0,0,0,0.04);
-}
-[data-theme="dark"] .fit-bubble .row:hover{
-  background: rgba(255,255,255,0.06);
-}
-/* 隐藏态低亮，和侧栏 legend 一致的感觉 */
-.fit-bubble .row.is-off{
-  opacity: .55;
-}
-.fit-bubble .row .dot{
-  grid-column: 1 / 2;
-  width: 10px; height: 10px; border-radius: 50%;
-}
-/* 名称列：占满弹性列，超出省略，避免侵入数值区域 */
-.fit-bubble .row .col-name{
-  grid-column: 3 / 4;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-/* 数值、百分比、交叉列：统一右对齐，不换行 */
+.hoverable-row:hover { background: var(--row-hover-bg); }
+.fit-bubble .row.is-off{ opacity:.35; }
+.fit-bubble .row .dot{ grid-column:1 / 2; width:12px; height:12px; border-radius:50%; }
+.fit-bubble .row .col-name{ grid-column:3 / 4; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
 .fit-bubble .row .col-val,
 .fit-bubble .row .col-pct,
-.fit-bubble .row .col-cross{
-  text-align: right;
-  white-space: nowrap;
+.fit-bubble .row .col-cross{ text-align:right; white-space:nowrap; }
+.fit-bubble .row .col-pct{ color:var(--text-); }
+.fit-bubble .row .col-sep{ grid-column:6 / 7; color:var(--text-); opacity:.5; text-align:center; user-select:none; }
+.fit-bubble .hint{ color:var(--text-); font-size:11px; }
+
+.fit-pointer{ position:absolute; z-index:200; visibility:hidden; pointer-events:none; }
+.fit-pointer .line{ position:absolute; top:0; bottom:0; width:2px; transform:translateX(-1px); background: var(--accent); opacity:.95; }
+.fit-pointer .handle{
+  position:absolute; bottom:-22px; left:-8px; width:16px; height:24px; border-radius:4px;
+  background: var(--accent); box-shadow: var(--shadow-md); cursor:grab; touch-action:none; pointer-events:auto;
+}
+.fit-pointer .handle::after{
+  content:""; position:absolute; left:50%; transform:translateX(-50%); top:-7px; width:0; height:0;
+  border-left:8px solid transparent; border-right:8px solid transparent; border-bottom:9px solid var(--accent);
+}
+.fit-pointer .handle::before{
+  content:""; position:absolute; left:50%; top:50%; width: var(--fit-hitbox); height: var(--fit-hitbox);
+  transform:translate(-50%, -50%); background:transparent; pointer-events:auto;
 }
 
-/* 百分比次要色，分隔符弱化 */
-.fit-bubble .row .col-pct{ color: var(--text-); }
-.fit-bubble .row .col-sep{
-  grid-column: 6 / 7;
-  color: var(--text-);
-  opacity: .5;
-  text-align: center;
-  user-select: none;
-}
-.fit-bubble .hint{ color: var(--text-); font-size: 11px; }
-
-/* 拟合指针 */
-.fit-pointer{ position: absolute; z-index: 200; visibility: hidden; pointer-events: none; }
-.fit-pointer .line{ position:absolute; top:0; bottom:0; width: 2px; transform: translateX(-1px); background: var(--accent); opacity: 0.95; }
-.fit-pointer .handle{ position:absolute; bottom:-22px; left:-8px; width:16px; height:24px; border-radius:4px; background: var(--accent); box-shadow: var(--shadow); cursor: grab; touch-action: none; pointer-events: auto; }
-.fit-pointer .handle::after{ content:""; position:absolute; left:50%; transform: translateX(-50%); top:-7px; width:0; height:0; border-left:8px solid transparent; border-right:8px solid transparent; border-bottom:9px solid var(--accent); }
-.fit-pointer .handle::before{ content:""; position:absolute; left:50%; top:50%; width: var(--fit-hitbox); height: var(--fit-hitbox); transform: translate(-50%, -50%); background: transparent; pointer-events: auto; }
-
-/* 全屏：用 max-height 驱动频谱展开/收起；主图吃掉剩余高度 */
+/* 全屏频谱展开逻辑 */
 .fc-chart-container:fullscreen {
-  height: 100vh !important; box-sizing: border-box !important;
+  height:100vh !important; box-sizing:border-box !important;
   scrollbar-gutter: stable both-edges;
 }
 :fullscreen .chart-stack > #spectrumHost {
-  flex: 0 0 auto !important;
-  height: auto !important;
-  max-height: 0;
-  overflow: clip !important;
-  transition: max-height var(--transition-speed, .25s) ease;
-  will-change: max-height;
-  min-height: 0 !important;
+  flex:0 0 auto !important;
+  height:auto !important;
+  max-height:0;
+  overflow:clip !important;
+  transition:max-height var(--transition-speed, .25s) ease;
+  will-change:max-height;
+  min-height:0 !important;
 }
-@supports not (overflow: clip) {
-  :fullscreen .chart-stack > #spectrumHost { overflow: hidden !important; }
-}
-/* 未展开频谱：保持 0 高（JS 在动画期间保留 data-chart-mode，避免提前命中此规则） */
-:fullscreen:not([data-chart-mode="spectrum"]) #spectrumHost {
-  height: 0 !important;
-  min-height: 0 !important;
-}
-/* 全屏下内部铺满容器（无剪裁层） */
+:fullscreen:not([data-chart-mode="spectrum"]) #spectrumHost { height:0 !important; min-height:0 !important; }
 :fullscreen #spectrumHost > .spectrum-inner { height: var(--fs-spec-h, auto) !important; }
-:fullscreen #chartHost, :fullscreen #chartRoot { height:auto !important; min-height:0 !important; flex-shrink:0; }
 
-/* 图表容器：左右/上下布局（左=主图+频谱，右=rail） */
-.fc-chart-container.chart-flex { display: flex; align-items: stretch; overflow: hidden;}
-.fc-chart-container.chart-flex:not(.is-narrow) .chart-stack {
-  flex: 1 1 auto; 
-  min-width: 0; 
-  display: flex; 
-  flex-direction: column;
-}
-/* “停靠”状态：去掉右侧预留，平滑扩展占满 */
-.fc-chart-container.chart-flex:not(.is-narrow).rail-parked .chart-stack {
-  padding-right: 0;
-}
-.fc-chart-container.chart-flex .chart-stack > * { flex: 0 0 auto; min-height: 0; }
+/* 布局 */
+.fc-chart-container.chart-flex { display:flex; align-items:stretch; overflow:hidden; }
+.fc-chart-container.chart-flex:not(.is-narrow) .chart-stack { flex:1 1 auto; min-width:0; display:flex; flex-direction:column; }
+.fc-chart-container.chart-flex:not(.is-narrow).rail-parked .chart-stack { padding-right:0; }
+.fc-chart-container.chart-flex .chart-stack > * { flex:0 0 auto; min-height:0; }
 
-/* rail 外观与布局（提升层级，避免被覆盖导致按钮无响应） */
-/* 桌面模式：用 margin-top 实现 legend 顶部留白；窄屏不加 */
-.fc-chart-container.chart-flex:not(.is-narrow):not(.legend-integrated) #legendRail .legend-scroll {
-  margin-top: 5vh;
-}
+.fc-chart-container.chart-flex:not(.is-narrow):not(.legend-integrated) #legendRail .legend-scroll { margin-top:5vh; }
 .fc-chart-container.chart-flex.is-narrow #legendRail .legend-scroll {
-  margin-top: 0;
-  margin-left: 0;
-  padding-bottom: 10px;
+  margin-top:0; margin-left:0; padding-bottom:10px;
 }
-.fc-chart-container.chart-flex #legendRail .legend-scroll{
-  margin-left: 16px; 
-}
-#legendRail .legend-scroll { flex: 1 1 auto; overflow: auto; margin-bottom: 8px; }
-#legendRail .rail-actions { flex: 0 0 auto; display: flex; gap: 6px; justify-content: flex-end; }
+.fc-chart-container.chart-flex #legendRail .legend-scroll { margin-left:16px; }
+#legendRail .legend-scroll { flex:1 1 auto; overflow:auto; margin-bottom:8px; }
+#legendRail .rail-actions { flex:0 0 auto; display:flex; gap:6px; justify-content:flex-end; }
+
 #legendRail {
-  /* 独立于全局的 rail 过渡时长 */
-  --rail-transition: .25s;
-  position: relative;
-  z-index: auto;          
-  flex: 0 0 auto; 
-  max-width: min(48vw, 460px);
-  min-width: 100px;
-  box-sizing: border-box; background: transparent; padding: 0;
-  display: flex; flex-direction: column; overflow: hidden;
+  --rail-transition:.25s;
+  position:relative; z-index:auto;
+  flex:0 0 auto;
+  max-width:min(48vw, 460px);
+  min-width:100px;
+  box-sizing:border-box; background:transparent; padding:0;
+  display:flex; flex-direction:column; overflow:hidden;
   transition:
     transform var(--rail-transition) cubic-bezier(.22,.61,.36,1),
     margin-right var(--rail-transition) cubic-bezier(.22,.61,.36,1);
-  will-change: transform, margin-right;
+  will-change:transform, margin-right;
 }
-/* 全屏下明确复用 rail 自己的过渡变量，避免被 :fullscreen 环境的全局变量拖慢 */
 :fullscreen #legendRail {
   transition:
     transform var(--rail-transition, .25s) cubic-bezier(.22,.61,.36,1),
     margin-right var(--rail-transition, .25s) cubic-bezier(.22,.61,.36,1);
 }
 .fc-chart-container.chart-flex:not(.is-narrow).rail-parked #legendRail {
-  transform: translate3d(calc(var(--legend-rail-w, 240px) + var(--rail-slide-overshoot, 16px)), 0, 0);
-  margin-right: calc(-1 * var(--legend-rail-w, 240px));
-  pointer-events: none;
+  transform:translate3d(calc(var(--legend-rail-w, 240px) + var(--rail-slide-overshoot, 16px)),0,0);
+  margin-right:calc(-1 * var(--legend-rail-w, 240px));
+  pointer-events:none;
 }
-
-/* 补充：确保占位区域铺满（一般不需要，但作为保险） */
-.fc-chart-container.chart-flex.rail-parked .chart-stack {
-  flex: 1 1 auto;
-  width: 100%;
-}
-
+.fc-chart-container.chart-flex.rail-parked .chart-stack { flex:1 1 auto; width:100%; }
 
 .fc-chart-container.chart-flex.is-narrow #legendRail {
-  width: 100% !important;
-  max-width: none !important;
-  min-width: 0 !important;
-  padding: 0;
-  display: block;
-}
-/* 手机全屏（集成模式）+ 拟合：当存在第二行工况时，名称列改为上下两行堆叠 */
-.legend-row .name.has-l2 {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-  white-space: normal;
-}
-.legend-row .name.has-l2 .l1 {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.legend-row .name.has-l2 .l2 {
-  margin-top: 2px;
-  white-space: normal;
+  width:100% !important;
+  max-width:none !important;
+  min-width:0 !important;
+  padding:0;
+  display:block;
 }
 .fc-chart-container.chart-flex.is-narrow #legendRail .legend-scroll {
-  overflow: visible;
-  max-height: none;
-  margin-bottom: 0;
+  overflow:visible; max-height:none; margin-bottom:0;
 }
 .fc-chart-container.chart-flex.is-narrow #legendRail .rail-actions {
-  display: none !important;
-  width: 0 !important;
-  padding: 0 !important;
-  margin: 0 !important;
+  display:none !important; width:0 !important; padding:0 !important; margin:0 !important;
 }
 
-/* rail legend 项 */
-#legendRail .legend-item { display:flex; align-items:center; gap:8px; margin:6px 0; cursor:pointer; user-select:none; }
-#legendRail .legend-item .dot { display:inline-block; width:12px; height:12px; border-radius:50%; }
-#legendRail .legend-item .l1 { font-weight:800; color:var(--text-primary); font-size:13px; line-height:18px; }
-#legendRail .legend-item .l2 { color:var(--text-); font-size:11px; line-height:14px; }
-#legendRail .legend-item.is-off .dot { filter: grayscale(100%); opacity: .35; }
-#legendRail .legend-item.is-off .l1, #legendRail .legend-item.is-off .l2 { opacity: .55; }
+/* Legend 行统一样式（原 legend-item 移除） */
+.legend-row {
+  display:flex; align-items:center; gap:8px;
+  padding:3px 4px; border-radius:6px; cursor:pointer;
+  transition: background-color .15s ease, opacity .15s ease;
+  user-select:none; font-size:13px; line-height:1.2;
+}
+.legend-row.is-off { opacity:.55; }
+.legend-row.is-off .dot ,
+.legend-fit-grid .legend-row.is-off .dot {
+  opacity: .35;
+}
+.legend-row .dot { width:12px; height:12px; border-radius:50%; flex:0 0 auto; }
+.legend-row .name {
+  min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+  font-weight:800; color:var(--text-primary); display:inline-flex; align-items:center; gap:4px;
+}
+.legend-row .name.has-l2 { flex-direction:column; align-items:flex-start; white-space:normal; }
+.legend-row .name.has-l2 .l1 { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.legend-row .name.has-l2 .l2 {
+  margin-top:2px; white-space:normal; font-weight:500; font-size:11px; color:var(--text-); line-height:14px;
+}
+.legend-row .cond-inline { font-weight:500; font-size:11px; color:var(--text-); }
 
-/* rail 中的拟合按钮使用流式布局（保留，桌面仍用） */
-#legendRail .fit-buttons { position: static !important; box-shadow: none; }
-
-/* 非全屏 transform 缩放动画（内容层，纯视觉） */
-#spectrumHost.anim-scale .spectrum-inner { will-change: transform, opacity; transition: transform var(--transition-speed, .25s) ease, opacity .25s ease; }
-#spectrumHost.anim-scale.reveal-from-0 .spectrum-inner { transform: scaleY(0.001); opacity: 0; }
-#spectrumHost.anim-scale.revealed .spectrum-inner { transform: scaleY(1); opacity: 1; }
-#spectrumHost.anim-scale.collapse-to-0 .spectrum-inner { transform: scaleY(0.001); opacity: 0; }
-
-/* 频谱 Loading 覆盖层样式 */
-#spectrumHost .spectrum-loading {
-  position: absolute;
-  inset: 0;
-  display: none;
-  align-items: center;
-  justify-content: center;
-  z-index: 5;
-  pointer-events: none;
-  background: transparent;
-}
-#spectrumHost .spectrum-loading.is-active { display: flex; }
-#spectrumHost .spectrum-loading .spinner {
-  width: 18px; height: 18px; border-radius: 50%;
-  border: 2px solid var(--border-color);
-  border-top-color: var(--accent);
-  animation: spectrum-spin 0.9s linear infinite;
-  margin-right: 8px;
-}
-#spectrumHost .spectrum-loading .text {
-  font-size: 12px;
-  color: var(--text-);
-  user-select: none;
-  white-space: nowrap;
-}
-@keyframes spectrum-spin { to { transform: rotate(360deg); } }
-
-/* 频谱切换按钮：本体不再直接设置背景渐变，改用 ::after 绘制更宽的背景带 */
-.spectrum-dock{
-  position: absolute;
-  z-index: 240;
-  left: 50%;
-  bottom: 0;
-  transform: translateX(-50%);
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 10px;
-  background: transparent;               /* 移除原先的背景渐变 */
-  border: none;
-  box-shadow: none;
-  color: var(--text-primary);
-  font-size: 14px;
-  font-weight: 800;
-  line-height: 1;
-  white-space: nowrap;
-  visibility: hidden;                    /* 仍由 JS 控制显示 */
-  user-select: none;
-  cursor: pointer;
-
-  /* 定义统一宽度变量：与装饰条一致，都是容器宽度的 150%，同时可加上上限以防过宽 */
-  --dock-band-w: min(150%, 480px);
-}
-
-/* 箭头方向：非全屏展开时向上；全屏时反向（开合方向相反） */
-.spectrum-dock .chev{
-  width: 18px; height: 18px;
-  transition: transform .2s ease;
-}
-.spectrum-dock.is-open .chev{ transform: rotate(180deg); }
-:fullscreen .spectrum-dock .chev{ transform: rotate(180deg); }
-:fullscreen .spectrum-dock.is-open .chev{ transform: rotate(0deg); }
-.spectrum-dock .label{ white-space: nowrap; }
-
-/* 顶部装饰条：改用与背景带相同的宽度变量，保持两者视觉一致 */
-.spectrum-dock::before{
-  content: "";
-  position: absolute;
-  top: -2px;
-  left: 50%;
-  transform: translateX(-50%);
-  width: var(--dock-band-w);
-  height: 2px;
-  border-radius: 2px;
-  pointer-events: none;
-  background: linear-gradient(to right, rgba(0,0,0,0), var(--border-color), rgba(0,0,0,0));
-}
-
-/* 新增：更宽的渐隐背景带（放在按钮内容后面，宽度=容器宽度的 150%） */
-.spectrum-dock::after{
-  content: "";
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  /* 让背景带高度略高于按钮，提高容错，或改为 top/bottom 都贴齐按钮即可 */
-  top: -2px;
-  bottom: 0;
-  width: var(--dock-band-w);
-  border-radius: 10px;
-  pointer-events: none;
-  z-index: -1;  /* 位于按钮内容下方，但仍在按钮这个层级内 */
-
-  /* 颜色按需用 --bg-secondary；两端渐隐到透明 */
-  background: linear-gradient(
-    to right,
-    rgba(0,0,0,0) 0%,
-    var(--bg-secondary) 20%,
-    var(--bg-secondary) 80%,
-    rgba(0,0,0,0) 100%
-  );
-}
-
-/* 拟合气泡底部工具区（右下角“关闭”） */
-  .fit-bubble .foot{
-  position: sticky;
-  bottom: 0;
-  background: var(--bg-bubble);
-  padding-top: 0;
-  margin-top: 0;
-  display: flex;
-  align-items: center;           /* 垂直居中 */
-  justify-content: space-between;/* 左=hint，右=按钮 */
-  gap: 8px;
-  box-shadow: 0 -4px 10px rgba(0,0,0,0.03);
-}
-.fit-bubble .foot .hint{
-  color: var(--text-);
-  font-size: 11px;
-  margin: 0;
-  line-height: 1.2;
-}
-
-/* “关闭”按钮样式，和右侧拟合按钮视觉一致的小号按钮 */
-.fit-bubble .btn-close{
-  appearance: none;
-  border: 1px solid var(--border-color);
-  background: var(--bg-bubble);
-  color: var(--text-primary);
-  font-size: 11px;
-  font-weight: 700;
-  padding: 4px 12px;
-  border-radius: 8px;
-  cursor: pointer;
-  user-select: none;
-  box-shadow: var(--shadow);
-  transition: transform .02s ease-in-out, background-color .15s ease, color .15s ease;
-}
-.fit-bubble .btn-close:active{
-  transform: translateY(1px);
-}
-
-.fc-chart-container.legend-integrated #legendRail {
-  /* 取消横向滑出动画影响，只靠宽度过渡 */
-  transition: width .25s ease;
-  transform: none !important;
-  margin-right: 0 !important;
-  pointer-events: auto;
-  max-width: min(48vw, 460px);
-  overflow-x: hidden;
-}
-
-/* 集成模式下：移除 legend-scroll 左侧 margin，避免内容超宽 */
-.fc-chart-container.legend-integrated #legendRail .legend-scroll {
-  margin-left: 0 !important;
-  overflow-x: hidden; /* 保险：即使意外宽度超出也不显示水平滚动条 */
-  margin-top: 0 !important;
-}
-/* 集成模式包裹层 */
-.legend-integrated-wrapper {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 4px 8px 8px 4px;
-  box-sizing: border-box;
-}
-
-/* 集成头部（拟合开启时显示） */
-.integrated-fit-head {
-  position: sticky;
-  top: 0;
-  display: none;
-  align-items: center;
-  gap: 12px;
-  padding: 6px 8px;
-  border: 1px solid var(--border-color);
-  border-radius: 8px;
-  background: var(--bg-bubble);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.04);
-  font-size: 12px;
-  line-height: 1.2;
-  z-index: 2;
-  backdrop-filter: blur(8px);
-}
-[data-theme="dark"] .integrated-fit-head {
-  box-shadow: 0 2px 10px rgba(0,0,0,0.25);
-
-}
-.integrated-fit-head.is-active { display: flex; }
-.integrated-fit-head .title {
-  font-weight: 800;
-  color: var(--text-primary);
-  white-space: nowrap;
-}
-.integrated-fit-head .x-input {
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-  color: var(--text-);
-}
-.integrated-fit-head .x-input .lab {
-  font-weight: 600;
-  font-size: 11px;
-  color: var(--text-);
-}
-.integrated-fit-head .x-input input[type="number"] {
-  width: 9ch;
-  font-size: 11px;
-  padding: 3px 6px;
-  border: 1px solid var(--border-color);
-  border-radius: 6px;
-  background: transparent;
-  color: var(--text-primary);
-  outline: none;
-}
-.integrated-fit-head .x-input .unit {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--text-);
-}
-
-/* 集成模式下 legend 行（包含拟合列时切换为 Grid） */
-.legend-fit-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
+.legend-fit-grid { display:flex; flex-direction:column; gap:4px; }
 .legend-fit-grid.is-fit-on .legend-row {
-  display: grid;
+  display:grid;
   grid-template-columns:
     12px
     8px
-    minmax(0, 1fr)                /* 从 minmax(120px,1fr) 改成 minmax(0,1fr) 防止挤出滚动条 */
+    minmax(0,1fr)
     calc(var(--fit-col-val-ch, 6) * 1ch)
     calc(var(--fit-col-pct-ch, 6) * 1ch)
     8px
     calc(var(--fit-col-cross-ch, 10) * 1ch);
-  column-gap: 4px;
-  align-items: center;
-  font-variant-numeric: tabular-nums;
+  column-gap:4px; align-items:center; font-variant-numeric:tabular-nums;
 }
-/* 显式列位，避免 .name 被挤进 8px 列 */
-.legend-fit-grid.is-fit-on .legend-row .dot      { grid-column: 1 / 2; }
-.legend-fit-grid.is-fit-on .legend-row .name     { grid-column: 3 / 4; } /* 1fr */
-.legend-fit-grid.is-fit-on .legend-row .col-val  { grid-column: 4 / 5; }
-.legend-fit-grid.is-fit-on .legend-row .col-pct  { grid-column: 5 / 6; }
-.legend-fit-grid.is-fit-on .legend-row .col-sep  { grid-column: 6 / 7; }
-.legend-fit-grid.is-fit-on .legend-row .col-cross{ grid-column: 7 / 8; }
-
-.legend-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 3px 4px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background-color .15s ease, opacity .15s ease;
-  user-select: none;
-  font-size: 13px;
-  line-height: 1.2;
-}
-.legend-row:hover { background: rgba(0,0,0,0.04); }
-[data-theme="dark"] .legend-row:hover { background: rgba(255,255,255,0.06); }
-.legend-row.is-off { opacity:.55; }
-.legend-row .dot { width:12px; height:12px; border-radius:50%; flex:0 0 auto; }
-.legend-row .name {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-weight: 800;
-  color: var(--text-primary);
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-}
-/* 非窄屏（含手机全屏）下，工况换行（l2 为块级）已默认生效 */
-.legend-row .l2 {
-  display: block;
-  font-weight: 500;
-  font-size: 11px;
-  color: var(--text-);
-  line-height: 14px;
-}
-.legend-row .cond-inline {
-  font-weight: 500;
-  font-size: 11px;
-  color: var(--text-);
-}
-.legend-fit-grid.is-fit-on .legend-row .col-val,
-.legend-fit-grid.is-fit-on .legend-row .col-pct,
-.legend-fit-grid.is-fit-on .legend-row .col-cross {
-  text-align: right;
-  white-space: nowrap;
-  font-size: 11px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.legend-fit-grid.is-fit-on .legend-row .col-pct { color: var(--text-); }
-.legend-fit-grid.is-fit-on .legend-row .col-sep {
-  color: var(--text-);
-  opacity: .5;
-  text-align: center;
-  user-select: none;
-  width: 8px;
-}
+.legend-fit-grid.is-fit-on .legend-row .dot      { grid-column:1 / 2; }
+.legend-fit-grid.is-fit-on .legend-row .name     { grid-column:3 / 4; }
+.legend-fit-grid.is-fit-on .legend-row .col-val  { grid-column:4 / 5; text-align:right; white-space:nowrap; font-size:11px; overflow:hidden; text-overflow:ellipsis; }
+.legend-fit-grid.is-fit-on .legend-row .col-pct  { grid-column:5 / 6; text-align:right; white-space:nowrap; font-size:11px; color:var(--text-); overflow:hidden; text-overflow:ellipsis; }
+.legend-fit-grid.is-fit-on .legend-row .col-sep  { grid-column:6 / 7; color:var(--text-); opacity:.5; text-align:center; user-select:none; width:8px; }
+.legend-fit-grid.is-fit-on .legend-row .col-cross{ grid-column:7 / 8; text-align:right; white-space:nowrap; font-size:11px; overflow:hidden; text-overflow:ellipsis; }
 .legend-fit-grid:not(.is-fit-on) .legend-row .col-val,
 .legend-fit-grid:not(.is-fit-on) .legend-row .col-pct,
 .legend-fit-grid:not(.is-fit-on) .legend-row .col-cross,
-.legend-fit-grid:not(.is-fit-on) .legend-row .col-sep {
-  display: none;
-}
+.legend-fit-grid:not(.is-fit-on) .legend-row .col-sep { display:none; }
 
-/* 集成模式下宽度变量（JS 写入） */
+/* 集成包裹层与宽度变量 */
 .legend-integrated-wrapper {
-  --fit-col-val-ch: 6;
-  --fit-col-pct-ch: 6;
-  --fit-col-cross-ch: 8;
+  display:flex; flex-direction:column; gap:8px;
+  padding:4px 8px 8px 4px; box-sizing:border-box;
+  --fit-col-val-ch:6; --fit-col-pct-ch:6; --fit-col-cross-ch:8;
 }
 
-/* 停靠样式在集成模式下禁用 */
-.fc-chart-container.legend-integrated.rail-parked #legendRail {
-  transform: none;
-  margin-right: 0;
+/* 集成 head */
+.integrated-fit-head {
+  position:sticky; top:0; display:none; align-items:center; gap:12px;
+  padding:6px 8px; border:1px solid var(--border-color); border-radius:8px;
+  background: var(--bg-bubble); box-shadow: var(--shadow-sm);
+  font-size:12px; line-height:1.2; z-index:2; backdrop-filter: blur(8px);
+}
+.integrated-fit-head.is-active { display:flex; }
+.integrated-fit-head .title { font-weight:800; color:var(--text-primary); white-space:nowrap; }
+.integrated-fit-head .x-input { margin-left:auto; display:inline-flex; align-items:center; gap:6px; white-space:nowrap; color:var(--text-); }
+.integrated-fit-head .x-input .lab { font-weight:600; font-size:11px; color:var(--text-); }
+.integrated-fit-head .x-input input[type="number"] {
+  width:9ch; font-size:11px; padding:3px 6px; border:1px solid var(--border-color); border-radius:6px;
+  background:transparent; color:var(--text-primary); outline:none;
+}
+.integrated-fit-head .x-input .unit { font-size:11px; font-weight:600; color:var(--text-); }
+
+.fc-chart-container.legend-integrated #legendRail {
+  transition:width .25s ease;
+  transform:none !important;
+  margin-right:0 !important;
+  pointer-events:auto;
+  max-width:min(48vw, 460px);
+  overflow-x:hidden;
+}
+.fc-chart-container.legend-integrated #legendRail .legend-scroll {
+  margin-left:0 !important; overflow-x:hidden; margin-top:0 !important;
+}
+.fc-chart-container.legend-integrated.rail-parked #legendRail { transform:none; margin-right:0; }
+.fc-chart-container.legend-integrated .fit-bubble { display:none !important; }
+.fc-chart-container.legend-integrated #legendRail .rail-actions { padding:0; }
+
+/* Loading 覆盖层 */
+#spectrumHost .spectrum-loading {
+  position:absolute; inset:0; display:none; align-items:center; justify-content:center;
+  z-index:5; pointer-events:none; background:transparent;
+}
+#spectrumHost .spectrum-loading.is-active { display:flex; }
+#spectrumHost .spectrum-loading .spinner {
+  width:18px; height:18px; border-radius:50%;
+  border:2px solid var(--border-color); border-top-color: var(--accent);
+  animation:spectrum-spin 0.9s linear infinite; margin-right:8px;
+}
+#spectrumHost .spectrum-loading .text {
+  font-size:12px; color:var(--text-); user-select:none; white-space:nowrap;
+}
+@keyframes spectrum-spin { to { transform: rotate(360deg); } }
+
+/* 频谱 Dock 按钮 */
+.spectrum-dock{
+  position:absolute; z-index:240; left:50%; bottom:0; transform:translateX(-50%);
+  display:inline-flex; align-items:center; gap:8px; padding:6px 10px;
+  background:transparent; border:none; box-shadow:none;
+  color:var(--text-primary); font-size:14px; font-weight:800; line-height:1;
+  white-space:nowrap; visibility:hidden; user-select:none; cursor:pointer;
+  --dock-band-w: min(150%, 480px);
+}
+.spectrum-dock .chev{ width:18px; height:18px; transition:transform .2s ease; }
+.spectrum-dock.is-open .chev{ transform:rotate(180deg); }
+:fullscreen .spectrum-dock .chev{ transform:rotate(180deg); }
+:fullscreen .spectrum-dock.is-open .chev{ transform:rotate(0deg); }
+.spectrum-dock .label{ white-space:nowrap; }
+
+.spectrum-dock::before{
+  content:""; position:absolute; top:-2px; left:50%; transform:translateX(-50%);
+  width:var(--dock-band-w); height:2px; border-radius:2px; pointer-events:none;
+  background: linear-gradient(to right, rgba(0,0,0,0), var(--border-color), rgba(0,0,0,0));
+}
+.spectrum-dock::after{
+  content:""; position:absolute; left:50%; transform:translateX(-50%);
+  top:-2px; bottom:0; width:var(--dock-band-w); border-radius:10px; pointer-events:none; z-index:-1;
+  background: linear-gradient(to right,
+    rgba(0,0,0,0) 0%,
+    var(--bg-secondary) 20%,
+    var(--bg-secondary) 80%,
+    rgba(0,0,0,0) 100%);
 }
 
-/* 集成模式下隐藏浮动气泡（兜底） */
-.fc-chart-container.legend-integrated .fit-bubble {
-  display: none !important;
+/* 拟合气泡底部 */
+.fit-bubble .foot{
+  position:sticky; bottom:0; background:var(--bg-bubble);
+  padding-top:0; margin-top:0; display:flex; align-items:center;
+  justify-content:space-between; gap:8px; box-shadow:0 -4px 10px rgba(0,0,0,0.03);
 }
-
-/* 按钮组在集成模式继续靠底或右对齐（可与原窄屏规则叠加） */
-.fc-chart-container.legend-integrated #legendRail .rail-actions {
-  padding: 0;
+.fit-bubble .foot .hint{ color:var(--text-); font-size:11px; margin:0; line-height:1.2; }
+.fit-bubble .btn-close{
+  appearance:none; border:1px solid var(--border-color); background:var(--bg-bubble);
+  color:var(--text-primary); font-size:11px; font-weight:700; padding:4px 12px;
+  border-radius:8px; cursor:pointer; user-select:none; box-shadow: var(--shadow-md);
+  transition: transform .02s ease-in-out, background-color .15s ease, color .15s ease;
 }
+.fit-bubble .btn-close:active{ transform:translateY(1px); }
