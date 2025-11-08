@@ -47,10 +47,13 @@
 /* 非全屏：主图高度使用 dvh（不再使用 --main-chart-h 像素变量） */
 .fc-chart-container:not(:fullscreen) .chart-stack > #chartRoot {
   height: var(--nf-chart-h, 45dvh) !important;
-  max-height: 600px !important;
+  max-height: 600px ;
 }
 .fc-chart-container:not(:fullscreen):not(.is-narrow) .chart-stack > #chartRoot {
-  min-height: 500px !important;
+  min-height: 500px ;
+}
+.fc-chart-container:not(:fullscreen).is-narrow .chart-stack > #chartRoot {
+  min-height: 250px ;
 }
 /* 全屏时主图吃掉剩余高度（保持原逻辑） */
 :fullscreen .chart-stack > #chartRoot {
@@ -71,7 +74,7 @@
   height: clamp(300px, var(--nf-chart-h, 45dvh), 600px);
 }
 .fc-chart-container:not(:fullscreen).is-narrow[data-chart-mode="spectrum"] #spectrumHost {
-  height: clamp(0px, var(--nf-chart-h, 30dvh), 600px);
+  height: clamp(250px, var(--nf-chart-h, 30dvh), 600px);
 }
 
 #spectrumHost > .spectrum-inner {
@@ -259,7 +262,7 @@
 
 /* rail 外观与布局（提升层级，避免被覆盖导致按钮无响应） */
 /* 桌面模式：用 margin-top 实现 legend 顶部留白；窄屏不加 */
-.fc-chart-container.chart-flex:not(.is-narrow) #legendRail .legend-scroll {
+.fc-chart-container.chart-flex:not(.is-narrow):not(.legend-integrated) #legendRail .legend-scroll {
   margin-top: 5vh;
 }
 .fc-chart-container.chart-flex.is-narrow #legendRail .legend-scroll {
@@ -270,7 +273,8 @@
 .fc-chart-container.chart-flex #legendRail .legend-scroll{
   margin-left: 16px; 
 }
-
+#legendRail .legend-scroll { flex: 1 1 auto; overflow: auto; margin-bottom: 8px; }
+#legendRail .rail-actions { flex: 0 0 auto; display: flex; gap: 6px; justify-content: flex-end; }
 #legendRail {
   /* 独立于全局的 rail 过渡时长 */
   --rail-transition: .25s;
@@ -278,7 +282,7 @@
   z-index: auto;          
   flex: 0 0 auto; 
   max-width: min(48vw, 460px);
-  min-width: 160px;
+  min-width: 100px;
   box-sizing: border-box; background: transparent; padding: 0;
   display: flex; flex-direction: column; overflow: hidden;
   transition:
@@ -303,8 +307,7 @@
   flex: 1 1 auto;
   width: 100%;
 }
-#legendRail .legend-scroll { flex: 1 1 auto; overflow: auto; margin-bottom: 8px; }
-#legendRail .rail-actions { flex: 0 0 auto; display: flex; gap: 6px; justify-content: flex-end; }
+
 
 .fc-chart-container.chart-flex.is-narrow #legendRail {
   width: 100% !important;
@@ -508,14 +511,12 @@
   max-width: min(48vw, 460px);
   overflow-x: hidden;
 }
-/* 集成模式在全屏下，不再钳制 legendRail 的 max-width，交给 JS 精确计算 */
-:fullscreen .fc-chart-container.legend-integrated #legendRail {
-  max-width: none !important;
-}
+
 /* 集成模式下：移除 legend-scroll 左侧 margin，避免内容超宽 */
 .fc-chart-container.legend-integrated #legendRail .legend-scroll {
   margin-left: 0 !important;
   overflow-x: hidden; /* 保险：即使意外宽度超出也不显示水平滚动条 */
+  margin-top: 0 !important;
 }
 /* 集成模式包裹层 */
 .legend-integrated-wrapper {
@@ -528,6 +529,8 @@
 
 /* 集成头部（拟合开启时显示） */
 .integrated-fit-head {
+  position: sticky;
+  top: 0;
   display: none;
   align-items: center;
   gap: 12px;
@@ -535,10 +538,15 @@
   border: 1px solid var(--border-color);
   border-radius: 8px;
   background: var(--bg-bubble);
-  box-shadow: var(--shadow);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.04);
   font-size: 12px;
   line-height: 1.2;
-  position: relative;
+  z-index: 2;
+  backdrop-filter: blur(8px);
+}
+[data-theme="dark"] .integrated-fit-head {
+  box-shadow: 0 2px 10px rgba(0,0,0,0.25);
+
 }
 .integrated-fit-head.is-active { display: flex; }
 .integrated-fit-head .title {
@@ -688,5 +696,5 @@
 
 /* 按钮组在集成模式继续靠底或右对齐（可与原窄屏规则叠加） */
 .fc-chart-container.legend-integrated #legendRail .rail-actions {
-  padding: 4px 8px 8px 4px;
+  padding: 0;
 }

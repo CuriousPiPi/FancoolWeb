@@ -88,7 +88,7 @@ html, body { height:100%; overflow-x:hidden; }
 
 [data-theme="dark"] {
   --bg-primary:#111827;
-  --bg-secondary:#1f2937c3;
+  --bg-secondary:#202b39a7;
   --text-primary:#f3f4f6;
   --text-secondary:#d1d5db;
   --border-color:#374151;
@@ -1368,4 +1368,29 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
   background: var(--bg-primary) !important;
   border-color: var(--border-color) !important;
   color: var(--text-primary) !important;
+}
+
+/* 追加：移动端（≤600px）整体收紧边距/内边距，提升可视内容占比 */
+@media (max-width: 600px) {
+  /* 全局内容 gutter 更窄 */
+  :root {
+    --content-left-gutter: 12px;
+    --content-right-gutter: 12px;
+    --content-bottom-gap: 8px;
+    --bottom-title-gap: 6px;
+  }
+
+  /* 顶层容器左右/上下 padding 收紧（不改模板类） */
+  .container.mx-auto {
+    padding-left: 8px !important;
+    padding-right: 8px !important;
+    padding-top: 12px !important;
+    padding-bottom: 8px !important;
+  }
+
+  /* 通用卡片（左/右主卡）内边距从 24px 降到 12px */
+  .p-6 { padding: 12px !important; }
+
+  /* 图表容器（覆盖模板里的 p-4）进一步收紧 */
+  .fc-chart-container { padding: 8px !important; }
 }

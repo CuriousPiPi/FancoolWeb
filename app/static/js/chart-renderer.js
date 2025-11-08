@@ -168,16 +168,15 @@ function ensureLegendRail(){
   return rail;
 }
 
-// 仅替换 updateLegendRailLayout 中 integrated + fit 分支宽度计算部分
-
 function updateLegendRailLayout(){
   const shell = document.getElementById('chart-settings') || (root && root.closest('.fc-chart-container')) || null;
   if (!shell) return;
   shell.classList.add('chart-flex');
+
   const narrow = layoutIsNarrow();
   const integrated = isIntegratedLegendMode();
   shell.classList.toggle('legend-integrated', integrated);
-  if (narrow) shell.classList.add('is-narrow'); else shell.classList.remove('is-narrow');
+  shell.classList.toggle('is-narrow', !!narrow);
   if (!__legendRailEl) return;
 
   try {
@@ -185,12 +184,24 @@ function updateLegendRailLayout(){
     __legendRailEl.style.setProperty('--legend-top-gap', `${topGap}px`);
   } catch(_){}
 
+  // 窄屏且非全屏：直接 100%
   if (narrow && !isFs) {
-    __legendRailEl.style.width = '100%';
-    try { shell.style.setProperty('--legend-rail-w', '0px'); } catch(_){}
-    __legendRailEl.setAttribute('data-last-width','0');
+    const prev = __legendRailEl.getAttribute('data-last-width');
+    if (prev !== '0') {
+      __legendRailEl.style.width = '100%';
+      try { shell.style.setProperty('--legend-rail-w', '0px'); } catch(_){}
+      __legendRailEl.setAttribute('data-last-width','0');
+    }
     return;
   }
+
+  // 统一容器参考宽度
+  const hostW = Math.max(0, Math.round(shell.getBoundingClientRect().width || 0));
+  const baseW = (hostW < 200)
+    ? Math.max(window.innerWidth || 0, document.documentElement.clientWidth || 0)
+    : hostW;
+
+  let applied = null;
 
   if (integrated) {
     const themeName = (lastPayload && lastPayload.theme) || (document.documentElement.getAttribute('data-theme') || 'light');
@@ -198,115 +209,95 @@ function updateLegendRailLayout(){
     const sList = Array.isArray(lastPayload?.chartData?.series) ? lastPayload.chartData.series : [];
     const fitOn = !!showFitCurves && !!sList.length;
 
-    // 测量名称最大宽
+    // 仅测一次名称最大宽（两行取最大）
     const ctx = document.createElement('canvas').getContext('2d');
     const l1Font = `800 13px ${t.fontFamily}`;
     const l2Font = `500 11px ${t.fontFamily}`;
-    let maxNamePx = 0;
-    sList.forEach(s=>{
-      const brand = s.brand || s.brand_name_zh || s.brand_name || '';
-      const model = s.model || s.model_name || '';
-      const cond  = s.condition_name_zh || s.condition || '';
-      const line1 = (brand || model) ? `${brand} ${model}` : (s.name || '');
-      ctx.font = l1Font;
-      const w1 = ctx.measureText(line1).width || 0;
-      let w2 = 0;
-      if (cond) { ctx.font = l2Font; w2 = ctx.measureText(cond).width || 0; }
-      maxNamePx = Math.max(maxNamePx, w1, w2);
-    });
-    if (!Number.isFinite(maxNamePx) || maxNamePx <= 0) maxNamePx = 100;
-
-    const hostW = Math.max(0, Math.round(shell.getBoundingClientRect().width || 0));
-    const baseW = (hostW < 200) ? Math.max(window.innerWidth || 0, document.documentElement.clientWidth || 0) : hostW;
-
-    if (!fitOn) {
-      const paddingRail = 12;
-      const core = 12 + 8 + maxNamePx;
-      const total = core + paddingRail;
-      const minW = 200, maxW = 460;
-      let applied = Math.min(maxW, Math.max(minW, Math.round(total)));
-      if (applied > baseW - 24) applied = Math.min(baseW - 24, maxW);
-      if (applied < minW) applied = minW;
-
-      console.log('[Legend][Integrated-NoFit]', { maxNamePx:Math.round(maxNamePx), core, total, applied, hostW, baseW });
-      __legendRailEl.style.width = `${applied}px`;
-      try { shell.style.setProperty('--legend-rail-w', `${applied}px`); } catch(_){}
-      __legendRailEl.setAttribute('data-last-width', String(applied));
-      return;
+    let maxNamePx = 100;
+    if (sList.length) {
+      let mx = 0;
+      sList.forEach(s => {
+        const brand = s.brand || s.brand_name_zh || s.brand_name || '';
+        const model = s.model || s.model_name || '';
+        const cond  = s.condition_name_zh || s.condition || '';
+        const line1 = (brand || model) ? `${brand} ${model}` : (s.name || '');
+        ctx.font = l1Font;
+        const w1 = ctx.measureText(line1).width || 0;
+        let w2 = 0;
+        if (cond) { ctx.font = l2Font; w2 = ctx.measureText(cond).width || 0; }
+        mx = Math.max(mx, w1, w2);
+      });
+      if (Number.isFinite(mx) && mx > 0) maxNamePx = mx;
     }
 
-    // 拟合开启：固定列宽
-    ctx.font = `500 11px ${t.fontFamily}`;
-    const valPx   = ctx.measureText('999 CFM').width   || 0;
-    const pctPx   = ctx.measureText('(100%)').width    || 0;
-    const crossPx = ctx.measureText('9999 RPM').width  || 0;
-
-    // 实际列间距（column-gap）为 4px（CSS 已去掉 gap:8px），读一次以防未来改样式
-    let effectiveGap = 4;
-    try {
-      const testRow = __legendScrollEl?.querySelector('.legend-fit-grid.is-fit-on .legend-row');
-      if (testRow) {
-        const cs = getComputedStyle(testRow);
-        const cg = parseFloat(cs.columnGap || cs.gap || '4') || 4;
-        effectiveGap = cg;
-      }
-    } catch(_){}
-
-    // 固定部分：dot(12) + gapDot(8) + val + pct + sep(8) + cross + 6*gap
-    const fixedCols = 12 + 8 + valPx + pctPx + 8 + crossPx;
-    const gapsPx = effectiveGap * 6;
-    const fixedStructural = fixedCols + gapsPx;
-
-    // wrapper + row padding（不再加 legend-scroll margin-left，因为集成模式已去掉）
+    // 公共常量（保持算法不变）
     const wrapperPadX = 4 + 8;
-    const rowPadX = 4 + 4;
-    const extraPadding = wrapperPadX + rowPadX + 8; // 微调末端余量
+    const rowPadX     = 4 + 4;
+    const dotW        = 12;
+    const gapDotName  = 8;
+    const safety      = 4;
 
-    // 名称列想要的“舒适最小值”（可以改小/改大）
-    const MIN_NAME = 110; // px
-    // JS 估算总宽（理想宽度）
-    const idealTotal = fixedStructural + extraPadding + Math.max(MIN_NAME, maxNamePx);
+    if (!fitOn) {
+      // 非拟合（保持原公式）
+      const structural = dotW + gapDotName + wrapperPadX + rowPadX + safety;
+      const MIN_NAME = 100;
+      const minRail  = structural + MIN_NAME;
+      let idealTotal = structural + maxNamePx;
 
-    // 允许名称列根据 rail 最终宽度压缩：由于 CSS minmax(0,1fr)，真正能收缩到 0，这里硬下限保证不溢出
-    const minRailNeeded = fixedStructural + extraPadding + MIN_NAME;
+      applied = Math.round(Math.max(minRail, idealTotal));
+      const maxW = 460;
+      if (applied > maxW) applied = maxW;
+      if (applied > baseW - 24) applied = Math.max(minRail, baseW - 24);
+    } else {
+      // 拟合（保持原公式：ch→px、一致 gap、固定列等）
+      ctx.font = `500 11px ${t.fontFamily}`;
+      const chW   = ctx.measureText('0').width || 7;
+      const valPx = 7 * chW;
+      const pctPx = 7 * chW;
+      const crossPx = 8 * chW;
+      const sepW = 8;
 
-    const minW = Math.max(260, minRailNeeded); // 动态下限：不能比固定结构+MIN_NAME 更小
-    const maxW = 560;                          // 适度放宽上限，避免长名字频繁省略；你可以改回 460
-    let applied = Math.min(maxW, Math.max(minW, Math.round(idealTotal)));
+      // 实际 column-gap（默认 4）
+      let colGap = 4;
+      try {
+        const testRow = __legendScrollEl?.querySelector('.legend-fit-grid.is-fit-on .legend-row');
+        if (testRow) {
+          const cs = getComputedStyle(testRow);
+          colGap = parseFloat(cs.columnGap || cs.gap || '4') || 4;
+        }
+      } catch(_){}
+      const gapsTotal = colGap * 6;
 
-    // 若外层容器本身更窄，做一次收敛
-    if (applied > baseW - 24) applied = Math.min(baseW - 24, maxW);
-    if (applied < minW) applied = minW;
+      const fixedStructural =
+        dotW + gapDotName +
+        valPx + pctPx + sepW + crossPx +
+        gapsTotal +
+        wrapperPadX + rowPadX +
+        safety;
 
-    console.log('[Legend][Integrated-Fit-Final]', {
-      nameMeasured: Math.round(maxNamePx),
-      MIN_NAME,
-      valPx: Math.round(valPx),
-      pctPx: Math.round(pctPx),
-      crossPx: Math.round(crossPx),
-      gapEach: effectiveGap,
-      gapsPx,
-      fixedCols: Math.round(fixedCols),
-      fixedStructural: Math.round(fixedStructural),
-      wrapperPadX,
-      rowPadX,
-      extraPadding,
-      idealTotal: Math.round(idealTotal),
-      minRailNeeded: Math.round(minRailNeeded),
-      minW,
-      maxW,
-      applied,
-      hostW,
-      baseW
-    });
+      const MIN_NAME = 110;
+      const nameNeed = Math.max(MIN_NAME, maxNamePx);
+      applied = Math.round(fixedStructural + nameNeed);
 
-    __legendRailEl.style.width = `${applied}px`;
-    try { shell.style.setProperty('--legend-rail-w', `${applied}px`); } catch(_){}
-    __legendRailEl.setAttribute('data-last-width', String(applied));
+      const maxW = 560;
+      const minRail = fixedStructural + MIN_NAME;
+      if (applied < minRail) applied = minRail;
+      if (applied > maxW) applied = maxW;
+      if (applied > baseW - 24) applied = Math.min(maxW, Math.max(minRail, baseW - 24));
+    }
+
+    // 统一写 DOM（只写一次）
+    const lastW = __legendRailEl.getAttribute('data-last-width');
+    if (lastW !== String(applied)) {
+      __legendRailEl.style.width = `${applied}px`;
+      __legendRailEl.style.minWidth = '0px';
+      try { shell.style.setProperty('--legend-rail-w', `${applied}px`); } catch(_){}
+      __legendRailEl.setAttribute('data-last-width', String(applied));
+    }
     return;
   }
 
-  // 桌面模式保持原逻辑
+  // 桌面模式：保持原逻辑（不动算法）
   let textMax = 0;
   try {
     const t = tokens((lastPayload && lastPayload.theme) || (document.documentElement.getAttribute('data-theme') || 'light'));
@@ -325,16 +316,18 @@ function updateLegendRailLayout(){
       textMax = Math.max(textMax, w1, w2);
     });
   } catch(_){}
+
   const iconW = 12, gap = 8, pad = 12;
   const need = Math.ceil(iconW + gap + textMax + pad);
   const minW = 160, maxW = 320;
-  const applied = Math.max(minW, Math.min(maxW, need));
-  console.log('[Legend][Desktop]', { textMax:Math.round(textMax), need, applied });
-  __legendRailEl.style.width = `${applied}px`;
-  try {
-    shell.style.setProperty('--legend-rail-w', `${applied}px`);
+  applied = Math.max(minW, Math.min(maxW, need));
+
+  const lastDesktop = __legendRailEl.getAttribute('data-last-width');
+  if (lastDesktop !== String(applied)) {
+    __legendRailEl.style.width = `${applied}px`;
+    try { shell.style.setProperty('--legend-rail-w', `${applied}px`); } catch(_){}
     __legendRailEl.setAttribute('data-last-width', String(applied));
-  } catch(_){}
+  }
 }
 
 function renderLegendRailItems(){
