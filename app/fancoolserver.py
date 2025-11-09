@@ -937,80 +937,100 @@ def get_curves_for_pairs(pairs: List[Tuple[int, int]]) -> Dict[str, dict]:
 
 @app.post('/api/curves')
 def api_curves():
+    """
+    返回 canonicalSeries：
+      series: [
+        {
+          key, name, brand, model, condition,
+          model_id, condition_id,
+          resistance_type, resistance_location,
+          data: { rpm:[], noise_db:[], airflow:[] },
+          pchip: { rpm_to_airflow, rpm_to_noise_db, noise_to_rpm, noise_to_airflow }
+        }, ...
+      ]
+      missing: [ {model_id, condition_id}, ... ]
+    说明：
+      - 不再返回顶层 rpm/noise_db/airflow，也不使用 -1 作为占位。
+      - data.* 数组中允许出现 None（例如缺失的噪音或转速），前端会在渲染前清洗。
+    """
     try:
-        data = request.get_json(force=True, silent=True) or {}
-        raw_pairs = data.get('pairs') or []
-        uniq, seen = [], set()
-        for p in raw_pairs:
-            try:
-                mid = int(p.get('model_id'))
-                cid = int(p.get('condition_id'))
-            except Exception:
-                continue
-            t = (mid, cid)
-            if t in seen:
-                continue
-            seen.add(t)
-            uniq.append(t)
+      data = request.get_json(force=True, silent=True) or {}
+      raw_pairs = data.get('pairs') or []
+      uniq, seen = [], set()
+      for p in raw_pairs:
+          try:
+              mid = int(p.get('model_id'))
+              cid = int(p.get('condition_id'))
+          except Exception:
+              continue
+          t = (mid, cid)
+          if t in seen:
+              continue
+          seen.add(t)
+          uniq.append(t)
 
-        bucket = get_curves_for_pairs(uniq)
-        series = []
-        missing = []
+      # 空集合：直接返回空 series
+      if not uniq:
+          return resp_ok({'series': [], 'missing': []})
 
-        # 直接构建四合一模型（内部含失效判断）
-        perf_map = build_performance_pchips(uniq)
+      # 读取三轴点并按 (m,c) 聚合
+      bucket = get_curves_for_pairs(uniq)  # { "m_c": { rpm:[], airflow:[], noise_db:[], info:{...} } }
 
-        def _to_placeholder_array(arr):
-            out = []
-            for v in (arr or []):
-                try:
-                    if v is None:
-                        out.append(-1.0)
-                    else:
-                        fv = float(v)
-                        out.append(-1.0 if math.isnan(fv) else fv)
-                except Exception:
-                    out.append(-1.0)
-            return out
+      # 统一构建四合一拟合模型（含缓存/失效处理）
+      perf_map = build_performance_pchips(uniq)  # { "m_c": { pchip:{...} } }
 
-        wanted_keys = {f"{m}_{c}": (m, c) for (m, c) in uniq}
-        existing_keys = set(bucket.keys())
-        for key, (mid, cid) in wanted_keys.items():
-            if key not in existing_keys:
-                missing.append({'model_id': mid, 'condition_id': cid})
+      # 计算缺失集合
+      wanted_keys = {f"{m}_{c}": (m, c) for (m, c) in uniq}
+      existing_keys = set(bucket.keys())
+      missing = []
+      for key, (mid, cid) in wanted_keys.items():
+          if key not in existing_keys:
+              missing.append({'model_id': mid, 'condition_id': cid})
 
-        for mid, cid in uniq:
-            k = f"{mid}_{cid}"
-            b = bucket.get(k)
-            if not b:
-                continue
-            info = b['info']
+      series = []
+      for mid, cid in uniq:
+          k = f"{mid}_{cid}"
+          b = bucket.get(k)
+          if not b:
+              continue
+          info = b['info']  # 含品牌/型号/工况/风阻等
 
-            perf = perf_map.get(k) or {}
-            pset = (perf.get('pchip') or {})
+          # 四合一 PCHIP
+          perf = perf_map.get(k) or {}
+          pset = (perf.get('pchip') or {})
 
-            series.append(dict(
-                key=k,
-                name=f"{info['brand']} {info['model']} - {info['condition']}",
-                brand=info['brand'], model=info['model'],
-                condition=info['condition'],
-                model_id=info['model_id'], condition_id=info['condition_id'],
-                resistance_type=info.get('resistance_type'),
-                resistance_location=info.get('resistance_location'),
-                rpm=_to_placeholder_array(b['rpm']),
-                noise_db=_to_placeholder_array(b['noise_db']),
-                airflow=b['airflow'],
-                pchip={
-                    'rpm_to_airflow':   pset.get('rpm_to_airflow'),
-                    'rpm_to_noise_db':  pset.get('rpm_to_noise_db'),
-                    'noise_to_rpm':     pset.get('noise_to_rpm'),
-                    'noise_to_airflow': pset.get('noise_to_airflow')
-                }
-            ))
-        return resp_ok({'series': series, 'missing': missing})
+          # 直接使用原始数组；不再填充 -1，占位留给前端清洗
+          rpm_arr   = b.get('rpm') or []
+          noise_arr = b.get('noise_db') or []
+          air_arr   = b.get('airflow') or []
+
+          series.append(dict(
+              key=k,
+              name=f"{info['brand']} {info['model']} - {info['condition']}",
+              brand=info['brand'],
+              model=info['model'],
+              condition=info['condition'],
+              model_id=info['model_id'],
+              condition_id=info['condition_id'],
+              resistance_type=info.get('resistance_type'),
+              resistance_location=info.get('resistance_location'),
+              data={
+                  'rpm': rpm_arr,
+                  'noise_db': noise_arr,
+                  'airflow': air_arr
+              },
+              pchip={
+                  'rpm_to_airflow':   pset.get('rpm_to_airflow'),
+                  'rpm_to_noise_db':  pset.get('rpm_to_noise_db'),
+                  'noise_to_rpm':     pset.get('noise_to_rpm'),
+                  'noise_to_airflow': pset.get('noise_to_airflow')
+              }
+          ))
+
+      return resp_ok({'series': series, 'missing': missing})
     except Exception as e:
-        app.logger.exception(e)
-        return resp_err('INTERNAL_ERROR', f'后端异常: {e}', 500)
+      app.logger.exception(e)
+      return resp_err('INTERNAL_ERROR', f'后端异常: {e}', 500)
 
 # =========================================
 # Log Query

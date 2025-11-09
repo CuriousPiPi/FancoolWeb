@@ -524,49 +524,14 @@ window.applySidebarColors = function() {
 function isValidNum(v) {
   return typeof v === 'number' && Number.isFinite(v);
 }
-function filterChartDataForAxis(chartData) {
-  const axis = chartData.x_axis_type === 'noise' ? 'noise_db' : chartData.x_axis_type;
-  const cleaned = { ...chartData, series: [] };
-  chartData.series.forEach((s) => {
-    const rpmArr   = Array.isArray(s.rpm) ? s.rpm : [];
-    const noiseArr = Array.isArray(s.noise_db) ? s.noise_db : [];
-    const flowArr  = Array.isArray(s.airflow) ? s.airflow : [];
-    const xArr = axis === 'noise_db' ? noiseArr : rpmArr;
-    const rpmNew = [];
-    const noiseNew = [];
-    const flowNew = [];
-    for (let i = 0; i < xArr.length; i++) {
-      const x = xArr[i];
-      const y = flowArr[i];
-      if (isValidNum(x) && isValidNum(y)) {
-        rpmNew.push(isValidNum(rpmArr[i]) ? rpmArr[i] : null);
-        noiseNew.push(isValidNum(noiseArr[i]) ? noiseArr[i] : null);
-        flowNew.push(y);
-      }
-    }
-    const hasAxisPoints = axis === 'noise_db'
-      ? noiseNew.some(isValidNum)
-      : rpmNew.some(isValidNum);
-    if (flowNew.length > 0 && hasAxisPoints) {
-      cleaned.series.push({
-        ...s,
-        rpm: rpmNew,
-        noise_db: noiseNew,
-        airflow: flowNew
-      });
-    }
-  });
-  return cleaned;
-}
 
-// 替换 postChartData：移除展开态的滚动复位包裹
 function postChartData(chartData){
   lastChartData = chartData;
 
+  // 保留后端原始 data.* 三数组，不做轴向裁剪
   const prepared = withFrontColors(chartData);
-  const filtered = filterChartDataForAxis(prepared);
   const payload = {
-    chartData: filtered,
+    chartData: prepared,         // 直接传 canonical
     theme: currentThemeStr(),
     chartBg: getChartBg()
   };
@@ -574,9 +539,7 @@ function postChartData(chartData){
     payload.shareMeta = pendingShareMeta;
     pendingShareMeta = null;
   }
-
   if (window.ChartRenderer && typeof ChartRenderer.render === 'function') {
-    // 关键：不再做人为滚动读写，交给浏览器原生锚定
     ChartRenderer.render(payload);
   }
 }
@@ -961,9 +924,9 @@ function setTheme(t) {
         // 动画结束后清理临时变量，并清空渐变，确保下次进入 dark 一定会生成新渐变
         setTimeout(() => {
           if (myId !== THEME_OP_ID) return; // 防止竞态
-          root.style.removeProperty('--grad-opacity');
-          root.style.removeProperty('--bg-primary');
-          root.style.removeProperty('--dark-rand-gradient'); // 关键：清掉以便下次重新生成
+            root.style.removeProperty('--grad-opacity');
+            root.style.removeProperty('--bg-primary');
+            root.style.removeProperty('--dark-rand-gradient'); // 关键：清掉以便下次重新生成
         }, 520); // 略大于 .5s 过渡
       });
     });
@@ -972,9 +935,9 @@ function setTheme(t) {
   // 同步图标
   if (themeIcon) themeIcon.className = t === 'dark' ? 'fa-solid fa-sun' : 'fa-solid fa-moon';
 
-  // 统一保存 + 上报（本地 + 后端）
+  // 统一保存（仅本地，不再通知服务端）
   if (window.ThemePref && typeof window.ThemePref.save === 'function') {
-    window.ThemePref.save(t, { notifyServer: true });
+    window.ThemePref.save(t, { notifyServer: false });
   }
 
   // 等两帧再刷新图表/布局（保留原逻辑）
@@ -1694,12 +1657,13 @@ function scheduleAdjust(){
           const nx = (next === 'noise') ? 'noise_db' : next;
           try { localStorage.setItem('x_axis_type', nx); } catch(_) {}
           frontXAxisType = nx;
-          // 同步给应用状态（影响 /api/curves 的 x_axis_type）
           if (typeof LocalState?.setXAxisType === 'function') {
             try { LocalState.setXAxisType(nx); } catch(_) {}
           }
-          // 重新取数并渲染（避免沿用旧轴裁剪过的数据）
-          refreshChartFromLocal(false);
+          // 不重新请求，只重新渲染（使用旧的 canonicalSeries）
+          if (lastChartData) {
+            postChartData(lastChartData);  // 因为我们不再过滤，这相当于立即切轴
+          }
         });
       }
     }
