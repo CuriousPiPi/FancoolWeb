@@ -338,7 +338,7 @@ def api_calib_upload_zip():
                 try: shutil.rmtree(base_path, ignore_errors=True)
                 except Exception: pass
 
-                # 并确保响应里返回 bindings 字段（你之前已加，这里只是确认包含 name 字段）
+                # 并确保响应里返回 bindings 字段
                 return resp_ok({
                     'duplicated': 1,
                     'bound_count': int(len(bindings)),

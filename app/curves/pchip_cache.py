@@ -73,7 +73,6 @@ def _env_inmem_max_models() -> int:
     return max(0, _env_int("CURVE_CACHE_INMEM_MAX_MODELS", 2000))
 
 def _env_inmem_max_points() -> int:
-    # 兼容旧默认 200000；如你之前设 150000 也会生效
     return max(0, _env_int("CURVE_CACHE_INMEM_MAX_POINTS", 200000))
 
 def _env_inmem_admit_hits() -> int:
