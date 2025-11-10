@@ -30,16 +30,12 @@
   let __specPending = false;
   let __specFetchInFlight = false;
   let __specRerunQueued = false;
-  let __lastFetchKeyHash = '';
 
   const NARROW_BREAKPOINT = 1024;   // 窄屏阈值（可按需调整）
   const NARROW_HYSTERESIS = 48;     // 迟滞窗口（像素），用于防抖
   const LEGEND_OFFSET = 50;     // Legend 顶部下移像素
-
-  let __mainHLocked = false;
-  
   let spectrumDockEl = null;
-  let __dockCooldownUntil = 0;
+
 
 function ensureSpectrumDock() {
   if (spectrumDockEl && spectrumDockEl.isConnected) return spectrumDockEl;
@@ -59,10 +55,8 @@ function ensureSpectrumDock() {
 
   btn.addEventListener('click', (e) => {
     e.preventDefault();
-    // 直接切换，不做冷却节流
-    spectrumEnabled = !spectrumEnabled;
-    syncSpectrumDockUi();
-    toggleSpectrumUI(spectrumEnabled);
+    // 统一交给 SpectrumController（含动画/高度/构建/Loading）
+    SpectrumController.setEnabled(!SpectrumController.isEnabled(), { animate: true });
   });
 
   const shell =
@@ -117,10 +111,6 @@ function placeSpectrumDock() {
     __specTimers.add(id);
     return id;
   }
-
-function __hashWantedSet(set) {
-  try { return Array.from(set).sort().join('|'); } catch(_) { return ''; }
-}
 
 function ensureLegendRail(){
   const shell = document.getElementById('chart-settings') || (root && root.closest('.fc-chart-container')) || null;
@@ -207,68 +197,54 @@ function updateLegendRailLayout(){
 function renderLegendRailItems(){
   ensureLegendRail();
   if (!__legendScrollEl) return;
-  const sList = getSeriesArray(); // 改用 canonical
+
+  const sList = getSeriesArray();
   const selMap = getLegendSelectionMap();
   const isNarrowNow = layoutIsNarrow();
   const integrated = isIntegratedLegendMode();
   const fitOn = integrated && showFitCurves && sList.length;
 
-  const items = sList.map(s => {
-    const baseName = s.name || `${s.brand||''} ${s.model||''} - ${s.condition||''}`;
-    return ({
-      name: baseName,
-      brand: s.brand || '',
-      model: s.model || '',
-      condition: s.condition || '',
-      color: s.color,
-      selected: selMap ? (selMap[baseName] !== false) : true
+  // 非集成拟合模式 或 拟合关闭：渲染基础 Legend 列表
+  if (!fitOn) {
+    const items = sList.map(s => {
+      const baseName = s.name || `${s.brand||''} ${s.model||''} - ${s.condition||''}`;
+      return {
+        name: baseName,
+        brand: s.brand || '',
+        model: s.model || '',
+        condition: s.condition || '',
+        color: s.color,
+        selected: selMap ? (selMap[baseName] !== false) : true
+      };
     });
-  });
 
-  if (integrated) {
-    const headHtml = `
-      <div class="integrated-fit-head ${fitOn ? 'is-active' : ''}">
-        <div class="title">${FIT_ALGO_NAME} 估算值</div>
-        <div class="x-input">
-          <label for="fitXInputLegend" class="lab">X位置</label>
-          <input id="fitXInputLegend" type="number" step="1" />
-          <span id="fitXUnitLegend" class="unit"></span>
-        </div>
-      </div>
-    `;
-
-    const rowHtml = items.map(it => {
+    __legendScrollEl.innerHTML = items.map(it => {
       const base = (it.brand || it.model) ? `${it.brand} ${it.model}` : it.name;
-      let nameSpan = `<span class="l1">${base}</span>`;
-      const hasL2 = (!isNarrowNow && it.condition);
-      if (isNarrowNow && it.condition) nameSpan += `<span class="cond-inline"> - ${it.condition}</span>`;
       const offClass = it.selected ? '' : 'is-off';
-      const fitCols = fitOn ? `
-        <span class="col-val" data-name="${it.name}">—</span>
-        <span class="col-pct" data-name="${it.name}">—</span>
-        <span class="col-sep">│</span>
-        <span class="col-cross" data-name="${it.name}">—</span>
-      ` : '';
-      return `
-        <div class="legend-row hoverable-row ${offClass}" data-name="${it.name}">
-          <span class="dot" style="background:${it.color}"></span>
-          <span class="name${hasL2 ? ' has-l2' : ''}" title="${base}${it.condition ? ' / ' + it.condition : ''}">
-            ${nameSpan}${hasL2 ? `<span class="l2">${it.condition}</span>`:''}
-          </span>
-          ${fitCols}
-        </div>
-      `;
+      if (isNarrowNow) {
+        const condInline = it.condition ? `<span class="cond-inline"> - ${it.condition}</span>` : '';
+        return `
+          <div class="legend-row hoverable-row ${offClass}" data-name="${it.name}">
+            <span class="dot" style="background:${it.color}"></span>
+            <span class="name" title="${base}${it.condition ? ' / ' + it.condition : ''}">
+              <span class="l1">${base}</span>${condInline}
+            </span>
+          </div>
+        `;
+      } else {
+        return `
+          <div class="legend-row hoverable-row ${offClass}" data-name="${it.name}">
+            <span class="dot" style="background:${it.color}"></span>
+            <span class="name has-l2" title="${base}${it.condition ? ' / ' + it.condition : ''}">
+              <span class="l1">${base}</span>
+              ${it.condition ? `<span class="l2">${it.condition}</span>` : ``}
+            </span>
+          </div>
+        `;
+      }
     }).join('');
 
-    __legendScrollEl.innerHTML = `
-      <div class="legend-integrated-wrapper ${fitOn ? 'fit-on' : 'fit-off'}">
-        ${headHtml}
-        <div class="legend-fit-grid ${fitOn ? 'is-fit-on' : ''}">
-          ${rowHtml}
-        </div>
-      </div>
-    `;
-
+    // 行交互
     __legendScrollEl.querySelectorAll('.legend-row').forEach(node => {
       const name = node.getAttribute('data-name') || '';
       node.addEventListener('click', () => {
@@ -281,77 +257,33 @@ function renderLegendRailItems(){
         if (spectrumEnabled && spectrumChart) {
           try { spectrumChart.dispatchAction({ type: actionType, name }); } catch(_){}
         }
-        refreshFitBubble();
+        if (showFitCurves) refreshFitPanel(); // 使用统一面板刷新
       });
       node.addEventListener('mouseenter', () => { if (name && chart) try { chart.dispatchAction({ type: 'highlight', seriesName: name }); } catch(_){} });
       node.addEventListener('mouseleave', () => { if (name && chart) try { chart.dispatchAction({ type: 'downplay', seriesName: name }); } catch(_){} });
     });
 
-    const inp = getById('fitXInputLegend');
-    if (inp) {
-      inp.addEventListener('input', () => {
-        const mode = currentXModeFromPayload(lastPayload);
-        const raw = Number(inp.value);
-        if (!Number.isFinite(raw)) return;
-        xQueryByMode[mode] = clampXDomain(raw);
-        clampXQueryIntoVisibleRange();
-        repaintPointer();
-        refreshFitBubble();
-        if (spectrumEnabled && spectrumChart) scheduleSpectrumRebuild();
-      });
-      inp.addEventListener('change', () => {
-        repaintPointer();
-        refreshFitBubble();
-        if (spectrumEnabled && spectrumChart) scheduleSpectrumRebuild();
-      });
-    }
     return;
   }
 
-  // 非集成模式
-  __legendScrollEl.innerHTML = items.map(it => {
-    const base = (it.brand || it.model) ? `${it.brand} ${it.model}` : it.name;
-    const offClass = it.selected ? '' : 'is-off';
-    if (isNarrowNow) {
-      const condInline = it.condition ? `<span class="cond-inline"> - ${it.condition}</span>` : '';
-      return `
-        <div class="legend-row hoverable-row ${offClass}" data-name="${it.name}">
-          <span class="dot" style="background:${it.color}"></span>
-          <span class="name" title="${base}${it.condition ? ' / ' + it.condition : ''}">
-            <span class="l1">${base}</span>${condInline}
-          </span>
-        </div>
-      `;
-    } else {
-      return `
-        <div class="legend-row hoverable-row ${offClass}" data-name="${it.name}">
-          <span class="dot" style="background:${it.color}"></span>
-          <span class="name has-l2" title="${base}${it.condition ? ' / ' + it.condition : ''}">
-            <span class="l1">${base}</span>
-            ${it.condition ? `<span class="l2">${it.condition}</span>` : ``}
-          </span>
-        </div>
-      `;
-    }
-  }).join('');
-
-  __legendScrollEl.querySelectorAll('.legend-row').forEach(node => {
-    const name = node.getAttribute('data-name') || '';
-    node.addEventListener('click', () => {
-      if (!name || !chart) return;
-      const sel = getLegendSelectionMap();
-      const currentlyVisible = sel ? (sel[name] !== false) : true;
-      const actionType = currentlyVisible ? 'legendUnSelect' : 'legendSelect';
-      node.classList.toggle('is-off', currentlyVisible);
-      try { chart.dispatchAction({ type: actionType, name }); } catch(_){}
-      if (spectrumEnabled && spectrumChart) {
-        try { spectrumChart.dispatchAction({ type: actionType, name }); } catch(_){}
-      }
-      if (showFitCurves) refreshFitBubble();
-    });
-    node.addEventListener('mouseenter', () => { if (name && chart) try { chart.dispatchAction({ type: 'highlight', seriesName: name }); } catch(_){} });
-    node.addEventListener('mouseleave', () => { if (name && chart) try { chart.dispatchAction({ type: 'downplay', seriesName: name }); } catch(_){} });
-  });
+  // 集成拟合模式：渲染骨架，具体数值由 refreshFitPanel -> renderFitPanel 填充
+  const headHtml = `
+    <div class="integrated-fit-head is-active">
+      <div class="title">${FIT_ALGO_NAME} 估算值</div>
+      <div class="x-input">
+        <label for="fitXInputLegend" class="lab">X位置</label>
+        <input id="fitXInputLegend" type="number" step="1" />
+        <span id="fitXUnitLegend" class="unit"></span>
+      </div>
+    </div>
+  `;
+  __legendScrollEl.innerHTML = `
+    <div class="legend-integrated-wrapper fit-on">
+      ${headHtml}
+      <div class="legend-fit-grid is-fit-on"></div>
+    </div>
+  `;
+  // 具体渲染交给 refreshFitPanel()
 }
 
 function syncLegendRailFromChart(){
@@ -554,12 +486,18 @@ function bindGlobalListeners(){
     if (!isFs) {
       if (spectrumRoot) spectrumRoot.style.marginTop = '0px';
 
-      if (!spectrumEnabled) {
-        try { modeHost.removeAttribute('data-chart-mode'); } catch(_) {}
-        if (root) try { root.style.minHeight = ''; } catch(_) {}
-      } else {
-        __ensureMainChartMinHeightForSpectrumMode();
+      // 非全屏：统一清理模式标记与内联高度属性，回到 CSS 自适应
+      try { modeHost.removeAttribute('data-chart-mode'); } catch(_) {}
+      if (root) {
+        try { root.style.minHeight = ''; } catch(_) {}
       }
+      try {
+        if (spectrumRoot) {
+          spectrumRoot.style.removeProperty('max-height');
+          spectrumRoot.style.removeProperty('flex');
+          spectrumRoot.style.removeProperty('--fs-spec-h');
+        }
+      } catch(_) {}
 
       if (screen.orientation && screen.orientation.unlock) {
         try { screen.orientation.unlock(); } catch(_) {}
@@ -572,8 +510,8 @@ function bindGlobalListeners(){
 
     requestAnimationFrame(() => {
       try {
-        // 切换全屏模式后，同步频谱展开/收起状态（不做二次动画）
-        syncSpectrumStateAcrossModes({ animate: false });
+        // 交由 SpectrumController 在模式切换后统一同步（避免复写 tooltip 附着语义）
+        SpectrumController.onFullscreenChange(isFs);
 
         placeFitUI();
         repaintPointer();
@@ -612,11 +550,12 @@ function bindChartListeners(){
 
   chart.on('dataZoom', () => {
     clampXQueryIntoVisibleRange();
-    layoutScheduler.mark('pointer');           // repaintPointer()
-    if (showFitCurves) layoutScheduler.mark('fitUI'); // refreshFitBubble 由 repaintPointer 内部触发
+    layoutScheduler.mark('pointer');
+    if (showFitCurves) layoutScheduler.mark('fitUI');
 
     if (__skipSpectrumOnce || suppress.active('spectrum')) return;
-    if (spectrumEnabled && spectrumChart) scheduleSpectrumRebuild();
+    // 改：统一经由 SpectrumController（内部会 rAF 合并与安全检查）
+    SpectrumController.onXQueryChange(xQueryByMode[currentXModeFromPayload(lastPayload)]);
   });
 }
 
@@ -891,27 +830,23 @@ function render(payload){
   primeRootRect();
   maybeStartRootPosWatch(600);
 
-  try {
-    const onFinished = () => {
-      try { chart.off('finished', onFinished); } catch(_){}
-      repaintPointer();
-      updateSpectrumLayout();
-
-      if (spectrumEnabled) {
-        if (__skipSpectrumOnce || performance.now() < __suppressSpectrumUntil) {
-        } else {
-          requestAndRenderSpectrum(/*forceFull*/ true);
+    try {
+      const onFinished = () => {
+        try { chart.off('finished', onFinished); } catch(_){}
+        repaintPointer();
+        updateSpectrumLayout();
+        if (spectrumEnabled && !__skipSpectrumOnce) {
+          requestAndRenderSpectrum(true);
         }
-      }
-      setTimeout(() => { __skipSpectrumOnce = false; }, 450);
-      try { syncLegendRailFromChart(); } catch(_){}
-    };
-    chart.on('finished', onFinished);
-  } catch(_){}
+        setTimeout(() => { __skipSpectrumOnce = false; }, 450);
+        try { syncLegendRailFromChart(); } catch(_){}
+      };
+      chart.on('finished', onFinished);
+    } catch(_){}
 
-  requestAnimationFrame(repaintPointer);
-  if (showFitCurves) refreshFitBubble();
-}
+      requestAnimationFrame(repaintPointer);
+      if (showFitCurves) refreshFitPanel();
+    }
 
   function resize(){ if (chart) chart.resize(); }
 
@@ -1151,7 +1086,7 @@ function buildOption(payload) {
       toggleFitUI(showFitCurves);
       placeFitUI();
       repaintPointer();
-      refreshFitBubble();
+      refreshFitPanel();
       updateLegendRailLayout();
       updateRailParkedState();
       try { chart && chart.resize(); } catch(_){}
@@ -1452,8 +1387,8 @@ function ensureFitUI(){
       toggleFitUI(showFitCurves);
       placeFitUI();
       repaintPointer();
-      refreshFitBubble();
-      updateLegendRailLayout();     // 关键：切换拟合后立刻让 rail 重新定宽
+      refreshFitPanel();          // 改：统一刷新 FitPanel
+      updateLegendRailLayout();   // 切换拟合后立刻定宽
       updateRailParkedState();
       try { chart && chart.resize(); } catch(_) {}
     });
@@ -1472,10 +1407,7 @@ function ensureFitUI(){
     bindPointerDrag();
   }
 
-  // 集成模式：不创建浮动气泡
-  if (isIntegratedLegendMode()) return;
-
-  // 浮动气泡（仅桌面/非集成）
+  // 浮动气泡（仅桌面/非集成容器，内容由 renderFitPanel 渲染）
   let bubble = getById('fitBubble');
   if (!bubble){
     bubble = document.createElement('div');
@@ -1519,7 +1451,7 @@ function ensureFitUI(){
         toggleFitUI(false);
         updateRailParkedState();
         repaintPointer();
-        refreshFitBubble();
+        refreshFitPanel();        // 改
         updateLegendRailLayout();
         try { chart && chart.resize(); } catch(_) {}
       });
@@ -1581,25 +1513,24 @@ function toggleFitUI(showFit){
   const empty  = !lastOption || lastOption.__empty;
   const integrated = isIntegratedLegendMode();
 
+  // 拟合按钮：始终跟随是否有内容可显示
   if (btns) btns.style.visibility = empty ? 'hidden' : 'visible';
 
+  // 仅切换 panel 模式与可见性；内容由 refreshFitPanel/renderFitPanel 统一渲染
   if (integrated) {
     if (bubble) bubble.style.visibility = 'hidden';
     if (ptr) ptr.style.visibility = (showFit && !empty) ? 'visible' : 'hidden';
+    // 集成模式下，renderLegendRailItems 会绘制基础容器；refreshFitPanel 会填充内容
     renderLegendRailItems();
-    updateLegendRailLayout();                     // 切换拟合后立即定一次宽
-    return;
+  } else {
+    const showFloating = showFit && !empty;
+    if (bubble) bubble.style.visibility = showFloating ? 'visible' : 'hidden';
+    if (ptr)    ptr.style.visibility    = showFloating ? 'visible' : 'hidden';
   }
-
-  const showFloating = showFit && !empty;
-  if (bubble) bubble.style.visibility = showFloating ? 'visible' : 'hidden';
-  if (ptr)    ptr.style.visibility    = showFloating ? 'visible' : 'hidden';
 
   updateRailParkedState();
 }
 
-
-/* 修改：placeFitUI —— 集成模式只同步单位与输入，不定位浮动气泡 */
 function placeFitUI(){
   const btns = getById('fitButtons');
   const bubble = getById('fitBubble');
@@ -1628,24 +1559,7 @@ function placeFitUI(){
 
   const unitStr = (currentXModeFromPayload(lastPayload) === 'rpm') ? 'RPM' : 'dB';
 
-  if (integrated) {
-    const unitSpan = getById('fitXUnitLegend');
-    if (unitSpan) unitSpan.textContent = unitStr;
-    const inp = getById('fitXInputLegend');
-    if (inp && xQueryByMode[currentXModeFromPayload(lastPayload)] != null) {
-      const mode = currentXModeFromPayload(lastPayload);
-      const val = Number(xQueryByMode[mode]);
-      const rounded = (mode === 'noise_db') ? Number(val.toFixed(1)) : Math.round(val);
-      inp.value = String(rounded);
-      const [vx0, vx1] = getVisibleXRange();
-      inp.setAttribute('min', String(Math.floor(vx0)));
-      inp.setAttribute('max', String(Math.ceil(vx1)));
-      inp.setAttribute('step', (mode === 'noise_db') ? '0.1' : '1');
-    }
-    return;
-  }
-
-  if (bubble){
+  if (!integrated && bubble){
     const r = root ? root.getBoundingClientRect() : { left:0, top:0 };
     const grid = lastOption.grid || { left:40, top:60 };
     const left = (typeof grid.left==='number') ? grid.left : 40;
@@ -1675,6 +1589,11 @@ function placeFitUI(){
     bubble.style.visibility = showFloating ? 'visible' : 'hidden';
 
     const unitSpan = bubble.querySelector('#fitXUnit');
+    if (unitSpan) unitSpan.textContent = unitStr;
+  }
+
+  if (integrated) {
+    const unitSpan = getById('fitXUnitLegend');
     if (unitSpan) unitSpan.textContent = unitStr;
   }
 }
@@ -1718,8 +1637,8 @@ function bindPointerDrag(){
       if (Number.isFinite(xVal)) {
         xQueryByMode[mode] = clampXDomain(xVal);
         syncBubbleInput();
-        if (showFitCurves) refreshFitBubble();
-        if (spectrumEnabled && spectrumChart) scheduleSpectrumRebuild();
+        if (showFitCurves) refreshFitPanel(); // 改：统一刷新
+        SpectrumController.onXQueryChange(xQueryByMode[mode]);
       }
     },
     onEnd: () => {
@@ -1776,7 +1695,7 @@ function bindPointerDrag(){
     ptr.style.visibility = 'visible';
 
     syncBubbleInput();
-    if (showFitCurves) refreshFitBubble();
+    if (showFitCurves) refreshFitPanel();
   }
 
   function syncBubbleInput(){
@@ -1793,199 +1712,29 @@ function bindPointerDrag(){
     inp.setAttribute('step', (mode === 'noise_db') ? '0.1' : '1');
   }
 
-  function onBubbleInputLive(){
-    const inp = getById('fitXInput');
-    if (!inp) return;
-    const mode = currentXModeFromPayload(lastPayload);
-    const raw = Number(inp.value);
-    if (!Number.isFinite(raw)) return;
-    xQueryByMode[mode] = clampXDomain(raw);
-    clampXQueryIntoVisibleRange();
-
-    const xPixel = dataToPxX(xQueryByMode[mode]);
-    const ptr = getById('fitPointer');
-    if (ptr && Number.isFinite(xPixel)) ptr.style.left = xPixel + 'px';
-
-    if (showFitCurves) refreshFitBubble();
-    // 实时同步频谱
-    if (spectrumEnabled && spectrumChart) scheduleSpectrumRebuild();
-  }
-  function onBubbleInputCommit(){
-    repaintPointer();
-    refreshFitBubble();
-    // 实时同步频谱
-    if (spectrumEnabled && spectrumChart) scheduleSpectrumRebuild();
-  }
-
-function refreshFitBubble() {
-  const integrated = isIntegratedLegendMode();
-  const sList = getSeriesArray(); // 改为 canonical
-  if (!showFitCurves || !lastPayload || !chart || (lastOption && lastOption.__empty)) {
-    if (integrated) {
-      const gridWrap = __legendScrollEl?.querySelector('.legend-fit-grid');
-      if (gridWrap) {
-        gridWrap.classList.remove('is-fit-on');
-        gridWrap.querySelectorAll('.col-val,.col-pct,.col-cross').forEach(el => { el.textContent = '—'; });
-      }
-    } else {
-      const bubble = getById('fitBubble');
-      if (bubble) bubble.style.visibility = 'hidden';
-    }
-    return;
-  }
-
+function onBubbleInputLive(){
+  const inp = getById('fitXInput');
+  if (!inp) return;
   const mode = currentXModeFromPayload(lastPayload);
-  const x = xQueryByMode[mode];
-  if (x == null) return;
+  const raw = Number(inp.value);
+  if (!Number.isFinite(raw)) return;
+  xQueryByMode[mode] = clampXDomain(raw);
+  clampXQueryIntoVisibleRange();
 
-  const opt = chart.getOption() || {};
-  const selMap = (opt.legend && opt.legend[0] && opt.legend[0].selected) || {};
-  const items = computeFitRows(mode, x, sList, selMap);
+  const xPixel = dataToPxX(xQueryByMode[mode]);
+  const ptr = getById('fitPointer');
+  if (ptr && Number.isFinite(xPixel)) ptr.style.left = xPixel + 'px';
 
-  // 基准与排序
-  const visibleItems = items.filter(it => it.selected);
-  const withVal = visibleItems.filter(it => Number.isFinite(it.y)).sort((a,b)=>b.y - a.y);
-  const base = (withVal.length && withVal[0].y > 0) ? withVal[0].y : 0;
-  const pctVal = (v)=> (Number.isFinite(v) && base > 0) ? Math.round((v / base) * 100) : null;
-
-  // 集成模式：写入 legend 行
-  if (integrated) {
-    __legendScrollEl.style.setProperty('--fit-col-val-ch',   '7');
-    __legendScrollEl.style.setProperty('--fit-col-pct-ch',   '7');
-    __legendScrollEl.style.setProperty('--fit-col-cross-ch', '8');
-
-    const rowsMap = {};
-    __legendScrollEl.querySelectorAll('.legend-row[data-name]').forEach(r => {
-      rowsMap[r.getAttribute('data-name')] = r;
-    });
-
-    items.forEach(it => {
-      const row = rowsMap[it.name];
-      if (!row) return;
-      const valEl = row.querySelector('.col-val');
-      const pctEl = row.querySelector('.col-pct');
-      const crossEl = row.querySelector('.col-cross');
-      if (valEl) {
-        if (Number.isFinite(it.y)) {
-          valEl.textContent = `${Math.round(it.y)} CFM`;
-          const pct = pctVal(it.y);
-          if (pctEl) pctEl.textContent = (pct == null) ? '—' : `(${pct}%)`;
-        } else {
-          valEl.textContent = '—';
-          if (pctEl) pctEl.textContent = '—';
-        }
-      }
-      if (crossEl) {
-        if (Number.isFinite(it.cross)) {
-          crossEl.textContent = (mode === 'noise_db')
-            ? `${String(Math.round(it.cross)).padStart(4,'0')} RPM`
-            : `${Number(it.cross).toFixed(1)} dB`;
-        } else {
-          crossEl.textContent = '—';
-        }
-      }
-      row.classList.toggle('is-off', !it.selected);
-    });
-
-    // 排序（有值在前）
-    try {
-      const parent = __legendScrollEl.querySelector('.legend-fit-grid');
-      if (parent) {
-        const withValAll = items.filter(i => Number.isFinite(i.y)).sort((a,b)=> b.y - a.y);
-        const noValAll   = items.filter(i => !Number.isFinite(i.y));
-        [...withValAll, ...noValAll].forEach(it => {
-          const row = rowsMap[it.name];
-          if (row) parent.appendChild(row);
-        });
-      }
-    } catch(_) {}
-
-    const unitSpan = getById('fitXUnitLegend');
-    if (unitSpan) unitSpan.textContent = (mode === 'rpm') ? 'RPM' : 'dB';
-    const inp = getById('fitXInputLegend');
-    if (inp && x != null) inp.value = (mode === 'noise_db') ? Number(x).toFixed(1) : String(Math.round(x));
-
-    const gridWrap = __legendScrollEl.querySelector('.legend-fit-grid');
-    if (gridWrap) gridWrap.classList.add('is-fit-on');
-    return;
-  }
-
-  // 浮动气泡（桌面）
-  const bubble = getById('fitBubble');
-  if (!bubble) return;
-
-  const rowsEl = bubble.querySelector('#fitBubbleRows');
-  // 列宽固定（不测量）
-  bubble.style.setProperty('--fit-col-val-ch', '7');
-  bubble.style.setProperty('--fit-col-pct-ch', '7');
-  bubble.style.setProperty('--fit-col-cross-ch', '8');
-
-  const withValAll = items.filter(it => Number.isFinite(it.y)).sort((a,b)=> b.y - a.y);
-  const noValAll   = items.filter(it => !Number.isFinite(it.y));
-  const ordered = [...withValAll, ...noValAll];
-
-  rowsEl.innerHTML = ordered.map(it => {
-    const hasY = Number.isFinite(it.y);
-    const valText = hasY ? `${Math.round(it.y)} CFM` : '—';
-    const pct = hasY ? pctVal(it.y) : null;
-    const pctText = (pct==null) ? '—' : `(${pct}%)`;
-    let crossText = '—';
-    if (Number.isFinite(it.cross)) {
-      crossText = (mode === 'noise_db')
-        ? `${String(Math.round(it.cross)).padStart(4,'0')} RPM`
-        : `${Number(it.cross).toFixed(1)} dB`;
-    }
-    const baseName = (it.brand || it.model) ? `${it.brand} ${it.model}`.trim() : it.name;
-    const condInline = it.condition
-      ? `<span class="sep"> - </span><span class="cond-inline" style="color:var(--text-);white-space:nowrap;">${it.condition}</span>`
-      : '';
-
-    return `
-      <div class="row ${it.selected ? '' : 'is-off'}" data-name="${it.name}">
-        <span class="dot" style="background:${it.color}"></span>
-        <span></span>
-        <span class="col-name">${baseName}${condInline}</span>
-        <span class="col-val">${valText}</span>
-        <span class="col-pct">${pctText}</span>
-        <span class="col-sep">│</span>
-        <span class="col-cross">${crossText}</span>
-      </div>
-    `;
-  }).join('');
-
-  rowsEl.querySelectorAll('.row[data-name]').forEach(node => {
-    const name = node.getAttribute('data-name') || '';
-    node.addEventListener('pointerdown', (e) => { e.stopPropagation(); }, { passive:true });
-    node.addEventListener('mouseenter', () => {
-      if (!name) return;
-      try { chart.dispatchAction({ type: 'highlight', seriesName: name }); } catch(_){}
-      if (spectrumEnabled && spectrumChart) {
-        try { spectrumChart.dispatchAction({ type: 'highlight', seriesName: name }); } catch(_){}
-      }
-    }, { passive:true });
-    node.addEventListener('mouseleave', () => {
-      if (!name) return;
-      try { chart.dispatchAction({ type: 'downplay', seriesName: name }); } catch(_){}
-      if (spectrumEnabled && spectrumChart) {
-        try { spectrumChart.dispatchAction({ type: 'downplay', seriesName: name }); } catch(_){}
-      }
-    }, { passive:true });
-    node.addEventListener('click', (e) => {
-      e.preventDefault();
-      e.stopPropagation();
-      if (!name) return;
-      const sel = getLegendSelectionMap();
-      const visible = sel ? (sel[name] !== false) : true;
-      const actionType = visible ? 'legendUnSelect' : 'legendSelect';
-      try { chart.dispatchAction({ type: actionType, name }); } catch(_){}
-      if (spectrumEnabled && spectrumChart) {
-        try { spectrumChart.dispatchAction({ type: actionType, name }); } catch(_){}
-      }
-      try { syncLegendRailFromChart(); } catch(_){}
-      refreshFitBubble();
-    });
-  });
+  if (showFitCurves) refreshFitPanel();    
+  SpectrumController.onXQueryChange(xQueryByMode[mode]);
 }
+
+function onBubbleInputCommit(){
+  repaintPointer();
+  refreshFitPanel();                        
+  SpectrumController.onXQueryChange(xQueryByMode[currentXModeFromPayload(lastPayload)]);
+}
+
 
 function ensureFitModels(sList, xMode){
   const models = fitModelsCache[xMode];
@@ -2152,13 +1901,16 @@ function evalPchipJS(model, x){
       isFs = false;
       adoptBubbleHost();
       bubbleUserMoved = false;
-  
-      // 退出全屏：先修正 minHeight，再做一次布局收敛，避免高度偏大
-      if (spectrumEnabled) {
-        __ensureMainChartMinHeightForSpectrumMode();
-      } else {
-        if (root) try { root.style.minHeight = ''; } catch(_) {}
-      }
+    
+      // 退出全屏：统一清理内联高度，交给 CSS 恢复
+      if (root) { try { root.style.minHeight = ''; } catch(_) {} }
+      try {
+        if (spectrumRoot) {
+          spectrumRoot.style.removeProperty('max-height');
+          spectrumRoot.style.removeProperty('flex');
+          spectrumRoot.style.removeProperty('--fs-spec-h');
+        }
+      } catch(_) {}
   
       updateFullscreenHeights();
       updateSpectrumLayout();
@@ -2397,11 +2149,13 @@ async function requestAndRenderSpectrum(forceFull = false) {
 
   const sList = getSeriesArray();
   if (!Array.isArray(sList) || !sList.length) {
+    // 清空 pending/missing
+    SpectrumController.__setPendingKeys([]);
+    SpectrumController.__setMissingKeys([]);
     buildAndSetSpectrumOption(forceFull);
     return;
   }
 
-  // 需要的 (model_id, condition_id) 集合（兼容 modelId / model_id）
   const wanted = new Set();
   const pairs = [];
   const seen = new Set();
@@ -2424,6 +2178,8 @@ async function requestAndRenderSpectrum(forceFull = false) {
   const allCached = wantedArr.length > 0 && wantedArr.every(k => spectrumModelCache.has(k));
   if (allCached) {
     __specPending = false;
+    SpectrumController.__setPendingKeys([]);
+    SpectrumController.__setMissingKeys([]);
     setSpectrumLoading(false);
     buildAndSetSpectrumOption(forceFull);
     return;
@@ -2441,6 +2197,10 @@ async function requestAndRenderSpectrum(forceFull = false) {
 
     const pendingKeys = wantedArr.filter(k => !spectrumModelCache.has(k) && !fetchRes.missingKeys.has(k));
     __specPending = pendingKeys.length > 0;
+
+    // 写入 controller 状态
+    SpectrumController.__setPendingKeys(pendingKeys);
+    SpectrumController.__setMissingKeys(Array.from(fetchRes.missingKeys || []));
 
     buildAndSetSpectrumOption(forceFull);
 
@@ -3474,6 +3234,333 @@ function getSnapshotForMode(mode){
   const m = (mode === 'noise' ? 'noise_db' : mode);
   return snapshotCache[m] || null;
 }
+
+/* === 新增：SpectrumController 单例（集中管理频谱 UI/构建/状态） === */
+const SpectrumController = (() => {
+  // 外部可查询：当前 pending 的 key（model_id_condition_id）
+  let _pendingKeys = new Set();
+  let _missingKeys = new Set();
+
+  function setEnabled(enabled, opts = {}) {
+    // 与外置 Dock 交互保持一致：切换频谱展开/收起 + 同步按钮文案
+    const want = !!enabled;
+    if (want === spectrumEnabled) {
+      // 已是目标状态：做一次状态同步和必要的重建
+      try { syncSpectrumStateAcrossModes({ animate: !!opts.animate }); } catch(_) {}
+      try { if (want) requestAndRenderSpectrum(true); } catch(_) {}
+      try { syncSpectrumDockUi(); placeSpectrumDock(); } catch(_) {}
+      return spectrumEnabled;
+    }
+
+    spectrumEnabled = want;
+    try { syncSpectrumDockUi(); placeSpectrumDock(); } catch(_) {}
+
+    // 统一入口：仍复用现有的 toggleSpectrumUI（负责动画/高度/加载/渲染）
+    try { toggleSpectrumUI(spectrumEnabled); } catch(_) {}
+    return spectrumEnabled;
+  }
+
+  function onFullscreenChange(isFsNow) {
+    // 全屏状态切换后，频谱容器的高度/tooltip 附着策略需要立即刷新
+    try { syncSpectrumStateAcrossModes({ animate: false }); } catch(_) {}
+    try { if (spectrumEnabled) buildAndSetSpectrumOption(true); } catch(_) {}
+    try { syncSpectrumDockUi(); placeSpectrumDock(); } catch(_) {}
+  }
+
+  function onXQueryChange(_x) {
+    // 拟合指针或 X 输入发生变化 → 若频谱开启，触发一次重建（rAF 合并）
+    try {
+      if (spectrumEnabled && spectrumChart) {
+        // 复用现有的调度函数
+        scheduleSpectrumRebuild();
+      }
+    } catch(_) {}
+  }
+
+  function getPendingKeys() {
+    return Array.from(_pendingKeys);
+  }
+
+  function isEnabled() {
+    return !!spectrumEnabled;
+  }
+
+  // 内部钩子：由请求阶段回写 pending/missing，便于上层查看
+  function __setPendingKeys(keys) {
+    _pendingKeys = new Set(Array.isArray(keys) ? keys : (keys ? Array.from(keys) : []));
+  }
+  function __setMissingKeys(keys) {
+    _missingKeys = new Set(Array.isArray(keys) ? keys : (keys ? Array.from(keys) : []));
+  }
+
+  return {
+    setEnabled,
+    onFullscreenChange,
+    onXQueryChange,
+    getPendingKeys,
+    isEnabled,
+    __setPendingKeys,
+    __setMissingKeys
+  };
+})();
+
+// 新：单一 FitPanel 刷新（替代原 refreshFitBubble）
+function refreshFitPanel() {
+  const integrated = isIntegratedLegendMode();
+  const sList = getSeriesArray();
+  if (!showFitCurves || !lastPayload || !chart || (lastOption && lastOption.__empty)) {
+    // 关闭拟合：隐藏浮动气泡；集成模式撤掉 is-fit-on 标记与数值
+    if (integrated) {
+      const gridWrap = __legendScrollEl?.querySelector('.legend-fit-grid');
+      if (gridWrap) {
+        gridWrap.classList.remove('is-fit-on');
+        gridWrap.querySelectorAll('.col-val,.col-pct,.col-cross').forEach(el => { el.textContent = '—'; });
+      }
+    } else {
+      const bubble = getById('fitBubble');
+      if (bubble) bubble.style.visibility = 'hidden';
+    }
+    return;
+  }
+
+  const mode = currentXModeFromPayload(lastPayload);
+  const x = xQueryByMode[mode];
+  if (x == null) return;
+
+  const opt = chart.getOption() || {};
+  const selMap = (opt.legend && opt.legend[0] && opt.legend[0].selected) || {};
+  const items = computeFitRows(mode, x, sList, selMap);
+
+  // onToggleSeries（保持原图表与频谱联动）
+  const onToggleSeries = (name, shouldShow) => {
+    const actionType = shouldShow ? 'legendSelect' : 'legendUnSelect';
+    try { chart.dispatchAction({ type: actionType, name }); } catch(_){}
+    if (spectrumEnabled && spectrumChart) {
+      try { spectrumChart.dispatchAction({ type: actionType, name }); } catch(_){}
+    }
+    try { syncLegendRailFromChart(); } catch(_){}
+  };
+
+  const unit = (mode === 'rpm') ? 'RPM' : 'dB';
+  renderFitPanel({
+    mode: integrated ? 'integrated' : 'floating',
+    rows: items,
+    xValue: x,
+    unit,
+    onToggleSeries
+  });
+}
+
+// 新：单一 FitPanel 渲染器
+function renderFitPanel({ mode, rows, xValue, unit, onToggleSeries }) {
+  if (mode === 'integrated') {
+    if (!__legendScrollEl) return;
+
+    // 列宽变量
+    __legendScrollEl.style.setProperty('--fit-col-val-ch',   '7');
+    __legendScrollEl.style.setProperty('--fit-col-pct-ch',   '7');
+    __legendScrollEl.style.setProperty('--fit-col-cross-ch', '8');
+
+    // 计算排序与基准
+    const visible = rows.filter(r => r.selected);
+    const withVal = visible.filter(r => Number.isFinite(r.y)).sort((a,b)=> b.y - a.y);
+    const base = (withVal.length && withVal[0].y > 0) ? withVal[0].y : 0;
+    const pctVal = (v)=> (Number.isFinite(v) && base > 0) ? Math.round((v / base) * 100) : null;
+
+    const grid = __legendScrollEl.querySelector('.legend-fit-grid');
+    if (!grid) return;
+
+    const ordered = [
+      ...rows.filter(r => Number.isFinite(r.y)).sort((a,b)=> b.y - a.y),
+      ...rows.filter(r => !Number.isFinite(r.y))
+    ];
+
+    grid.innerHTML = ordered.map(it => {
+      const baseName = (it.brand || it.model) ? `${it.brand} ${it.model}`.trim() : it.name;
+      const hasY = Number.isFinite(it.y);
+      const vText = hasY ? `${Math.round(it.y)} CFM` : '—';
+      const pct = hasY ? pctVal(it.y) : null;
+      const pctText = (pct==null) ? '—' : `(${pct}%)`;
+      let crossText = '—';
+      if (Number.isFinite(it.cross)) {
+        crossText = (unit === 'dB') ? `${String(Math.round(it.cross)).padStart(4,'0')} RPM` : `${Number(it.cross).toFixed(1)} dB`;
+      }
+
+      // 仅在“全屏 + 集成 + 拟合开启”下换行显示工况（与非拟合时风格一致）
+      const wrapL2 = isFs && showFitCurves && !!it.condition;
+      const nameClass = wrapL2 ? 'name has-l2' : 'name';
+
+      return `
+        <div class="legend-row hoverable-row ${it.selected ? '' : 'is-off'}" data-name="${it.name}">
+          <span class="dot" style="background:${it.color}"></span>
+          <span class="${nameClass}" title="${baseName}${it.condition ? ' / ' + it.condition : ''}">
+            <span class="l1">${baseName}</span>${it.condition ? `<span class="l2">${it.condition}</span>` : ``}
+          </span>
+          <span class="col-val">${vText}</span>
+          <span class="col-pct">${pctText}</span>
+          <span class="col-sep">│</span>
+          <span class="col-cross">${crossText}</span>
+        </div>
+      `;
+    }).join('');
+
+    // 行交互：点击切换、悬浮高亮
+    grid.querySelectorAll('.legend-row[data-name]').forEach(node => {
+      const name = node.getAttribute('data-name') || '';
+      node.addEventListener('click', () => {
+        if (!name || !chart) return;
+        const sel = getLegendSelectionMap();
+        const visibleNow = sel ? (sel[name] !== false) : true;
+        node.classList.toggle('is-off', visibleNow);
+        onToggleSeries(name, !visibleNow);
+        refreshFitPanel(); // 同步数值
+      });
+      node.addEventListener('mouseenter', () => {
+        if (!name) return;
+        try { chart.dispatchAction({ type: 'highlight', seriesName: name }); } catch(_){}
+        if (spectrumEnabled && spectrumChart) { try { spectrumChart.dispatchAction({ type: 'highlight', seriesName: name }); } catch(_){}} 
+      }, { passive:true });
+      node.addEventListener('mouseleave', () => {
+        if (!name) return;
+        try { chart.dispatchAction({ type: 'downplay', seriesName: name }); } catch(_){}
+        if (spectrumEnabled && spectrumChart) { try { spectrumChart.dispatchAction({ type: 'downplay', seriesName: name }); } catch(_){}} 
+      }, { passive:true });
+    });
+
+    // 标题与 X 输入
+    const unitSpan = getById('fitXUnitLegend');
+    if (unitSpan) unitSpan.textContent = unit;
+    const inp = getById('fitXInputLegend');
+    if (inp) {
+      const modeKey = currentXModeFromPayload(lastPayload);
+      const val = Number(xQueryByMode[modeKey] ?? xValue);
+      const rounded = (modeKey === 'noise_db') ? Number(val.toFixed(1)) : Math.round(val);
+      inp.value = String(rounded);
+      const [vx0, vx1] = getVisibleXRange();
+      inp.setAttribute('min', String(Math.floor(vx0)));
+      inp.setAttribute('max', String(Math.ceil(vx1)));
+      inp.setAttribute('step', (modeKey === 'noise_db') ? '0.1' : '1');
+
+      // 统一与原行为一致
+      inp.oninput = () => {
+        const raw = Number(inp.value);
+        if (!Number.isFinite(raw)) return;
+        xQueryByMode[modeKey] = clampXDomain(raw);
+        clampXQueryIntoVisibleRange();
+        repaintPointer();
+        refreshFitPanel();
+        SpectrumController.onXQueryChange(xQueryByMode[modeKey]);
+      };
+      inp.onchange = () => {
+        repaintPointer();
+        refreshFitPanel();
+        SpectrumController.onXQueryChange(xQueryByMode[currentXModeFromPayload(lastPayload)]);
+      };
+    }
+
+    const gridWrap = __legendScrollEl.querySelector('.legend-fit-grid');
+    if (gridWrap) gridWrap.classList.add('is-fit-on');
+    return;
+  }
+
+  // 浮动气泡
+  const bubble = getById('fitBubble');
+  if (!bubble) return;
+
+  const rowsEl = bubble.querySelector('#fitBubbleRows');
+  bubble.style.setProperty('--fit-col-val-ch', '7');
+  bubble.style.setProperty('--fit-col-pct-ch', '7');
+  bubble.style.setProperty('--fit-col-cross-ch', '8');
+
+  const visible = rows.filter(r => r.selected);
+  const withVal = visible.filter(r => Number.isFinite(r.y)).sort((a,b)=> b.y - a.y);
+  const base = (withVal.length && withVal[0].y > 0) ? withVal[0].y : 0;
+  const pctVal = (v)=> (Number.isFinite(v) && base > 0) ? Math.round((v / base) * 100) : null;
+
+  const ordered = [
+    ...rows.filter(r => Number.isFinite(r.y)).sort((a,b)=> b.y - a.y),
+    ...rows.filter(r => !Number.isFinite(r.y))
+  ];
+
+  rowsEl.innerHTML = ordered.map(it => {
+    const hasY = Number.isFinite(it.y);
+    const valText = hasY ? `${Math.round(it.y)} CFM` : '—';
+    const pct = hasY ? pctVal(it.y) : null;
+    const pctText = (pct==null) ? '—' : `(${pct}%)`;
+    let crossText = '—';
+    if (Number.isFinite(it.cross)) {
+      crossText = (unit === 'dB')
+        ? `${String(Math.round(it.cross)).padStart(4,'0')} RPM`
+        : `${Number(it.cross).toFixed(1)} dB`;
+    }
+    const baseName = (it.brand || it.model) ? `${it.brand} ${it.model}`.trim() : it.name;
+    const condInline = it.condition
+      ? `<span class="sep"> - </span><span class="cond-inline" style="color:var(--text-);white-space:nowrap;">${it.condition}</span>`
+      : '';
+
+    return `
+      <div class="row ${it.selected ? '' : 'is-off'}" data-name="${it.name}">
+        <span class="dot" style="background:${it.color}"></span>
+        <span></span>
+        <span class="col-name">${baseName}${condInline}</span>
+        <span class="col-val">${valText}</span>
+        <span class="col-pct">${pctText}</span>
+        <span class="col-sep">│</span>
+        <span class="col-cross">${crossText}</span>
+      </div>
+    `;
+  }).join('');
+
+  rowsEl.querySelectorAll('.row[data-name]').forEach(node => {
+    const name = node.getAttribute('data-name') || '';
+    node.addEventListener('pointerdown', (e) => { e.stopPropagation(); }, { passive:true });
+    node.addEventListener('mouseenter', () => {
+      if (!name) return;
+      try { chart.dispatchAction({ type: 'highlight', seriesName: name }); } catch(_){}
+      if (spectrumEnabled && spectrumChart) {
+        try { spectrumChart.dispatchAction({ type: 'highlight', seriesName: name }); } catch(_){}
+      }
+    }, { passive:true });
+    node.addEventListener('mouseleave', () => {
+      if (!name) return;
+      try { chart.dispatchAction({ type: 'downplay', seriesName: name }); } catch(_){}
+      if (spectrumEnabled && spectrumChart) {
+        try { spectrumChart.dispatchAction({ type: 'downplay', seriesName: name }); } catch(_){}
+      }
+    }, { passive:true });
+    node.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!name) return;
+      const sel = getLegendSelectionMap();
+      const visibleNow = sel ? (sel[name] !== false) : true;
+      onToggleSeries(name, !visibleNow);
+      refreshFitPanel();
+    });
+  });
+
+  const unitSpan = bubble.querySelector('#fitXUnit');
+  if (unitSpan) unitSpan.textContent = unit;
+
+  const inp = bubble.querySelector('#fitXInput');
+  if (inp) {
+    const modeKey = currentXModeFromPayload(lastPayload);
+    const val = Number(xQueryByMode[modeKey] ?? xValue);
+    const rounded = (modeKey === 'noise_db') ? Number(val.toFixed(1)) : Math.round(val);
+    inp.value = String(rounded);
+
+    const [vx0, vx1] = getVisibleXRange();
+    inp.setAttribute('min', String(Math.floor(vx0)));
+    inp.setAttribute('max', String(Math.ceil(vx1)));
+    inp.setAttribute('step', (modeKey === 'noise_db') ? '0.1' : '1');
+  }
+
+  // 保持可见性由 toggleFitUI 控制
+}
+
+// 可选：暴露到全局，便于调试或其他模块监听
+try { window.SpectrumController = SpectrumController; } catch (_) {}
+
 
   // 挂到全局
   window.ChartRenderer = API;

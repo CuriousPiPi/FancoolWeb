@@ -249,7 +249,7 @@
   width:100% !important;
   max-width:none !important;
   min-width:0 !important;
-  padding:0;
+  padding-bottom:16px;
   display:block;
 }
 .fc-chart-container.chart-flex.is-narrow #legendRail .legend-scroll {
@@ -279,7 +279,7 @@
 .legend-row .name.has-l2 { flex-direction:column; align-items:flex-start; white-space:normal; }
 .legend-row .name.has-l2 .l1 { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .legend-row .name.has-l2 .l2 {
-  margin-top:2px; white-space:normal; font-weight:500; font-size:11px; color:var(--text-); line-height:14px;
+  margin-top:1px; white-space:normal; font-weight:500; font-size:11px; color:var(--text-); line-height:14px;
 }
 .legend-row .cond-inline { font-weight:500; font-size:11px; color:var(--text-); }
 
