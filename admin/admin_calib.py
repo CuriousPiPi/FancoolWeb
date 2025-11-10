@@ -853,3 +853,93 @@ def api_calib_cache_inspect():
         "exists": exists,
         "files": files
     }, message="curve-cache inspect")
+
+@calib_admin_bp.post('/admin/api/calib/cleanup-unbound-audio')
+def api_calib_cleanup_unbound_audio():
+    """
+    前置清理接口：删除音频根目录下未在 perf_audio_binding 中出现的批次目录。
+
+    逻辑：
+      1. 查询 perf_audio_binding 中所有 distinct audio_batch_id（已绑定的音频批次）。
+      2. 枚举 AUDIO_ROOT 下的一级子目录（仅考虑 UUIDv4 命名的目录）。
+      3. 若目录名不在绑定集合中，则递归删除该目录。
+      4. 返回删除的目录列表、保留数量及统计信息。
+
+    安全措施：
+      - 仅删除目录名符合 UUIDv4 格式且未被绑定的目录。
+      - 不依赖 audio_batch 表，严格按“是否已绑定”判定孤儿目录。
+      - 如需更严格，可再校验目录是否存在于 audio_batch；此处按需求省略。
+
+    返回:
+      {
+        deleted: [<目录名>],
+        kept: [<目录名>],
+        bound_ids_count: <绑定ID数量>,
+        total_dirs: <扫描到的符合 UUID 格式的目录总数>
+      }
+    """
+    if not session.get('is_admin'):
+        return resp_err('UNAUTHORIZED', '请先登录', 401)
+
+    try:
+        with _engine().begin() as conn:
+            rows = conn.execute(text("""
+                SELECT DISTINCT audio_batch_id
+                FROM perf_audio_binding
+                WHERE audio_batch_id IS NOT NULL AND audio_batch_id <> ''
+            """)).fetchall()
+        bound_ids = { (getattr(r, '_mapping', {}) or {}).get('audio_batch_id') for r in rows if (getattr(r, '_mapping', {}) or {}).get('audio_batch_id') }
+    except Exception as e:
+        return resp_err('DB_READ_FAIL', f'读取绑定记录失败: {e}', 500)
+
+    deleted = []
+    kept = []
+    total_dirs = 0
+
+    def _is_uuid4(name: str) -> bool:
+        try:
+            u = uuid.UUID(name, version=4)
+            return str(u) == name
+        except Exception:
+            return False
+
+    try:
+        if not os.path.isdir(AUDIO_ROOT):
+            return resp_ok({
+                'deleted': [],
+                'kept': [],
+                'bound_ids_count': len(bound_ids),
+                'total_dirs': 0
+            }, message='音频根目录不存在，跳过清理')
+
+        for entry in os.listdir(AUDIO_ROOT):
+            abs_path = os.path.join(AUDIO_ROOT, entry)
+            if not os.path.isdir(abs_path):
+                continue
+            if not _is_uuid4(entry):
+                # 仅统计符合 UUIDv4 的音频批次目录
+                continue
+            total_dirs += 1
+            if entry in bound_ids:
+                kept.append(entry)
+                continue
+            # 未绑定 -> 删除
+            try:
+                shutil.rmtree(abs_path, ignore_errors=True)
+                deleted.append(entry)
+            except Exception:
+                # 删除失败也视为保留（可在后续运维处理）
+                kept.append(entry)
+
+    except Exception as e:
+        return resp_err('FS_SCAN_FAIL', f'扫描或删除目录失败: {e}', 500)
+
+    # 可选：记录日志
+    _log('cleanup-unbound-audio', deleted=len(deleted), kept=len(kept), bound_ids=len(bound_ids), total=total_dirs)
+
+    return resp_ok({
+        'deleted': deleted,
+        'kept': kept,
+        'bound_ids_count': len(bound_ids),
+        'total_dirs': total_dirs
+    }, message=f'清理完成：删除 {len(deleted)} 个未绑定目录')

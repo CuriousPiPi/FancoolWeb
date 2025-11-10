@@ -1029,6 +1029,7 @@ function addPerfRow(rowData){
 }
 function renumberRows(){ [...perfTable.children].forEach((tr,i)=>{ tr.firstElementChild.textContent=i+1; }); }
 function computeNoise(total, ambient){ if(total===''||ambient===''||total==null||ambient==null) return null; const T=Math.pow(10, Number(total)/10); const A=Math.pow(10, Number(ambient)/10); const diff=T-A; if(diff>1e-12){ return Number((10*Math.log10(diff)).toFixed(1)); } return null; }
+
 function gatherRowsForPreview(){
   const rows=[]; let ok=true; let msg=''; const rpms=[];
   for(let i=0;i<perfTable.children.length;i++){
@@ -1038,23 +1039,53 @@ function gatherRowsForPreview(){
     const noiseStr=tr.querySelector('.perf-noise').value.trim();
     const tStr=tr.querySelector('.perf-totaldb').value.trim();
     const aStr=tr.querySelector('.perf-ambientdb').value.trim();
+
+    // 跳过整行全空
     if(!rpmStr && !airStr && !noiseStr && !tStr && !aStr){ continue; }
+
+    // rpm 必填
     const rpm = parseInt(rpmStr,10);
     if(!rpmStr || isNaN(rpm) || rpm<=0){ ok=false; msg=`第${i+1}行：rpm 必须为>0的整数`; break; }
     if(rpms.includes(rpm)){ ok=false; msg=`第${i+1}行：rpm 重复`; break; }
     rpms.push(rpm);
-    const air=parseFloat(airStr);
-    if(!airStr || isNaN(air) || air<=0){ ok=false; msg=`第${i+1}行：airflow_cfm 必须>0`; break; }
-    if(tStr!=='' && aStr!==''){ const t=parseFloat(tStr), a=parseFloat(aStr); if(isNaN(t)||isNaN(a)){ ok=false; msg=`第${i+1}行：噪音数值需为数字`; break; } if(t<a){ ok=false; msg=`第${i+1}行：总噪音应≥环境噪音`; break; } }
+
+    // 三组选填：风量，等效噪音，总+环境（两者都填）
+    const hasAir = airStr !== '';
+    const hasEq = noiseStr !== '';
+    const hasTA = (tStr !== '' && aStr !== '');
+
+    if(!hasAir && !hasEq && !hasTA){
+      ok=false; msg=`第${i+1}行：请至少填写“风量”或“等效噪音”或“总噪音+环境噪音”中的一组`; break;
+    }
+
+    // 校验风量（如填写则需>0）
+    let air = null;
+    if(hasAir){
+      air = parseFloat(airStr);
+      if(isNaN(air) || air<=0){ ok=false; msg=`第${i+1}行：airflow_cfm 必须>0（或可留空）`; break; }
+    }
+
+    // 噪音：优先使用等效噪音；若为空且提供了总+环境，则计算
     let ndb = null;
-    if(noiseStr!==''){ const v=parseFloat(noiseStr); if(isNaN(v)){ ok=false; msg=`第${i+1}行：noise_db 必须为数字`; break; } ndb = Number(v.toFixed(1)); }
-    else { const calc = computeNoise(tStr, aStr); if(calc!=null) ndb = calc; }
+    if(hasEq){
+      const v = parseFloat(noiseStr);
+      if(isNaN(v)){ ok=false; msg=`第${i+1}行：noise_db 必须为数字`; break; }
+      ndb = Number(v.toFixed(1));
+    }else if(hasTA){
+      const t = parseFloat(tStr), a = parseFloat(aStr);
+      if(isNaN(t) || isNaN(a)){ ok=false; msg=`第${i+1}行：噪音数值需为数字`; break; }
+      if(t < a){ ok=false; msg=`第${i+1}行：总噪音应≥环境噪音`; break; }
+      const calc = computeNoise(tStr, aStr);
+      if(calc!=null){ ndb = calc; }
+    }
+
     rows.push({ idx:i+1, data_id: perfTable.children[i].dataset.dataId || null, rpm:rpm, airflow_cfm:air, noise_db:ndb });
   }
   if(!ok) return { ok:false, msg };
   if(rows.length===0) return { ok:false, msg:'请至少填写一行数据' };
   return { ok:true, rows };
 }
+
 function drawScatter(canvas, pairs, xLabel, yLabel){
   const ctx=canvas.getContext('2d'); const W=canvas.width, H=canvas.height;
   ctx.clearRect(0,0,W,H);
@@ -2089,16 +2120,18 @@ function unifyUploadActionBar(){
   });
 }
 
-// 在 render() 内固定纵轴范围：下限 0，上限为当前谱的最大峰值（向上取整）
 function renderPreview(rows){
   previewTableBody.innerHTML='';
   rows.forEach((r,i)=>{
     const tr=document.createElement('tr');
-    tr.innerHTML=`<td>${i+1}</td><td>${r.rpm}</td><td>${r.airflow_cfm}</td><td>${r.noise_db??''}</td>`;
+    tr.innerHTML=`<td>${i+1}</td><td>${r.rpm}</td><td>${r.airflow_cfm ?? ''}</td><td>${r.noise_db??''}</td>`;
     previewTableBody.appendChild(tr);
   });
-  const pairsRpmAir   = rows.map(r=>[r.rpm, r.airflow_cfm]);
-  const pairsRpmNoise = rows.filter(r=>r.noise_db!=null).map(r=>[r.rpm, r.noise_db]);
+  // 仅绘制有风量/等效噪音的数据点
+  const pairsRpmAir   = rows.filter(r=> r.airflow_cfm!=null && r.airflow_cfm!=='' && !isNaN(Number(r.airflow_cfm)))
+                            .map(r=>[r.rpm, Number(r.airflow_cfm)]);
+  const pairsRpmNoise = rows.filter(r=> r.noise_db!=null && r.noise_db!=='')
+                            .map(r=>[r.rpm, Number(r.noise_db)]);
   drawScatter(chartRpmAir,  pairsRpmAir,   'rpm', 'airflow');
   drawScatter(chartNoiseAir, pairsRpmNoise, 'rpm', 'noise_db');
   previewArea.style.display='';
@@ -2462,6 +2495,280 @@ async function chooseExistingBinding(items){
       }
     });
   });
+}
+
+function injectUploadZipButton(){
+  const anchorBox = document.querySelector('#perfEditor .flex-inline') || document.querySelector('#perfEditor');
+  if(!anchorBox || document.getElementById('uploadZipBtn')) return;
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.id = 'uploadZipBtn';
+  btn.textContent = '上传音频zip';
+  btn.style.marginLeft = '8px';
+
+  const file = document.createElement('input');
+  file.type = 'file';
+  file.accept = '.zip';
+  file.style.display = 'none';
+  file.id = 'uploadZipFile';
+
+  btn.addEventListener('click', async ()=> {
+    // 模式与可用性判定
+    const mid = parseInt(upModelId.value||'0',10);
+    const cid = parseInt(upConditionSelect.value||'0',10);
+    if(mid<=0 || cid<=0){ alert('请先选择品牌/型号/工况'); return; }
+
+    // 新增：上传前触发服务端清理未绑定的音频目录
+    try {
+      const resp = await fetch('/admin/api/calib/cleanup-unbound-audio', { method:'POST' });
+      const cleanup = await resp.json().catch(()=>null);
+      if(cleanup && cleanup.success){
+        console.info('[UI] audio cleanup ok', cleanup.data);
+      } else {
+        console.warn('[UI] audio cleanup failed', cleanup && cleanup.error_message);
+      }
+    } catch(e) {
+      console.warn('[UI] audio cleanup error', e);
+    }
+
+    // 新增：检查当前 mid+cid 是否已有绑定
+    try{
+      const r = await fetch(`/admin/api/calib/bindings?model_id=${mid}&condition_id=${cid}`);
+      const j = await r.json();
+      if(j.success){
+        const items = j.data.items || [];
+        if(items.length > 0){
+          const pick = await chooseExistingBinding(items);
+          if(pick && pick !== '__go_upload__'){
+            // 记住 audio 批次用于后续绑定与预览
+            window.lastCalibBatchId = pick.audio_batch_id || null;
+
+            // 回填噪音：按 audio_batch_id
+            try{
+              if(window.lastCalibBatchId){
+                const r2 = await fetch(`/admin/api/calib/rpm-noise?audio_batch_id=${encodeURIComponent(window.lastCalibBatchId)}`);
+                const j2 = await r2.json();
+                if(j2.success){
+                  const items2 = j2.data.items || [];
+                  const isRowEmpty = tr => ([...tr.querySelectorAll('input')].every(inp => !String(inp.value||'').trim()));
+                  let emptyRows = [...perfTable.querySelectorAll('tr')].filter(isRowEmpty);
+                  for(const it2 of items2){
+                    const rpm = parseInt(it2.rpm,10); if(!rpm) continue;
+                    const ndb = (it2.noise_db!=null)? String(it2.noise_db) : '';
+                    let row = [...perfTable.querySelectorAll('tr')]
+                      .find(tr=> parseInt((tr.querySelector('.perf-rpm')?.value||'').trim(),10)===rpm);
+                    if(!row){
+                      if(emptyRows.length){
+                        row = emptyRows.shift();
+                        const rpmInp = row.querySelector('.perf-rpm');
+                        const noiseInp = row.querySelector('.perf-noise');
+                        if(rpmInp && (!rpmInp.value || !rpmInp.value.trim())) rpmInp.value = String(rpm);
+                        if(noiseInp && (!noiseInp.value || !noiseInp.value.trim())) noiseInp.value = ndb;
+                      }else{
+                        row = addPerfRow({ rpm: rpm, airflow_cfm: '', noise_db: ndb });
+                      }
+                    }else{
+                      const n = row.querySelector('.perf-noise');
+                      if(n && (!n.value || n.value.trim()==='')) n.value = ndb;
+                    }
+                  }
+                  renumberRows(); markDirty(); saveDraft();
+                }
+              }
+            }catch(e){}
+
+            // 预览
+            if(window.lastCalibBatchId){ ensureCalibPreview(window.lastCalibBatchId); }
+            return; // 不再弹出文件
+          } else if (pick === '__go_upload__'){
+            // 继续走选择文件
+          } else {
+            return; // 取消
+          }
+        }
+      }
+    }catch(e){ /* 忽略错误，继续走选择文件 */ }
+
+    if(mode === 'edit'){
+      // 仅当已载入历史数据且所有 noise_db 均为空时允许
+      const allEmpty = [...perfTable.querySelectorAll('.perf-noise')].every(inp=> (inp.value||'').trim()==='');
+      if(!currentGroupKey){ alert('请先载入历史组'); return; }
+      if(!allEmpty){ alert('编辑模式下，只有全部等效噪音为空时才允许上传并回填'); return; }
+    }
+    document.getElementById('uploadZipFile').click();
+  });
+
+  // 上传 zip 回填噪音：优先填充现有“全空行”，再考虑新增行（避免首行空着）
+  file.addEventListener('change', async ()=> {
+    const f = file.files && file.files[0];
+    if(!f){ return; }
+    try{
+      btn.disabled = true; btn.textContent = '处理中…';
+      const mid = parseInt(upModelId.value||'0',10);
+      const cid = parseInt(upConditionSelect.value||'0',10);
+
+      const fd = new FormData();
+      fd.append('model_id', String(mid));
+      fd.append('condition_id', String(cid));
+      fd.append('file', f);
+
+      const r = await fetch('/admin/api/calib/upload_zip', { method:'POST', body: fd });
+      const j = await r.json();
+      if(!j.success){ alert(j.error_message||'上传失败'); return; }
+
+      if (j.data && j.data.batch_id) {
+        console.info('[UI] preview start', { batchId: j.data.batch_id });
+        ensureCalibPreview(j.data.batch_id);
+      }
+
+      window.lastCalibBatchId = j.data.batch_id || null;
+      window.lastCalibRunId = j.data.run_id ?? null;
+      window.lastCalibModelHash = j.data.model_hash ?? null;
+
+      // 新增：当音频已存在时，先做“绑定一致性”校验
+      if (j.data.duplicated === 1) {
+        const binds = Array.isArray(j.data.bindings) ? j.data.bindings : [];
+        if (binds.length > 0) {
+          const allSame = binds.every(b =>
+            parseInt(b.model_id,10) === mid && parseInt(b.condition_id,10) === cid
+          );
+            if (!allSame) {
+              const pairs = binds.map(b => {
+                const m = b.model_name || `mid=${b.model_id}`;
+                const c = b.condition_name_zh || `cid=${b.condition_id}`;
+                return `${m} - ${c}`;
+              }).join('；');
+              alert(`该音频已绑定到其他型号/工况，已拒绝回填。\n已绑定：${pairs}\n如需回填，请切换到对应的型号/工况再试。`);
+              window.lastCalibBatchId = null;
+              window.lastCalibRunId = null;
+              window.lastCalibModelHash = null;
+              btn.disabled = false; btn.textContent = '上传音频zip'; file.value = '';
+              return;
+            }
+            // allSame => 按需求“直接回填”，不再弹确认
+          } else {
+            // 尚未绑定：保留原有“确认后回填/预览”
+            const boundCount = parseInt(j.data.bound_count ?? '0', 10) || 0;
+            if (boundCount === 0) {
+              if (confirm('检测到服务器已存在相同音频且尚未绑定任何型号/工况，是否直接回填/预览？')) {
+                const items = j.data.rpm_noise || [];
+                // 回填
+                if (mode === 'reupload' || mode === 'new' || mode === 'edit') {
+                  const isRowEmpty = (tr)=>[...tr.querySelectorAll('input')].every(inp => !String(inp.value||'').trim());
+                  let emptyRows = [...perfTable.querySelectorAll('tr')].filter(isRowEmpty);
+                  for (const it of items) {
+                    const rpm = parseInt(it.rpm,10); if(!rpm) continue;
+                    const ndb = (it.noise_db!=null)? String(it.noise_db) : '';
+                    let row = [...perfTable.querySelectorAll('tr')]
+                      .find(tr=> parseInt((tr.querySelector('.perf-rpm')?.value||'').trim(),10)===rpm);
+                    if(!row){
+                      if(emptyRows.length){
+                        row = emptyRows.shift();
+                        const rpmInp = row.querySelector('.perf-rpm');
+                        const noiseInp = row.querySelector('.perf-noise');
+                        if(rpmInp && (!rpmInp.value || !rpmInp.value.trim())) rpmInp.value=String(rpm);
+                        if(noiseInp && (!noiseInp.value || !noiseInp.value.trim())) noiseInp.value=ndb;
+                      }else{
+                        row = addPerfRow({ rpm:rpm, airflow_cfm:'', noise_db: ndb });
+                      }
+                    }else{
+                      const n = row.querySelector('.perf-noise');
+                      if(n && (!n.value || n.value.trim()==='')) n.value = ndb;
+                    }
+                  }
+                  renumberRows(); markDirty(); saveDraft();
+                }
+                // 预览
+                if (j.data.batch_id) {
+                  ensureCalibPreview(j.data.batch_id);
+                }
+                btn.disabled = false; btn.textContent = '上传音频zip'; file.value = '';
+                return;
+              }
+            }
+          }
+        }
+
+      // 回填逻辑
+      const items = j.data.rpm_noise || [];
+      if(mode === 'reupload' || mode === 'new'){
+        // 收集当前完全空的行（所有输入均为空）
+        const isRowEmpty = (tr)=>{
+          const inps = tr.querySelectorAll('input');
+          return [...inps].every(inp => !String(inp.value||'').trim());
+        };
+        let emptyRows = [...perfTable.querySelectorAll('tr')].filter(isRowEmpty);
+
+        const have = new Set([...perfTable.querySelectorAll('.perf-rpm')]
+          .map(inp=> parseInt((inp.value||'').trim(),10))
+          .filter(v=>!isNaN(v)&&v>0));
+
+        for(const it of items){
+          const rpm = parseInt(it.rpm,10); if(!rpm) continue;
+          const ndb = (it.noise_db!=null)? String(it.noise_db) : '';
+          // 先找是否已有该 rpm 的行
+          let row = [...perfTable.querySelectorAll('tr')]
+            .find(tr=> parseInt((tr.querySelector('.perf-rpm')?.value||'').trim(),10)===rpm);
+
+          if(!row){
+            // 优先使用既有的“全空行”
+            if(emptyRows.length){
+              row = emptyRows.shift();
+              const rpmInp = row.querySelector('.perf-rpm');
+              const noiseInp = row.querySelector('.perf-noise');
+              if(rpmInp && (!rpmInp.value || !rpmInp.value.trim())) rpmInp.value = String(rpm);
+              if(noiseInp && (!noiseInp.value || !noiseInp.value.trim())) noiseInp.value = ndb;
+            }else{
+              // 无全空行再新增
+              row = addPerfRow({ rpm: rpm, airflow_cfm: '', noise_db: ndb });
+            }
+          }else{
+            const n = row.querySelector('.perf-noise');
+            if(n && (!n.value || n.value.trim()==='')) n.value = ndb;
+          }
+        }
+        renumberRows(); markDirty(); saveDraft();
+      }else if(mode === 'edit'){
+        const matched = [];
+        items.forEach(it=>{
+          const rpm = parseInt(it.rpm,10); if(!rpm) return;
+          const row = [...perfTable.querySelectorAll('tr')]
+            .find(tr=> parseInt((tr.querySelector('.perf-rpm')?.value||'').trim(),10)===rpm);
+          if(row){
+            const n = row.querySelector('.perf-noise');
+            if(n && (!n.value || n.value.trim()==='')){ n.value = (it.noise_db!=null)? String(it.noise_db):''; matched.push(rpm); }
+          }
+        });
+        if(matched.length){
+          if(confirm(`是否从录音文件载入噪音数据（${Math.min(...matched)}~${Math.max(...matched)} rpm）？`)){
+            markDirty(); saveDraft();
+          }else{
+            items.forEach(it=>{
+              const rpm = parseInt(it.rpm,10);
+              const row = [...perfTable.querySelectorAll('tr')].find(tr=> parseInt((tr.querySelector('.perf-rpm')?.value||'').trim(),10)===rpm);
+              if(row){ const n=row.querySelector('.perf-noise'); if(n){ n.value=''; } }
+            });
+          }
+        }else{
+          alert('未匹配到当前列表内的转速挡位，未做回填');
+        }
+      }
+
+      // 注入频谱预览
+      ensureCalibPreview(j.data.batch_id);
+
+    }catch(e){
+      alert('处理失败：' + (e?.message||e));
+    }finally{
+      btn.disabled = false; btn.textContent = '上传音频zip';
+      file.value = '';
+    }
+  });
+
+  // 插入到“添加一行”按钮旁
+  anchorBox.appendChild(btn);
+  anchorBox.appendChild(file);
 }
 
 // 初始化里，统一动作栏后再做一次同步（防止竞态）

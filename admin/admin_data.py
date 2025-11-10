@@ -1247,14 +1247,32 @@ def api_perf_add():
     seen_rpm = set()
     try:
         for i, r in enumerate(rows_in, start=1):
+            # rpm 必填
             rpm = int(str(r.get('rpm')).strip())
-            if rpm <= 0: raise ValueError(f'第{i}行：rpm 必须为>0的整数')
-            if rpm in seen_rpm: raise ValueError(f'第{i}行：rpm 重复（同一提交内不允许重复）')
+            if rpm <= 0:
+                raise ValueError(f'第{i}行：rpm 必须为>0的整数')
+            if rpm in seen_rpm:
+                raise ValueError(f'第{i}行：rpm 重复（同一提交内不允许重复）')
             seen_rpm.add(rpm)
-            airflow = float(str(r.get('airflow_cfm')).strip())
-            if airflow <= 0: raise ValueError(f'第{i}行：airflow_cfm 必须>0')
-            noise_raw = r.get('noise_db'); noise_db = None
-            if noise_raw not in (None, ''): noise_db = _round1(float(str(noise_raw).strip()))
+
+            # 风量：允许留空；若填写则需 >0
+            air_raw = r.get('airflow_cfm')
+            airflow = None
+            if air_raw not in (None, ''):
+                airflow = float(str(air_raw).strip())
+                if airflow <= 0:
+                    raise ValueError(f'第{i}行：airflow_cfm 必须>0（或可留空）')
+
+            # 等效噪音：允许留空；若填写则一位小数
+            noise_raw = r.get('noise_db')
+            noise_db = None
+            if noise_raw not in (None, ''):
+                noise_db = _round1(float(str(noise_raw).strip()))
+
+            # 服务器侧兜底：至少需要风量或等效噪音之一（页面也已校验；若由总+环境计算，前端会回填 noise_db）
+            if airflow is None and noise_db is None:
+                raise ValueError(f'第{i}行：请至少填写风量或等效噪音（或在页面提供总噪音+环境噪音以计算等效噪音）')
+
             cleaned.append({'rpm': rpm, 'airflow_cfm': airflow, 'noise_db': noise_db})
     except Exception as e:
         return resp_err('INVALID_ROW', str(e))
