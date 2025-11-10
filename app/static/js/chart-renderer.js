@@ -22,7 +22,6 @@
   const SPECTRUM_X_MAX = 20000;
   let __spectrumRaf = null;
   let __skipSpectrumOnce = false;
-  let __suppressSpectrumUntil = 0;
 
   let __legendRailEl = null;
   let __legendScrollEl = null;
@@ -131,10 +130,10 @@ function ensureLegendRail(){
 
   const rail = document.createElement('aside');
   rail.id = 'legendRail';
-  // 移除 legend-spacer，只保留 legend-scroll 与 rail-actions
+  // rail-actions 放在 legend-scroll 之前（顶部）
   rail.innerHTML = `
+    <div class="rail-actions"></div>
     <div class="legend-scroll" id="legendRailScroll"></div>
-    <div class="rail-actions"><!-- #fitButtons 将被挂到这里 --></div>
   `;
   shell.appendChild(rail);
 
@@ -159,6 +158,12 @@ function updateLegendRailLayout(){
     const topGap = narrow ? 0 : LEGEND_OFFSET;
     __legendRailEl.style.setProperty('--legend-top-gap', `${topGap}px`);
   } catch(_){}
+
+  // rail-actions 显隐逻辑：仅在“全屏 + 集成 + 拟合开启”时隐藏
+  const hideActions = isFs && integrated && showFitCurves;
+  if (__legendActionsEl) {
+    __legendActionsEl.style.display = hideActions ? 'none' : 'flex';
+  }
 
   // 窄屏且非全屏直接 100%
   if (narrow && !isFs) {
@@ -204,7 +209,7 @@ function renderLegendRailItems(){
   const integrated = isIntegratedLegendMode();
   const fitOn = integrated && showFitCurves && sList.length;
 
-  // 非集成拟合模式 或 拟合关闭：渲染基础 Legend 列表
+  // 非集成或未开启拟合：基础 Legend
   if (!fitOn) {
     const items = sList.map(s => {
       const baseName = s.name || `${s.brand||''} ${s.model||''} - ${s.condition||''}`;
@@ -257,7 +262,7 @@ function renderLegendRailItems(){
         if (spectrumEnabled && spectrumChart) {
           try { spectrumChart.dispatchAction({ type: actionType, name }); } catch(_){}
         }
-        if (showFitCurves) refreshFitPanel(); // 使用统一面板刷新
+        if (showFitCurves) refreshFitPanel();
       });
       node.addEventListener('mouseenter', () => { if (name && chart) try { chart.dispatchAction({ type: 'highlight', seriesName: name }); } catch(_){} });
       node.addEventListener('mouseleave', () => { if (name && chart) try { chart.dispatchAction({ type: 'downplay', seriesName: name }); } catch(_){} });
@@ -266,15 +271,15 @@ function renderLegendRailItems(){
     return;
   }
 
-  // 集成拟合模式：渲染骨架，具体数值由 refreshFitPanel -> renderFitPanel 填充
+  // 集成拟合模式：新的合并头部（标题 + 输入 + 单位 + 关闭按钮）
   const headHtml = `
     <div class="integrated-fit-head is-active">
-      <div class="title">${FIT_ALGO_NAME} 估算值</div>
-      <div class="x-input">
-        <label for="fitXInputLegend" class="lab">X位置</label>
+      <div class="title">
+        ${FIT_ALGO_NAME} 拟合当前位置
         <input id="fitXInputLegend" type="number" step="1" />
         <span id="fitXUnitLegend" class="unit"></span>
       </div>
+      <button id="fitCloseBtnLegend" class="btn-close-top integrated" type="button" aria-label="关闭"></button>
     </div>
   `;
   __legendScrollEl.innerHTML = `
@@ -283,7 +288,27 @@ function renderLegendRailItems(){
       <div class="legend-fit-grid is-fit-on"></div>
     </div>
   `;
-  // 具体渲染交给 refreshFitPanel()
+
+  // 绑定关闭按钮事件
+  const btnCloseLegend = __legendScrollEl.querySelector('#fitCloseBtnLegend');
+  if (btnCloseLegend) {
+    btnCloseLegend.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      showFitCurves = false;
+      // 同步按钮状态（侧栏底部的实时拟合按钮）
+      const btnsRoot = getById('fitButtons');
+      const btnFit = btnsRoot ? btnsRoot.querySelector('#btnFit') : null;
+      if (btnFit) btnFit.classList.remove('active');
+      toggleFitUI(false);
+      updateRailParkedState();
+      repaintPointer();
+      refreshFitPanel();
+      updateLegendRailLayout();
+      try { chart && chart.resize(); } catch(_){}
+    });
+  }
+  // 内容实际渲染交给 refreshFitPanel
 }
 
 function syncLegendRailFromChart(){
@@ -328,7 +353,7 @@ function updateLegendRail(){
   }
 
   // 拟合/指针状态
-  const FIT_ALGO_NAME = '趋势拟合';
+  const FIT_ALGO_NAME = 'PCHIP';
   let showFitCurves = false;
   let fitUIInstalled = false;
 
@@ -1083,12 +1108,20 @@ function buildOption(payload) {
     onclick: () => {
       try { chart && chart.dispatchAction({ type: 'hideTip' }); } catch(_){}
       showFitCurves = !showFitCurves;
+
+      // 同步浮动/集成 UI
       toggleFitUI(showFitCurves);
       placeFitUI();
       repaintPointer();
       refreshFitPanel();
       updateLegendRailLayout();
       updateRailParkedState();
+
+      // 关键修复：同步侧栏拟合按钮的激活态（避免与 toolbox 状态不同步）
+      const btnsRoot = getById('fitButtons');
+      const btnFit = btnsRoot ? btnsRoot.querySelector('#btnFit') : null;
+      if (btnFit) btnFit.classList.toggle('active', !!showFitCurves);
+
       try { chart && chart.resize(); } catch(_){}
     }
   };
@@ -1151,6 +1184,7 @@ function buildOption(payload) {
     series: finalSeries
   };
 }
+
 function optionTooltipBase(t){
   return {
     ...buildTooltipBase(t, { appendToBody: !isFs }),
@@ -1407,56 +1441,54 @@ function ensureFitUI(){
     bindPointerDrag();
   }
 
-  // 浮动气泡（仅桌面/非集成容器，内容由 renderFitPanel 渲染）
-  let bubble = getById('fitBubble');
-  if (!bubble){
-    bubble = document.createElement('div');
-    bubble.id = 'fitBubble';
-    bubble.className = 'fit-bubble';
-    bubble.innerHTML = `
-      <div class="head">
-        <div class="title">${FIT_ALGO_NAME} 估算值</div>
-        <div class="x-input">
-          <span>当前位置</span>
-          <input id="fitXInput" type="number" step="1" />
-          <span id="fitXUnit"></span>
-        </div>
-      </div>
-      <div id="fitBubbleRows"></div>
-      <div class="foot">
-        <div class="hint">按系列可见性（Legend）过滤，按风量从大到小排序</div>
-        <button id="fitCloseBtn" class="btn-close" type="button">关闭</button>
-      </div>
-    `;
-    document.body.appendChild(bubble);
-    bubble.style.position = 'fixed';
+ let bubble = getById('fitBubble');
+ if (!bubble){
+   bubble = document.createElement('div');
+   bubble.id = 'fitBubble';
+   bubble.className = 'fit-bubble';
+   bubble.innerHTML = `
+     <div class="head">
+       <div class="title">
+         PCHIP 拟合当前位置
+         <input id="fitXInput" type="number" step="1" />
+         <span id="fitXUnit"></span>
+       </div>
+       <button id="fitCloseBtn" class="btn-close-top" type="button" aria-label="关闭">×</button>
+     </div>
+     <div id="fitBubbleRows"></div>
+     <div class="foot">
+       <div class="hint">按系列可见性（Legend）过滤，按风量从大到小排序</div>
+     </div>
+   `;
+   document.body.appendChild(bubble);
+   bubble.style.position = 'fixed';
 
-    adoptBubbleHost();
-    bindBubbleDrag(bubble);
+   adoptBubbleHost();
+   bindBubbleDrag(bubble);
 
-    const xInput = bubble.querySelector('#fitXInput');
-    xInput.addEventListener('input', onBubbleInputLive);
-    xInput.addEventListener('change', onBubbleInputCommit);
-    xInput.addEventListener('keydown', (e)=>{ if (e.key === 'Enter') { onBubbleInputCommit(); } });
+   const xInput = bubble.querySelector('#fitXInput');
+   xInput.addEventListener('input', onBubbleInputLive);
+   xInput.addEventListener('change', onBubbleInputCommit);
+   xInput.addEventListener('keydown', (e)=>{ if (e.key === 'Enter') { onBubbleInputCommit(); } });
 
-    const btnsRoot = getById('fitButtons');
-    const btnFit = btnsRoot ? btnsRoot.querySelector('#btnFit') : null;
-    const btnClose = bubble.querySelector('#fitCloseBtn');
-    if (btnClose){
-      btnClose.addEventListener('click', (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        showFitCurves = false;
-        if (btnFit) btnFit.classList.remove('active');
-        toggleFitUI(false);
-        updateRailParkedState();
-        repaintPointer();
-        refreshFitPanel();        // 改
-        updateLegendRailLayout();
-        try { chart && chart.resize(); } catch(_) {}
-      });
-    }
-  }
+   const btnsRoot = getById('fitButtons');
+   const btnFit = btnsRoot ? btnsRoot.querySelector('#btnFit') : null;
+   const btnClose = bubble.querySelector('#fitCloseBtn');
+   if (btnClose){
+     btnClose.addEventListener('click', (e) => {
+       e.preventDefault();
+       e.stopPropagation();
+       showFitCurves = false;
+       if (btnFit) btnFit.classList.remove('active');
+       toggleFitUI(false);
+       updateRailParkedState();
+       repaintPointer();
+       refreshFitPanel();
+       updateLegendRailLayout();
+       try { chart && chart.resize(); } catch(_) {}
+     });
+   }
+ }
 }
 
   let bubbleUserMoved = false;
@@ -1901,7 +1933,7 @@ function evalPchipJS(model, x){
       isFs = false;
       adoptBubbleHost();
       bubbleUserMoved = false;
-    
+
       // 退出全屏：统一清理内联高度，交给 CSS 恢复
       if (root) { try { root.style.minHeight = ''; } catch(_) {} }
       try {
@@ -1911,13 +1943,13 @@ function evalPchipJS(model, x){
           spectrumRoot.style.removeProperty('--fs-spec-h');
         }
       } catch(_) {}
-  
+
       updateFullscreenHeights();
       updateSpectrumLayout();
-  
+
       if (lastPayload) render(lastPayload);
       else if (chart) chart.resize();
-  
+
       requestAnimationFrame(() => {
         try { placeFitUI(); repaintPointer(); } catch(_) {}
       });

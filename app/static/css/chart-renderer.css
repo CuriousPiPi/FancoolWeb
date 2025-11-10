@@ -146,9 +146,82 @@
   --fit-col-cross-ch:8;
 }
 .fit-bubble.dragging{ cursor:grabbing; }
-.fit-bubble .head{ display:flex; align-items:center; gap:10px; margin-bottom:6px; white-space:nowrap; }
-.fit-bubble .title{ font-weight:800; color:var(--text-primary); font-size:13px; line-height:1.2; white-space:nowrap; }
-.fit-bubble .x-input{ margin-left:auto; display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-); white-space:nowrap; }
+.fit-bubble .head{
+  display:flex;
+  align-items:center;
+  gap:10px;
+  margin-bottom:6px;
+  position:relative;
+  padding-right:36px; /* 留按钮空间 */
+  white-space:nowrap;
+}
+.fit-bubble .title{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  font-weight:800;
+  color:var(--text-primary);
+  font-size:13px;
+  line-height:1.2;
+  white-space:nowrap;
+}
+.fit-bubble .title #fitXInput{
+  width:10ch;
+  font-size:12px;
+  padding:4px 6px;
+  border:1px solid var(--border-color);
+  border-radius:8px;
+  background:transparent;
+  color:var(--text-primary);
+  outline:none;
+}
+.fit-bubble .btn-close-top{
+  position:absolute;
+  top:50%;
+  right:4px;
+  transform:translateY(-50%);
+  appearance:none;
+  border:1px solid var(--border-color);
+  background:var(--bg-bubble);
+  color:var(--text-primary);
+  /* 隐藏文本叉号，仅保留按钮的可访问名称（aria-label="关闭"） */
+  font-size:0;
+  line-height:0;
+  width:24px;
+  height:24px;
+  padding:0;
+  border-radius:8px;
+  cursor:pointer;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  box-shadow: var(--shadow-md);
+  transition: background-color .15s ease, transform .1s ease;
+}
+/* 用两条线画“X”，精确居中 */
+.fit-bubble .btn-close-top::before,
+.fit-bubble .btn-close-top::after{
+  content:"";
+  position:absolute;
+  left:50%;
+  top:50%;
+  width:14px;           /* 叉的长度 */
+  height:2px;           /* 线条粗细，可按需改为 1.5px 提升视感 */
+  background-color: var(--text-primary);
+  transform-origin: center;
+  border-radius:1px;
+}
+.fit-bubble .btn-close-top::before{
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+.fit-bubble .btn-close-top::after{
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+
+.fit-bubble .btn-close-top:active{
+  transform: translateY(-50%) scale(.92);
+}
+
 .fit-bubble input[type="number"]{ width:10ch; font-size:12px; padding:4px 6px; border:1px solid var(--border-color); border-radius:8px; background:transparent; color:var(--text-primary); outline:none; }
 .fit-bubble .row{
   display:grid;
@@ -212,14 +285,28 @@
 .fc-chart-container.chart-flex:not(.is-narrow).rail-parked .chart-stack { padding-right:0; }
 .fc-chart-container.chart-flex .chart-stack > * { flex:0 0 auto; min-height:0; }
 
-.fc-chart-container.chart-flex:not(.is-narrow):not(.legend-integrated) #legendRail .legend-scroll { margin-top:5vh; }
 .fc-chart-container.chart-flex.is-narrow #legendRail .legend-scroll {
   margin-top:0; margin-left:0; padding-bottom:10px;
 }
 .fc-chart-container.chart-flex #legendRail .legend-scroll { margin-left:16px; }
 #legendRail .legend-scroll { flex:1 1 auto; overflow:auto; margin-bottom:8px; }
-#legendRail .rail-actions { flex:0 0 auto; display:flex; gap:6px; justify-content:flex-end; }
+#legendRail .rail-actions{
+  padding: 6px 10px;        /* 与拟合标题一致的上下内边距 */
+  gap: 6px;
+  justify-content: flex-end;
+  align-items: center;
+  margin-bottom: 8px;       /* 与 integrated-fit-head 的 wrapper 间距保持一致，避免抖动 */
+}
+/* 集成模式：在全屏下让 rail 顶部按钮的高度与拟合标题一致，避免开启/关闭拟合时内容上下跳动 */
+:fullscreen.fc-chart-container.legend-integrated #legendRail .rail-actions{
+  min-height: 34px;         /* 与 .integrated-fit-head 视觉高度对齐（≈ 13px * 1.2 + 12px padding） */
+}
 
+/* 集成全屏下按钮本体高度同步到标题高度，保证切换时整体高度一致 */
+:fullscreen.fc-chart-container.legend-integrated #legendRail .rail-actions .fit-buttons .btn{
+  min-height: 34px;         /* 覆写默认 36px，避免与标题高度不一致导致的跳动 */
+  padding: 6px 12px;        /* 与标题 padding 对齐 */
+}
 #legendRail {
   --rail-transition:.25s;
   position:relative; z-index:auto;
@@ -279,7 +366,7 @@
 .legend-row .name.has-l2 { flex-direction:column; align-items:flex-start; white-space:normal; }
 .legend-row .name.has-l2 .l1 { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 .legend-row .name.has-l2 .l2 {
-  margin-top:1px; white-space:normal; font-weight:500; font-size:11px; color:var(--text-); line-height:14px;
+  margin-top:1px; white-space:nowrap; font-weight:500; font-size:11px; color:var(--text-); line-height:14px;
 }
 .legend-row .cond-inline { font-weight:500; font-size:11px; color:var(--text-); }
 
@@ -315,21 +402,110 @@
 }
 
 /* 集成 head */
-.integrated-fit-head {
-  position:sticky; top:0; display:none; align-items:center; gap:12px;
-  padding:6px 8px; border:1px solid var(--border-color); border-radius:8px;
-  background: var(--bg-bubble); box-shadow: var(--shadow-sm);
-  font-size:12px; line-height:1.2; z-index:2; backdrop-filter: blur(8px);
+.integrated-fit-head{
+  position:sticky;
+  top:0;
+  display:flex;
+  align-items:center;
+  gap:10px;
+  padding:6px 10px;
+  padding-right:38px; /* 预留关闭按钮空间 */
+  border:1px solid var(--border-color);
+  border-radius:8px;
+  background: var(--bg-bubble);
+  box-shadow: var(--shadow-sm);
+  font-size:12px;
+  line-height:1.2;
+  z-index:2;
+  backdrop-filter: blur(8px);
+  white-space:nowrap;
+  cursor:default;
 }
 .integrated-fit-head.is-active { display:flex; }
-.integrated-fit-head .title { font-weight:800; color:var(--text-primary); white-space:nowrap; }
-.integrated-fit-head .x-input { margin-left:auto; display:inline-flex; align-items:center; gap:6px; white-space:nowrap; color:var(--text-); }
-.integrated-fit-head .x-input .lab { font-weight:600; font-size:11px; color:var(--text-); }
-.integrated-fit-head .x-input input[type="number"] {
-  width:9ch; font-size:11px; padding:3px 6px; border:1px solid var(--border-color); border-radius:6px;
-  background:transparent; color:var(--text-primary); outline:none;
+.integrated-fit-head .title{
+  display:flex;
+  align-items:center;
+  gap:6px;
+  font-weight:800;
+  color:var(--text-primary);
+  font-size:13px;
+  line-height:1.2;
+  white-space:nowrap;
 }
-.integrated-fit-head .x-input .unit { font-size:11px; font-weight:600; color:var(--text-); }
+.integrated-fit-head .title #fitXInputLegend{
+  width:10ch;
+  font-size:12px;
+  padding:4px 6px;
+  border:1px solid var(--border-color);
+  border-radius:8px;
+  background:transparent;
+  color:var(--text-primary);
+  outline:none;
+}
+
+.integrated-fit-head .title #fitXInputLegend:focus{
+  box-shadow:0 0 0 2px rgba(37,99,235,.25);
+}
+
+/* 统一单位样式 */
+.integrated-fit-head .title #fitXUnitLegend.unit{
+  font-size:11px;
+  font-weight:600;
+  color:var(--text-);
+}
+
+/* 集成模式关闭按钮（无边框），与气泡按钮共享伪元素叉形，但不显示外轮廓边框 */
+.integrated-fit-head .btn-close-top.integrated{
+  position:absolute;
+  top:50%;
+  right:6px;
+  transform:translateY(-50%);
+  appearance:none;
+  background:transparent;
+  border:none;                /* 要求：x 不加边框 */
+  font-size:0;
+  line-height:0;
+  width:24px;
+  height:24px;
+  padding:0;
+  border-radius:8px;
+  cursor:pointer;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  box-shadow:none;
+  transition: background-color .15s ease, transform .1s ease;
+}
+
+.integrated-fit-head .btn-close-top.integrated::before,
+.integrated-fit-head .btn-close-top.integrated::after{
+  content:"";
+  position:absolute;
+  left:50%;
+  top:50%;
+  width:14px;
+  height:2px;
+  background-color: var(--text-primary);
+  transform-origin: center;
+  border-radius:1px;
+}
+.integrated-fit-head .btn-close-top.integrated::before{
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+.integrated-fit-head .btn-close-top.integrated::after{
+  transform: translate(-50%, -50%) rotate(-45deg);
+}
+
+.integrated-fit-head .btn-close-top.integrated:hover{
+  background:rgba(0,0,0,0.06);
+}
+[data-theme="dark"] .integrated-fit-head .btn-close-top.integrated:hover{
+  background:rgba(255,255,255,0.08);
+}
+
+.integrated-fit-head .btn-close-top.integrated:active{
+  transform:translateY(-50%) scale(.92);
+}
 
 .fc-chart-container.legend-integrated #legendRail {
   transition:width .25s ease;
@@ -399,10 +575,3 @@
   justify-content:space-between; gap:8px; box-shadow:0 -4px 10px rgba(0,0,0,0.03);
 }
 .fit-bubble .foot .hint{ color:var(--text-); font-size:11px; margin:0; line-height:1.2; }
-.fit-bubble .btn-close{
-  appearance:none; border:1px solid var(--border-color); background:var(--bg-bubble);
-  color:var(--text-primary); font-size:11px; font-weight:700; padding:4px 12px;
-  border-radius:8px; cursor:pointer; user-select:none; box-shadow: var(--shadow-md);
-  transition: transform .02s ease-in-out, background-color .15s ease, color .15s ease;
-}
-.fit-bubble .btn-close:active{ transform:translateY(1px); }
