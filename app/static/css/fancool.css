@@ -1,7 +1,6 @@
 /* 1. 基础与变量 */
 html { font-size:16px; }
 html, body { height:100%; overflow-x:hidden; }
-
 :root {
   /* 语义色 */
   --fc-color-primary:#2563eb;
@@ -84,6 +83,12 @@ html, body { height:100%; overflow-x:hidden; }
   --tooltip-text:#1f2937;
   --tooltip-border:rgba(0,0,0,.18);
   --tooltip-shadow:0 8px 24px rgba(0,0,0,.18);
+
+  --scrollbar-track: var(--bg-secondary);
+  --scrollbar-thumb: var(--border-color);
+  --scrollbar-thumb-hover: var(--text-secondary);
+  --scrollbar-thumb-active: var(--text-primary);
+  --scrollbar-corner: var(--bg-secondary);
 }
 
 [data-theme="dark"] {
@@ -102,6 +107,21 @@ html, body { height:100%; overflow-x:hidden; }
   --tooltip-text:#f3f4f6;
   --tooltip-border:rgba(255,255,255,.14);
   --tooltip-shadow:0 8px 28px rgba(0,0,0,.45);
+
+  --scrollbar-track: rgba(255,255,255,0.08);
+  --scrollbar-thumb: var(--border-color);
+  --scrollbar-thumb-hover: var(--text-secondary);
+  --scrollbar-thumb-active: var(--text-primary);
+  --scrollbar-corner: var(--bg-primary);
+}
+
+html {
+  /* Firefox 使用的主色（thumb）与背景（track） */
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  /* 可选：让 Firefox 使用细滚动条 */
+  scrollbar-width: thin;
+  /* 让浏览器在可行时自动对内置控件使用适配配色 */
+  color-scheme: light dark;
 }
 
 a, p, button {
