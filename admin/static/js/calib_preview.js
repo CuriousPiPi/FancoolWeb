@@ -79,15 +79,62 @@
     return n.toFixed(2);
   }
 
+  function createLoadingOverlay(parent){
+    const ov = document.createElement('div');
+    ov.className = 'calib-loading-overlay';
+    ov.style.position='absolute';
+    ov.style.left='0'; ov.style.top='0';
+    ov.style.right='0'; ov.style.bottom='0';
+    ov.style.display='flex';
+    ov.style.flexDirection='column';
+    ov.style.alignItems='center';
+    ov.style.justifyContent='center';
+    // 与面板背景一致：使用继承或自定义变量，必要时可改为 'white' 或 'transparent'
+    ov.style.background='inherit';
+    ov.style.fontSize='14px';
+    ov.style.color='#acacacff';
+    ov.innerHTML = `
+      <div style="display:flex; flex-direction:column; align-items:center; gap:10px;">
+        <div class="spinner" style="
+          width:34px;height:34px;
+          border:4px solid #e2e8f0;
+          border-top-color:#2563eb;
+          border-radius:50%;
+          animation:calibSpin 0.9s linear infinite;
+        "></div>
+        <div style="text-align:center; line-height:1.4;">
+          <strong>正在生成频谱模型，请稍候...</strong><br/>
+          <span id="calibLoadingElapsed" style="opacity:0.7;">耗时 0.0 s</span>
+        </div>
+      </div>
+    `;
+    parent.style.position='relative';
+    parent.appendChild(ov);
+    return ov;
+  }
+
+  function updateOverlayTime(ov, start){
+    const el = ov.querySelector('#calibLoadingElapsed');
+    if(!el) return;
+    const sec = (performance.now() - start) / 1000;
+    el.textContent = `耗时 ${sec.toFixed(1)} s`;
+  }
+
+  const styleTag = document.createElement('style');
+  styleTag.textContent = `
+    @keyframes calibSpin { from{ transform:rotate(0deg);} to{ transform:rotate(360deg);} }
+  `;
+  document.head.appendChild(styleTag);
+
   CalibPreview.show = async function({ mount, batchId }){
     const container = (typeof mount==='string')? document.querySelector(mount) : mount;
     if(!container) throw new Error('mount container not found');
     if(!batchId) throw new Error('batchId required');
-
+  
     container.innerHTML = `
-      <div class="panel" style="margin-top:10px;">
+      <div class="panel" style="margin-top:10px; position:relative;">
         <h4 style="margin:0 0 8px;">频谱预览</h4>
-        <div id="calibChart" style="width:100%; height:340px;"></div>
+        <div id="calibChart" style="width:100%; height:340px; position:relative;"></div>
         <div style="display:flex; gap:10px; align-items:center; margin-top:8px; flex-wrap:wrap;">
           <label for="calibRpmInput">RPM</label>
           <input id="calibRpmInput" type="number" step="1" style="width:120px;" />
@@ -98,59 +145,67 @@
           </div>
         </div>
       </div>
-
+  
       <div class="panel" style="margin-top:12px;">
         <h4 style="margin:0 0 8px;">分箱覆盖</h4>
-        <div id="countsChart" style="width:100%; height:100px;"></div>
+        <div id="countsChart" style="width:100%; height:100px; position:relative;"></div>
       </div>
-
+  
+      <div class="panel" style="margin-top:12px;">
+        <h4 style="margin:0 0 8px;">耗时统计</h4>
+        <div id="timingGrid" style="display:grid; grid-template-columns: 1fr 1fr; gap:6px 16px;"></div>
+      </div>
+  
       <div class="panel" style="margin-top:12px;">
         <h4 style="margin:0 0 8px;">模型基础参数</h4>
         <div id="calibInfoGrid" style="display:grid; grid-template-columns: 1fr 1fr; gap:6px 16px;"></div>
       </div>
     `;
-
-    const res = await fetch(`/admin/api/calib/preview?batch_id=${encodeURIComponent(batchId)}`);
-    const j = await res.json();
-    if(!j.success) throw new Error(j.error_message||'预览数据拉取失败');
-    const model = j.data.model || {};
-    await loadECharts();
-
-    const centers = model.centers_hz || [];
-    const finalBands = Array.isArray(model.band_models_pchip) ? model.band_models_pchip : [];
-    if(!centers.length || finalBands.length===0){
-      const el = document.getElementById('calibChart');
-      el.innerHTML='';
-      const warn = document.createElement('div');
-      warn.className='hint';
-      warn.style.marginTop='8px';
-      warn.textContent='频谱模型为空：请检查数据与参数。';
-      el.parentNode.appendChild(warn);
+  
+    const chartDom = document.getElementById('calibChart');
+    const overlayStart = performance.now();
+    const overlay = createLoadingOverlay(chartDom);
+    let overlayTimer = setInterval(()=>updateOverlayTime(overlay, overlayStart), 300);
+  
+    let model;
+    let requestSec = null; // 前端测的请求耗时（秒，含后端处理 + 网络）
+    try {
+      const t0 = performance.now();
+      const res = await fetch(`/admin/api/calib/preview?batch_id=${encodeURIComponent(batchId)}`);
+      const j = await res.json();
+      requestSec = (performance.now() - t0)/1000;
+      if(!j.success) throw new Error(j.error_message||'预览数据拉取失败');
+      model = j.data.model || {};
+    } catch(err){
+      clearInterval(overlayTimer);
+      if(overlay){
+        overlay.innerHTML = `<div style="text-align:center; color:#b91c1c;">
+          <strong>加载失败：</strong>${(err && err.message) || err}<br/>
+          请稍后重试或检查后端日志。
+        </div>`;
+      }
       return;
     }
-
+  
+    await loadECharts();
+  
+    const centers = model.centers_hz || [];
+    const finalBands = Array.isArray(model.band_models_pchip) ? model.band_models_pchip : [];
     const calib = model.calibration || {};
     const rpmMin = model.rpm_min ?? (calib?.calib_model?.x0 ?? 1500);
     const rpmMax = model.rpm_max ?? (calib?.calib_model?.x1 ?? 4500);
     const npo = calib.n_per_oct || 12;
     const {f1, f2} = bandEdgesFromCenters(centers, npo);
-
-    // 图实例
+  
     const ec = echarts.init(document.getElementById('calibChart'), null, { renderer:'canvas', devicePixelRatio: window.devicePixelRatio||1 });
     const ecCounts = echarts.init(document.getElementById('countsChart'), null, { renderer:'canvas', devicePixelRatio: window.devicePixelRatio||1 });
-
-    // RPM 控件
+  
     const rpmInput = document.getElementById('calibRpmInput');
     const rpmRange = document.getElementById('calibRpmRange');
     rpmInput.min = Math.floor(rpmMin); rpmInput.max = Math.ceil(rpmMax); rpmInput.step='1';
     rpmRange.min = rpmInput.min; rpmRange.max = rpmInput.max; rpmRange.step='1';
-
-    // 合成显示区
-    const laCompositeVal = document.getElementById('laCompositeVal');
-    const deltaVal = document.getElementById('deltaVal');
-
-    // Info 面板
-    (function renderInfoGrid(){
+  
+    function renderInfoGrid(frontRenderSec){
       const infoEl = document.getElementById('calibInfoGrid');
       if(!infoEl) return;
       const version = String(model.version||'');
@@ -159,7 +214,7 @@
       const binStr = (model.rpm_bin!=null)
         ? `${model.rpm_bin}${aw.applied ? ' (auto_widen)' : ''}`
         : 'n/a';
-
+    
       let countsSummary='n/a';
       if(Array.isArray(model.counts_per_bin) && model.counts_per_bin.length){
         const arr = model.counts_per_bin.map(Number).filter(Number.isFinite);
@@ -170,15 +225,14 @@
           countsSummary=`tot=${sum}, med=${mid}, min=${s2[0]}, max=${s2[s2.length-1]}`;
         }
       }
-
-      // 叶片数读取顺序：calibration.fan_blades -> calibration.harmonics.n_blade -> n/a
+    
       let bladeVal = 'n/a';
       if(Number.isFinite(calib.fan_blades) && calib.fan_blades>0){
         bladeVal = String(calib.fan_blades);
       }else if (calib.harmonics && Number.isFinite(calib.harmonics.n_blade) && calib.harmonics.n_blade>0){
         bladeVal = String(calib.harmonics.n_blade);
       }
-
+    
       const rows = [
         ['模型类型', `${modelType} (${version})`],
         ['频带数', String(centers.length)],
@@ -188,17 +242,18 @@
         ['会话环境LAeq', (calib.laeq_env_db!=null) ? `${Number(calib.laeq_env_db).toFixed(2)} dB` : 'n/a'],
         ['谐波开关', (calib.harmonics_enabled === true) ? 'ON' : 'OFF'],
         ['叶片数', bladeVal],
-        ['rpm_invert', `${calib?.rpm_invert?.mode || 'unknown'} (final=${calib?.rpm_invert?.track_final || '-'})`]
+        ['rpm_invert', `${calib?.rpm_invert?.mode || 'unknown'} (final=${calib?.rpm_invert?.track_final || '-'})`],
+        ['请求耗时(前端测)', requestSec!=null ? `${requestSec.toFixed(2)} s` : 'n/a'],
+        ['前端图表渲染', frontRenderSec!=null ? `${frontRenderSec.toFixed(2)} s` : 'n/a']
       ];
       infoEl.innerHTML = rows.map(([k,v]) =>
         `<div style="display:flex; justify-content:space-between; align-items:center; padding:2px 0;">
-           <span style="opacity:.7;">${k}</span>
-           <span style="font-weight:600;">${v}</span>
-         </div>`
+          <span style="opacity:.7;">${k}</span>
+          <span style="font-weight:600;">${v}</span>
+        </div>`
       ).join('');
-    })();
-
-    // 分箱覆盖
+    }
+  
     (function renderCounts(){
       const xs = (model.rpm_grid_centers || []).map(Number);
       const ys = (model.counts_per_bin || []).map(Number);
@@ -214,15 +269,15 @@
         yAxis:{ type:'value', min:0, max:maxY, axisLabel:{ show:false }, splitLine:{ show:false } },
         series:[{
           name:'counts', type:'bar',
-            data: xs.map((x,i)=>[x, ys[i]||0]),
-            itemStyle:{
-              color:(p)=>{
-                const v=p.value[1]/maxY;
-                const r=Math.round(255*(1-v));
-                const g=Math.round(200*v);
-                return `rgb(${r},${g},120)`;
-              }
+          data: xs.map((x,i)=>[x, ys[i]||0]),
+          itemStyle:{
+            color:(p)=>{
+              const v=p.value[1]/maxY;
+              const r=Math.round(255*(1-v));
+              const g=Math.round(200*v);
+              return `rgb(${r},${g},120)`;
             }
+          }
         }],
         tooltip:{ trigger:'axis', axisPointer:{ type:'shadow' },
           formatter:(items)=>{
@@ -232,12 +287,50 @@
         }
       }, true);
     })();
-
-    function render(rpm){
-      // 频谱（基础烘焙后）
+  
+    function renderTimings(){
+      const el = document.getElementById('timingGrid');
+      if(!el) return;
+      const t = (calib.timings || {});
+      const cal = t.calibration_phase || {};
+      const sw  = t.sweep_phase || {};
+      const fmt = (v)=> (typeof v==='number' && isFinite(v)) ? `${v.toFixed(2)} s` : '-';
+    
+      const rows = [
+        ['总体(后端汇总)', (typeof t.overall_sec==='number') ? `${t.overall_sec.toFixed(2)} s` : '-'],
+      
+        ['— 校准阶段：env绝对刻度', fmt(cal.env_abs_scale_sec)],
+        ['— 校准阶段：env帧滤波', fmt(cal.env_frames_sec)],
+        ['— 校准阶段：env聚合/基线', fmt(cal.env_agg_sec)],
+        ['— 校准阶段：短录音(full)', fmt(cal.short_full_sec)],
+        ['— 校准阶段：短录音帧滤波', fmt(cal.short_frames_sec)],
+        ['— 校准阶段：短录音聚合', fmt(cal.short_agg_sec)],
+        ['— 校准阶段：文件数/帧数/频带', `${cal.files_env||0}+${cal.files_short||0} 文件 / ${(cal.env_frames_total||0)+(cal.short_frames_total||0)} 帧 / ${cal.bands||'-'} 带`],
+      
+        ['— sweep：读原始音频', fmt(sw.read_raw_sec)],
+        ['— sweep：整段LAeq', fmt(sw.full_la_sec)],
+        ['— sweep：读裁剪音频', fmt(sw.read_proc_sec)],
+        ['— sweep：帧级滤波', fmt(sw.frames_filter_sec)],
+        ['— sweep：反演(LA-only)', fmt(sw.invert_la_sec)],
+        ['— sweep：反演(Hybrid)', fmt(sw.invert_hybrid_sec)],
+        ['— sweep：轨迹后处理', fmt(sw.post_process_sec)],
+        ['— sweep：分箱/统计', fmt(sw.binning_sec)],
+        ['— sweep：谐波建模', fmt(sw.harmonics_sec)],
+        ['— sweep：Δ烘焙', fmt(sw.delta_bake_sec)],
+        ['— sweep：帧/频带', `${sw.frames||0} 帧 / ${sw.bands||0} 带`],
+        ['— sweep：阶段小计', fmt(sw.total_sec)]
+      ];
+    
+      el.innerHTML = rows.map(([k,v]) =>
+        `<div style="display:flex; justify-content:space-between; align-items:center; padding:2px 0;">
+          <span style="opacity:.7;">${k}</span>
+          <span style="font-weight:600;">${v}</span>
+        </div>`
+      ).join('');
+    }
+  
+    function renderSpectrum(rpm){
       const spec = spectrumFromBandModels(finalBands, centers, rpm);
-
-      // 谐波注入
       const harm = calib.harmonics || {};
       const harmonicsEnabled = (calib.harmonics_enabled === true) && harm && harm.n_blade>0;
       const Es = new Array(centers.length).fill(0);
@@ -250,9 +343,10 @@
         const sigmaB = Number(harm?.kernel?.sigma_bands)||0.25;
         const topk = Number(harm?.kernel?.topk)||3;
         const bpf = nBlade * (Number(rpm)/60.0);
+        const {f1, f2} = bandEdgesFromCenters(centers, npo);
         for(const item of (harm.models||[])){
           const mdl = item?.amp_pchip_db;
-            const h = Number(item?.h)||0;
+          const h = Number(item?.h)||0;
           if(!mdl || !h) continue;
           const Lh = evalPchip(mdl, Number(rpm));
           if(!Number.isFinite(Lh)) continue;
@@ -263,24 +357,18 @@
           }
         }
       }
-
-      // 合成 LAeq
       const E_sum = Es.reduce((a,b)=>a+b,0);
       const laSynth = (E_sum>0) ? 10*Math.log10(E_sum) : NaN;
-      laCompositeVal.textContent = Number.isFinite(laSynth) ? laSynth.toFixed(2) : '-';
-
-      // Δ 校正
+      document.getElementById('laCompositeVal').textContent = Number.isFinite(laSynth) ? laSynth.toFixed(2) : '-';
+    
       let deltaDb = null;
       if(calib.laeq_correction_db_pchip){
         const d = evalPchip(calib.laeq_correction_db_pchip, Number(rpm));
         if(Number.isFinite(d)) deltaDb = d;
       }
-      deltaVal.textContent = (deltaDb!=null) ? (deltaDb>=0?`+${deltaDb.toFixed(2)}`:deltaDb.toFixed(2)) : '-';
-
-      // 转回 dB 频谱
+      document.getElementById('deltaVal').textContent = (deltaDb!=null) ? (deltaDb>=0?`+${deltaDb.toFixed(2)}`:deltaDb.toFixed(2)) : '-';
+    
       const specClosed = centers.map((c,i)=> [c, Es[i]>0 ? 10*Math.log10(Es[i]) : null]);
-
-      // y 轴范围
       const ys = specClosed.map(p=>p[1]).filter(v=>v!=null && Number.isFinite(v));
       let yMin=-10,yMax=10;
       if(ys.length){
@@ -290,7 +378,6 @@
         yMax = Math.ceil(yMax + pad);
         if(yMax - yMin < 6) yMax = yMin + 6;
       }
-
       ec.setOption({
         backgroundColor:'transparent', animation:false,
         title:{ text:`Spectrum @ ${Math.round(rpm)} RPM`, left:'center', top:6 },
@@ -305,22 +392,16 @@
         },
         yAxis:{ type:'value', min:yMin, max:yMax, name:'dB' },
         series:[
-          {
-            name:'spectrum', type:'line', showSymbol:false, connectNulls:true,
-            lineStyle:{ width:2.2, color:'#2563eb' },
-            data: specClosed
-          },
-          {
-            name:'points', type:'scatter', symbolSize:3,
+          { name:'spectrum', type:'line', showSymbol:false, connectNulls:true,
+            lineStyle:{ width:2.2, color:'#2563eb' }, data: specClosed },
+          { name:'points', type:'scatter', symbolSize:3,
             itemStyle:{ color:'#2563eb' },
-            data: specClosed.filter(([,y])=>y!=null)
-          }
+            data: specClosed.filter(([,y])=>y!=null) }
         ],
         tooltip:{
           trigger:'axis', axisPointer:{ type:'cross' },
           formatter:(items)=>{
-            const pts = Array.isArray(items)? items: [items];
-            const line = pts.find(p=>p.seriesType==='line') || pts[0];
+            const line = (Array.isArray(items)? items: [items]).find(p=>p.seriesType==='line');
             if(!line) return '';
             return specClosed
               .filter(p=>p[1]!=null)
@@ -331,15 +412,38 @@
       }, true);
       ec.resize();
     }
-
+  
     function setRPM(v){
-      let rpm = Math.max(rpmMin, Math.min(rpmMax, Number(v)||rpmMin));
+      const rpm = Math.max(rpmMin, Math.min(rpmMax, Number(v)||rpmMin));
       rpmInput.value = String(Math.round(rpm));
       rpmRange.value = String(Math.round(rpm));
-      render(rpm);
+      renderSpectrum(rpm);
     }
-
-    // Resize 监听
+  
+    // 初次渲染计时（前端）
+    const renderStart = performance.now();
+    if(!centers.length || finalBands.length===0){
+      clearInterval(overlayTimer);
+      if(overlay){
+        overlay.innerHTML = `<div style="text-align:center; color:#b45309;">
+          频谱模型为空：请检查数据与参数。
+        </div>`;
+      }
+      renderInfoGrid(null);
+      renderTimings();
+      return;
+    }
+  
+    setRPM(Math.round((rpmMin+rpmMax)/2));
+    const frontRenderSec = (performance.now() - renderStart)/1000;
+    renderInfoGrid(frontRenderSec);
+    renderTimings();
+  
+    clearInterval(overlayTimer);
+    if(overlay && overlay.parentNode){
+      overlay.parentNode.removeChild(overlay);
+    }
+  
     (function attachAutoResize(){
       const kick = () => {
         const ec1 = echarts.getInstanceByDom(document.getElementById('calibChart')); ec1 && ec1.resize();
@@ -354,12 +458,10 @@
         const ro2 = new ResizeObserver(kick); ro2.observe(document.getElementById('countsChart'));
       } catch(e){}
     })();
-
+  
     rpmInput.addEventListener('input', ()=> setRPM(rpmInput.value));
     rpmInput.addEventListener('change', ()=> setRPM(rpmInput.value));
     rpmRange.addEventListener('input', ()=> setRPM(rpmRange.value));
-
-    setRPM(Math.round((rpmMin+rpmMax)/2));
   };
 
   window.CalibPreview = CalibPreview;
