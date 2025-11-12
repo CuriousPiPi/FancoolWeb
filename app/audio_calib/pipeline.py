@@ -1721,11 +1721,11 @@ def dump_anchor_fit_csv(root_dir: str,
                 c = centers_anchor[ia]
                 o = orig_spec[ia] if ia < len(orig_spec) else None
                 v = fit_spec[im] if im < len(fit_spec) else None
-                if o is None or (isinstance(o,float) and (o!=o)):
+                if o is None or (isinstance(o, float) and np.isnan(o)):
                     o_s = ""
                 else:
                     o_s = f"{float(o):.3f}"
-                if v is None or (isinstance(v,float) and (v!=v)):
+                if v is None or (isinstance(v, float) and np.isnan(v)):
                     v_s = ""; d_s = ""
                 else:
                     v_s = f"{float(v):.3f}"
