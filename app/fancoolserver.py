@@ -16,7 +16,6 @@ from sqlalchemy import create_engine, text
 from user_agents import parse as parse_ua
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from curves.spectrum_cache import load as load_spectrum  # 放在文件顶部其他 import 之后
 from curves.pchip_cache import get_or_build_unified_perf_model, eval_pchip
 from curves import spectrum_cache
 from curves.spectrum_builder import load_default_params, compute_param_hash, schedule_rebuild, build_performance_pchips
