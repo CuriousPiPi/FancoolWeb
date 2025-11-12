@@ -195,7 +195,7 @@
     const rpmMin = model.rpm_min ?? (calib?.calib_model?.x0 ?? 1500);
     const rpmMax = model.rpm_max ?? (calib?.calib_model?.x1 ?? 4500);
     const npo = calib.n_per_oct || 12;
-    const {f1, f2} = bandEdgesFromCenters(centers, npo);
+    const {f2} = bandEdgesFromCenters(centers, npo);
   
     const ec = echarts.init(document.getElementById('calibChart'), null, { renderer:'canvas', devicePixelRatio: window.devicePixelRatio||1 });
     const ecCounts = echarts.init(document.getElementById('countsChart'), null, { renderer:'canvas', devicePixelRatio: window.devicePixelRatio||1 });
