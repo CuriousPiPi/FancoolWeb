@@ -320,7 +320,6 @@ def api_calib_upload_zip():
                             'created_at': str(mp.get('created_at')) if mp.get('created_at') else None
                         })
 
-                    bcnt = len(bindings)
 
                     rpm_rows = []
                     if rid:
