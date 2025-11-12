@@ -68,6 +68,7 @@ def save(model_json: Dict[str, Any], *, model_id: int, condition_id: int,
         try:
             os.remove(tmp)
         except Exception:
+            # Ignore errors during temp file cleanup; leftover temp files are not critical.
             pass
     return {"path": p}
 
