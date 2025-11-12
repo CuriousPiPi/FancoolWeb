@@ -956,7 +956,7 @@ def build_model_from_calib_with_sweep_in_memory(root_dir: str,
     sweep_bin_qf_percent = float(params.get('sweep_bin_qf_percent', 60.0))
     sweep_env_floor_dbA  = float(params.get('sweep_env_floor_dbA', -60.0))
 
-    closure_mode = str(params.get('closure_mode', 'none')).strip().lower()
+    # closure_mode parameter parsed but not used
 
     harmonics_enable = bool(params.get('harmonics_enable', False))
 
