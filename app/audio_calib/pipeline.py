@@ -1135,9 +1135,6 @@ def build_model_from_calib_with_sweep_in_memory(root_dir: str,
             for k in range(K):
                 base_all[k, t] = _local_baseline_pa2(E_A_frames[:, t], k, win_bands=3)
 
-        def clamp01(v: float) -> float:
-            return 0.0 if v<=0 else (1.0 if v>=1.0 else v)
-
         R_hat = np.zeros((T,), float)
         for t in range(T):
             if not valid_mask[t]:
