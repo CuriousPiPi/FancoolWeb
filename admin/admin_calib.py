@@ -334,7 +334,8 @@ def api_calib_upload_zip():
                 rpm_max = max(rpms) if rpms else None
 
                 try: shutil.rmtree(base_path, ignore_errors=True)
-                except Exception: pass
+                except Exception as e:
+                    current_app.logger.warning(f"Failed to remove directory {base_path}: {e}")
 
                 # 并确保响应里返回 bindings 字段
                 return resp_ok({

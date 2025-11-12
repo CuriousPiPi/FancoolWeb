@@ -89,8 +89,8 @@ def _db_release_lock(key: str):
     try:
         with _engine.begin() as conn:
             conn.execute(text("SELECT RELEASE_LOCK(:k)"), {'k': key})
-    except Exception:
-        pass
+    except Exception as e:
+        log.warning("RELEASE_LOCK failed: %s", e)
 
 class _FileLockCtx:
     def __init__(self, lock_name: str, timeout: int):
@@ -128,15 +128,17 @@ class _FileLockCtx:
     def __exit__(self, exc_type, exc_val, exc_tb):
         if _HAS_PORTALOCKER and self._fh:
             try: portalocker.unlock(self._fh)
-            except Exception: pass
+            except Exception as e:
+                log.warning("Failed to unlock file: %s", e)
             try: self._fh.close()
-            except Exception: pass
+            except Exception as e:
+                log.warning("Failed to close file: %s", e)
         if self._path:
             try:
                 if os.path.isfile(self._path):
                     os.remove(self._path)
-            except Exception:
-                pass
+            except Exception as e:
+                log.warning("Failed to remove directory %s: %s", self._path, e)
 
 class _CrossProcessLock:
     def __init__(self, key: str, timeout: int):
@@ -297,7 +299,7 @@ def _rebuild_once_and_save(model_id: int, condition_id: int, audio_batch_id: str
                     LIMIT 1
                 """), {'bid': audio_batch_id})
         except Exception:
-            pass
+            log.exception("Failed to update calib_run status to 'fail' for batch_id=%s", audio_batch_id)
         return {'ok': False, 'error': str(e)}
 
 _EXEC_WORKERS = int(os.getenv('CURVE_REBUILD_WORKERS', '4'))
