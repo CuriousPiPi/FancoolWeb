@@ -1601,6 +1601,7 @@ def run_calibration_and_model(root_dir: str,
                         "delta_post_env_db": ""
                     })
         except Exception:
+            # Ignore export failures to ensure the main process is not affected
             pass
     return model, per_rpm_rows
 
