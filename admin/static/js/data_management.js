@@ -2714,7 +2714,7 @@ function injectUploadZipButton(){
               if(noiseInp && (!noiseInp.value || !noiseInp.value.trim())) noiseInp.value = ndb;
             }else{
               // 无全空行再新增
-              row = addPerfRow({ rpm: rpm, airflow_cfm: '', noise_db: ndb });
+              addPerfRow({ rpm: rpm, airflow_cfm: '', noise_db: ndb });
             }
           }else{
             const n = row.querySelector('.perf-noise');
