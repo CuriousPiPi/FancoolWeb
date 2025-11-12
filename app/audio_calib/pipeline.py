@@ -379,7 +379,8 @@ def parse_awa_la(path: str) -> float:
         return float("nan")
     for enc in ("utf-8","gbk","latin-1"):
         try:
-            s = open(path, "r", encoding=enc, errors="ignore").read()
+            with open(path, "r", encoding=enc, errors="ignore") as f:
+                s = f.read()
             break
         except Exception:
             s = None
