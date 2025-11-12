@@ -1545,6 +1545,13 @@ function toggleFitUI(showFit){
   const empty  = !lastOption || lastOption.__empty;
   const integrated = isIntegratedLegendMode();
 
+  // 新增：未激活状态下将“实时拟合”按钮背景设为 --bg-secondary
+  const btnFit = btns ? btns.querySelector('#btnFit') : null;
+  if (btnFit) {
+    // showFit 为 true 表示激活，恢复默认背景；未激活则使用 --bg-secondary
+    btnFit.style.backgroundColor = showFit ? '' : 'var(--bg-secondary)';
+  }
+
   // 拟合按钮：始终跟随是否有内容可显示
   if (btns) btns.style.visibility = empty ? 'hidden' : 'visible';
 
@@ -2237,7 +2244,7 @@ async function requestAndRenderSpectrum(forceFull = false) {
     buildAndSetSpectrumOption(forceFull);
 
     if (__specPending) {
-      setSpectrumLoading(true, `${pendingKeys.length}条频谱加载中，请稍后...`);
+      setSpectrumLoading(true, `${pendingKeys.length}条频谱渲染中，可能需要数分钟，你可以先浏览其他数据...`);
       specSetTimeout(() => {
         if (spectrumEnabled) requestAndRenderSpectrum(false);
       }, 1500);
@@ -2334,12 +2341,17 @@ function buildAndSetSpectrumOption(fullRefresh = false, themeOverride) {
   };
 
   const selMapFromMain = getLegendSelectionMap();
-  const visibleSeries = allSeries.map(s => {
+
+  // 所有系列名称（供 legend.data 推断），显隐仍由 selected 控制
+  const namesAll = allSeries.map(s => s.name || `${s.brand || ''} ${s.model || ''} - ${s.condition || ''}`);
+
+  // 可见系列仅用于 yMax/空态等判定，避免隐藏曲线影响纵轴
+  const visibleSeriesForMetrics = allSeries.map(s => {
     const name = s.name || `${s.brand || ''} ${s.model || ''} - ${s.condition || ''}`;
     return { ...s, __name: name };
   }).filter(s => (selMapFromMain ? selMapFromMain[s.__name] !== false : true));
 
-  const visibleKeys = visibleSeries
+  const visibleKeys = visibleSeriesForMetrics
     .map(s => {
       const midRaw = (s.modelId != null) ? s.modelId : s.model_id;
       const cidRaw = (s.conditionId != null) ? s.conditionId : s.condition_id;
@@ -2349,7 +2361,7 @@ function buildAndSetSpectrumOption(fullRefresh = false, themeOverride) {
     .join('|');
 
   let modelReadyCount = 0;
-  visibleSeries.forEach(s => {
+  visibleSeriesForMetrics.forEach(s => {
     const midRaw = (s.modelId != null) ? s.modelId : s.model_id;
     const cidRaw = (s.conditionId != null) ? s.conditionId : s.condition_id;
     const k = `${Number(midRaw)}_${Number(cidRaw)}`;
@@ -2364,7 +2376,7 @@ function buildAndSetSpectrumOption(fullRefresh = false, themeOverride) {
     lastSpectrumOption.__modelReadyCount !== modelReadyCount;
 
   if (needRecalcYMax) {
-    const fixedMax = computeSpectrumYMaxFixed();
+    const fixedMax = computeSpectrumYMaxFixed(); // 内部已按可见 series 计算
     lastSpectrumOption = {
       __yMax: fixedMax,
       __yMaxFixed: fixedMax,
@@ -2373,13 +2385,20 @@ function buildAndSetSpectrumOption(fullRefresh = false, themeOverride) {
     };
   }
 
+  // 构建所有“有模型”的线，显隐交给 legend.selected
   const lines = [];
-  let hasAnyData = false;
-  visibleSeries.forEach(s => {
+  let hasAnyDataVisible = false;
+  const selectedSet = new Set(
+    namesAll.filter(n => (selMapFromMain ? selMapFromMain[n] !== false : true))
+  );
+
+  allSeries.forEach(s => {
+    const name = s.name || `${s.brand || ''} ${s.model || ''} - ${s.condition || ''}`;
     const midRaw = (s.modelId != null) ? s.modelId : s.model_id;
     const cidRaw = (s.conditionId != null) ? s.conditionId : s.condition_id;
     const mid = Number(midRaw), cid = Number(cidRaw);
     if (!Number.isInteger(mid) || !Number.isInteger(cid)) return;
+
     const model = spectrumModelCache.get(`${mid}_${cid}`);
     if (!model) return;
 
@@ -2401,14 +2420,21 @@ function buildAndSetSpectrumOption(fullRefresh = false, themeOverride) {
         pts.push([hz, db]);
       }
     }
-    if (pts.length) hasAnyData = true;
-    const name = s.__name;
-    lines.push({ id: `spec:${mid}_${cid}`, name, color: s.color, data: pts });
+
+    // 仅当“可见且有数据”时，认为当前有可渲染数据（用于空态判定）
+    if (pts.length && selectedSet.has(name)) hasAnyDataVisible = true;
+
+    if (pts.length) {
+      lines.push({ id: `spec:${mid}_${cid}`, name, color: s.color, data: pts });
+    }
   });
 
   const canvasBg = (lastOption && lastOption.backgroundColor) || getExportBg();
+  const isPending =
+    !!__specPending ||
+    (typeof SpectrumController?.getPendingKeys === 'function' && SpectrumController.getPendingKeys().length > 0);
 
-  const optionObj = hasAnyData ? {
+  const optionObj = hasAnyDataVisible ? {
     backgroundColor: canvasBg,
     textStyle: { fontFamily: t.fontFamily },
     title: {
@@ -2435,6 +2461,7 @@ function buildAndSetSpectrumOption(fullRefresh = false, themeOverride) {
     },
     yAxis: {
       type: 'value',
+      show: true,
       min: 0,
       max: Math.max(0, Number(lastSpectrumOption?.__yMaxFixed) || 60),
       name: '声级(dB)',
@@ -2444,7 +2471,11 @@ function buildAndSetSpectrumOption(fullRefresh = false, themeOverride) {
       splitLine: { show: true, lineStyle: { color: t.gridLine } }
     },
     tooltip: buildSpectrumTooltip(t),
-    legend: { show: false, selected: selMapFromMain },
+    legend: {
+      show: false,
+      selected: selMapFromMain,
+      data: namesAll  // 确保 legend 组件知道完整的系列列表
+    },
     series: lines.map(l => ({
       id: l.id,
       name: l.name,
@@ -2453,7 +2484,7 @@ function buildAndSetSpectrumOption(fullRefresh = false, themeOverride) {
       smooth: false,
       connectNulls: false,
       data: l.data,
-      lineStyle: { width: 2.5, color: l.color },
+      lineStyle: { width: 1.5, color: l.color },
       itemStyle: { color: l.color },
       silent: false,
       z: 1,
@@ -2461,45 +2492,63 @@ function buildAndSetSpectrumOption(fullRefresh = false, themeOverride) {
       animation: true,
       animationDuration: 650,
       animationEasing: 'linear',
-      animationDelay: function (idx) { return idx * 14; },
+      animationDelay: idx => idx * 14,
       animationDurationUpdate: 500,
       animationEasingUpdate: 'cubicOut',
       universalTransition: true,
       emphasis: { focus: 'series', blurScope: 'coordinateSystem' }
     }))
-  } : {
-    backgroundColor: canvasBg,
-    title: {
-      text: '当前无可渲染频谱',
-      left: 'center',
-      top: 'middle',
-      textStyle: { color: t.axisLabel, fontWeight: 600, fontSize: 14, fontFamily: t.fontFamily }
-    },
-    grid: { left, right: rightGap, top: 36, bottom: 18 },
-    xAxis: { show: false, min: SPECTRUM_X_MIN, max: SPECTRUM_X_MAX },
-    yAxis: { show: false, min: 0, max: Math.max(0, Number(lastSpectrumOption?.__yMaxFixed) || 60) },
-    legend: { show: false, selected: selMapFromMain },
-    series: []
-  };
+  } : (
+    isPending
+      ? {
+          backgroundColor: canvasBg,
+          grid: { left, right: rightGap, top: 36, bottom: 18 },
+          xAxis: { show: false, min: SPECTRUM_X_MIN, max: SPECTRUM_X_MAX },
+          yAxis: { show: false, min: 0, max: Math.max(0, Number(lastSpectrumOption?.__yMaxFixed) || 60) },
+          legend: { show: false, selected: selMapFromMain, data: namesAll },
+          series: []
+        }
+      : {
+          backgroundColor: canvasBg,
+          title: {
+            text: '当前无可渲染频谱',
+            left: 'center',
+            top: 'middle',
+            textStyle: { color: t.axisLabel, fontWeight: 600, fontSize: 14, fontFamily: t.fontFamily }
+          },
+          grid: { left, right: rightGap, top: 36, bottom: 18 },
+          xAxis: { show: false, min: SPECTRUM_X_MIN, max: SPECTRUM_X_MAX },
+          yAxis: { show: false, min: 0, max: Math.max(0, Number(lastSpectrumOption?.__yMaxFixed) || 60) },
+          legend: { show: false, selected: selMapFromMain, data: namesAll },
+          series: []
+        }
+  );
 
   spectrumChart.setOption(optionObj, fullRefresh ? true : false);
   spectrumChart.resize();
 }
 
 function buildSpectrumTooltip(t){
+  const fmtX = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return String(v);
+    return n >= 1000 ? (n/1000).toFixed(1) + ' kHz' : n.toFixed(1) + ' Hz';
+  };
+
   return {
     ...buildTooltipBase(t, { appendToBody: !isFs }),
     confine: false,
     trigger: 'axis',
     triggerOn: 'mousemove|click|touchstart|touchmove',
     borderRadius: 10,
-    axisPointer: { type: 'line', snap: true, label: { formatter: (obj) => {
-      const v = obj?.value;
-      if (v == null) return '';
-      const num = Number(v);
-      if (!Number.isFinite(num)) return String(v);
-      return num >= 1000 ? (num/1000).toFixed(1)+' kHz' : num.toFixed(1)+' Hz';
-    } } },
+    axisPointer: {
+      type: 'line',
+      snap: true,
+      label: {
+        // 横坐标无论 Hz 或 kHz 均保留一位小数
+        formatter: (obj) => fmtX(obj?.value)
+      }
+    },
     position: function (pos) {
       const x = Array.isArray(pos) ? pos[0] : 0;
       const y = Array.isArray(pos) ? pos[1] : 0;
@@ -2509,7 +2558,8 @@ function buildSpectrumTooltip(t){
     formatter: function (params) {
       if (!Array.isArray(params) || !params.length) return '';
       const x = params[0]?.axisValue;
-      const head = `<div style="font-weight:800;margin-bottom:4px;">${typeof x==='number' && x>=1000?(x/1000).toFixed(1)+' kHz':x+' Hz'}</div>`;
+      // 横坐标标题统一一位小数
+      const head = `<div style="font-weight:800;margin-bottom:4px;">${fmtX(x)}</div>`;
       const linesHtml = params.map(p => {
         const v = Array.isArray(p.data) ? p.data[1] : (Number(p.value) || NaN);
         const dB = Number.isFinite(v) ? v.toFixed(1) + ' dB' : '-';
