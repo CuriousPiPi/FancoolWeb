@@ -39,8 +39,8 @@ def _dump_routes(_app: Flask):
             lines.append(f"{methods:10s} {rule.rule}  -> {rule.endpoint}")
         _app.logger.info("Registered routes:\n" + "\n".join(lines))
         _app.logger.info(f"Admin logger level: {_log_level}")
-    except Exception:
-        pass
+    except Exception as e:
+        _app.logger.exception("Failed to dump routes or log admin logger level: %s", e)
 
 _dump_routes(app)
 
