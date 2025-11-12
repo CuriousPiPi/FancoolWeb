@@ -30,26 +30,22 @@ if _THIS_DIR not in sys.path:
 
 # 导入项目中的 pipeline 工具
 try:
-    import pipeline
+    from pipeline import (
+        P0,
+        a_weight_db,
+        predict_spectrum_db_with_harmonics,
+        band_edges_from_centers,
+        laeq_full_via_bands_filterbank,
+        _design_cpb_filterbank_iir,
+        _design_cpb_filterbank_fir,
+        run_calibration_and_model,
+        pchip_eval,  # from app.curves.pchip_cache.eval_pchip
+    )
 except Exception as e:
     print("ERROR: 无法导入 pipeline.py，请将 synth.py 放在与 pipeline.py 同一目录。")
     raise
 
 from scipy import signal
-
-# 直接复用 pipeline 中的常量/函数
-from pipeline import (
-    P0,
-    a_weight_db,
-    predict_spectrum_db_with_harmonics,
-    band_edges_from_centers,
-    laeq_full_via_bands_filterbank,
-    _design_cpb_filterbank_iir,
-    _design_cpb_filterbank_fir,
-    run_calibration_and_model,
-    pchip_eval,  # from app.curves.pchip_cache.eval_pchip
-)
-
 # ---------- 小工具 ----------
 
 def _as_bool(v, d=False):
