@@ -16,7 +16,13 @@ from sqlalchemy import create_engine, text
 from user_agents import parse as parse_ua
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from curves.pchip_cache import get_or_build_pchip, eval_pchip
+from curves.spectrum_cache import load as load_spectrum  # 放在文件顶部其他 import 之后
+from curves.pchip_cache import get_or_build_unified_perf_model, eval_pchip
+from curves import spectrum_cache
+from curves.spectrum_builder import load_default_params, compute_param_hash, schedule_rebuild, build_performance_pchips
+from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+CODE_VERSION = os.getenv('CODE_VERSION', '')
 
 # =========================================
 # App / Config
@@ -25,31 +31,17 @@ from logging.config import dictConfig
 
 dictConfig({
     'version': 1,
-    'disable_existing_loggers': False,  # 不屏蔽第三方库，但我们会单独降级它们
-    'formatters': {
-        'default': {
-            'format': '[%(asctime)s] %(levelname)s in %(name)s: %(message)s',
-        },
-    },
-    'handlers': {
-        'wsgi': {
-            'class': 'logging.StreamHandler',
-            'stream': 'ext://sys.stdout',
-            'formatter': 'default',
-        },
-    },
-    # 根 logger：WARNING（抑制 INFO/DEBUG）
-    'root': {
-        'level': 'WARNING',
-        'handlers': ['wsgi']
-    },
+    'disable_existing_loggers': False,
+    'formatters': { 'default': { 'format': '[%(asctime)s] %(levelname)s in %(name)s: %(message)s' } },
+    'handlers': { 'wsgi': { 'class': 'logging.StreamHandler', 'stream': 'ext://sys.stdout', 'formatter': 'default' } },
+    'root': { 'level': 'WARNING', 'handlers': ['wsgi'] },
     'loggers': {
-        # Flask/werkzeug 的请求日志
         'werkzeug': {'level': 'WARNING', 'propagate': True},
-        # SQLAlchemy 引擎与连接池（避免打印 SQL/连接池 INFO）
         'sqlalchemy.engine': {'level': 'WARNING', 'propagate': False},
         'sqlalchemy.pool': {'level': 'WARNING', 'propagate': False},
-        # 如果有其他 noisy 的库，也可在此降级
+        # 新增：打开我们模块的 INFO 级别日志，便于排查
+        'curves.spectrum_builder': {'level': 'INFO', 'propagate': True},
+        'fancoolserver.spectrum': {'level': 'INFO', 'propagate': True}
     }
 })
 
@@ -57,7 +49,9 @@ app = Flask(__name__)
 app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(days=30)
 app.secret_key = os.getenv('APP_SECRET', 'replace-me-in-prod')
 app.config['SESSION_COOKIE_SECURE'] = os.getenv('SESSION_COOKIE_SECURE', '0') == '1'
-app.logger.setLevel('WARNING')
+app.logger.setLevel('INFO')
+
+slog = logging.getLogger('fancoolserver.spectrum')
 
 #app.config['TEMPLATES_AUTO_RELOAD'] = True      #生产环境注释这行
 #app.jinja_env.auto_reload = True                #生产环境注释这行
@@ -504,69 +498,67 @@ def _effective_value_for_series(series_rows: list, model_id: int, condition_id: 
     """
     输入：某个 (model_id, condition_id) 的所有行记录（含 rpm, noise_db, airflow）
     输出：effective_x, effective_airflow, source ('raw'|'fit'), axis ('rpm'|'noise_db')
-    规则：
-      - 未限制：取原始最大风量的点（raw）
-      - 有限制：
-         * 若 limit < min_x → 丢弃该条目（不显示）
-         * 若存在 x==limit 的原始点 → raw
-         * 若 limit >= max_x → 取 max_x 的原始点 → raw
-         * 否则（位于域内且无原始点）→ 拟合值（fit, PCHIP）
+    新版：拟合一律使用四合一模型（噪音轴用 noise_to_airflow；转速轴用 rpm_to_airflow）
     """
     ax = 'noise_db' if axis == 'noise' else axis
-    xs, ys, rpm_list = [], [], []
+    rpm, noise, airflow = [], [], []
     for r in series_rows:
-        x = r[ax]
-        y = r['airflow']
-        rpm = r['rpm']
+        rpm.append(r.get('rpm'))
+        noise.append(r.get('noise_db'))
+        airflow.append(r.get('airflow'))
+    # 统一模型（含缓存/失效/重建）
+    unified = get_or_build_unified_perf_model(model_id, condition_id, rpm, airflow, noise) or {}
+    p = (unified.get('pchip') or {})
+    mdl_fit = p.get('noise_to_airflow') if ax == 'noise_db' else p.get('rpm_to_airflow')
+
+    # 抽取有效原始点（用于“原始优先”和边界/落在原始点判断）
+    xs, ys = [], []
+    src_x_arr = noise if ax == 'noise_db' else rpm
+    for x, y in zip(src_x_arr or [], airflow or []):
         try:
             xf = float(x) if x is not None else None
             yf = float(y) if y is not None else None
         except Exception:
             continue
-        if xf is None or not math.isfinite(xf) or yf is None or not math.isfinite(yf):
-            continue
-        xs.append(xf); ys.append(yf); rpm_list.append(float(rpm) if r['rpm'] is not None else None)
+        if xf is None or yf is None: continue
+        if not (math.isfinite(xf) and math.isfinite(yf)): continue
+        xs.append(xf); ys.append(yf)
     if not xs:
         return None
-
     x_min, x_max = min(xs), max(xs)
 
-    # 未限制：取 y 最大的原始点
+    # 未限制：取原始最大风量的点
     if limit_value is None:
         idx = max(range(len(ys)), key=lambda i: ys[i])
         eff_x = xs[idx]
         eff_y = ys[idx]
         return {'effective_x': eff_x, 'effective_airflow': eff_y, 'effective_source': 'raw', 'effective_axis': ax,
-                'effective_rpm_at_point': rpm_list[idx]}
+                'effective_rpm_at_point': None}
 
-    # 有限制：若限制值小于所有原始点的最小 x → 丢弃
     lv = float(limit_value)
     if lv < x_min - 1e-9:
         return None
-
-    # 若 limit >= max_x → 取 max_x 原始点
     if lv >= x_max - 1e-9:
         idxs = [i for i, x in enumerate(xs) if abs(x - x_max) < 1e-9]
         best = max(idxs, key=lambda i: ys[i])
         return {'effective_x': xs[best], 'effective_airflow': ys[best], 'effective_source': 'raw', 'effective_axis': ax,
-                'effective_rpm_at_point': rpm_list[best]}
+                'effective_rpm_at_point': None}
 
-    # 若存在原始点恰好等于 limit（整型 RPM 直接匹配，噪音允许 0.05 容差）
+    # 若存在原始点恰好等于 limit（噪音允许 0.05 容差）
     tol = 0.05 if ax == 'noise_db' else 0.0
     for i, x in enumerate(xs):
         if (tol == 0.0 and x == lv) or (tol > 0.0 and abs(x - lv) <= tol):
             return {'effective_x': x, 'effective_airflow': ys[i], 'effective_source': 'raw', 'effective_axis': ax,
-                    'effective_rpm_at_point': rpm_list[i]}
+                    'effective_rpm_at_point': None}
 
-    # 位于域内且无原始点 → PCHIP 拟合
-    model = get_or_build_pchip(model_id, condition_id, ax, xs, ys)
-    if not model:
+    # 位于域内且无原始点 → 使用四合一 PCHIP 拟合
+    if not (mdl_fit and isinstance(mdl_fit, dict)):
         # 回退：取最接近 limit 的原始点
         j = min(range(len(xs)), key=lambda i: abs(xs[i] - lv))
         return {'effective_x': xs[j], 'effective_airflow': ys[j], 'effective_source': 'raw', 'effective_axis': ax,
-                'effective_rpm_at_point': rpm_list[j]}
-    lx = max(model['x0'], min(lv, model['x1']))
-    eff_y = eval_pchip(model, lx)
+                'effective_rpm_at_point': None}
+    lx = max(float(mdl_fit.get('x0') or lv), min(lv, float(mdl_fit.get('x1') or lv)))
+    eff_y = eval_pchip(mdl_fit, lx)
     return {'effective_x': lx, 'effective_airflow': float(eff_y), 'effective_source': 'fit', 'effective_axis': ax,
             'effective_rpm_at_point': None}
 
@@ -945,128 +937,100 @@ def get_curves_for_pairs(pairs: List[Tuple[int, int]]) -> Dict[str, dict]:
 
 @app.post('/api/curves')
 def api_curves():
+    """
+    返回 canonicalSeries：
+      series: [
+        {
+          key, name, brand, model, condition,
+          model_id, condition_id,
+          resistance_type, resistance_location,
+          data: { rpm:[], noise_db:[], airflow:[] },
+          pchip: { rpm_to_airflow, rpm_to_noise_db, noise_to_rpm, noise_to_airflow }
+        }, ...
+      ]
+      missing: [ {model_id, condition_id}, ... ]
+    说明：
+      - 不再返回顶层 rpm/noise_db/airflow，也不使用 -1 作为占位。
+      - data.* 数组中允许出现 None（例如缺失的噪音或转速），前端会在渲染前清洗。
+    """
     try:
-        data = request.get_json(force=True, silent=True) or {}
-        raw_pairs = data.get('pairs') or []
-        uniq, seen = [], set()
-        for p in raw_pairs:
-            try:
-                mid = int(p.get('model_id'))
-                cid = int(p.get('condition_id'))
-            except Exception:
-                continue
-            t = (mid, cid)
-            if t in seen:
-                continue
-            seen.add(t)
-            uniq.append(t)
+      data = request.get_json(force=True, silent=True) or {}
+      raw_pairs = data.get('pairs') or []
+      uniq, seen = [], set()
+      for p in raw_pairs:
+          try:
+              mid = int(p.get('model_id'))
+              cid = int(p.get('condition_id'))
+          except Exception:
+              continue
+          t = (mid, cid)
+          if t in seen:
+              continue
+          seen.add(t)
+          uniq.append(t)
 
-        bucket = get_curves_for_pairs(uniq)
-        series = []
-        missing = []  # 新增：记录在库中不存在的 pair
+      # 空集合：直接返回空 series
+      if not uniq:
+          return resp_ok({'series': [], 'missing': []})
 
-        def _thin_model(m: dict | None) -> dict | None:
-            if not m or not isinstance(m, dict):
-                return None
-            return {
-                'type': m.get('type', 'pchip_v1'),
-                'axis': m.get('axis'),
-                'x': m.get('x') or [],
-                'y': m.get('y') or [],
-                'm': m.get('m') or [],
-                'x0': m.get('x0'),
-                'x1': m.get('x1'),
-            }
+      # 读取三轴点并按 (m,c) 聚合
+      bucket = get_curves_for_pairs(uniq)  # { "m_c": { rpm:[], airflow:[], noise_db:[], info:{...} } }
 
-        def _collect_axis_points(b: dict, axis_key: str) -> tuple[list[float], list[float]]:
-            xs, ys = [], []
-            x_arr = b.get(axis_key) or []
-            y_arr = b.get('airflow') or []
-            n = min(len(x_arr), len(y_arr))
-            for i in range(n):
-                x = x_arr[i]
-                y = y_arr[i]
-                try:
-                    xf = float(x) if x is not None else None
-                    yf = float(y) if y is not None else None
-                except Exception:
-                    continue
-                if xf is None or yf is None:
-                    continue
-                if not (math.isfinite(xf) and math.isfinite(yf)):
-                    continue
-                xs.append(xf)
-                ys.append(yf)
-            return xs, ys
+      # 统一构建四合一拟合模型（含缓存/失效处理）
+      perf_map = build_performance_pchips(uniq)  # { "m_c": { pchip:{...} } }
 
-        # 新增：对不存在的 pair 主动清理缓存，返回 missing
-        wanted_keys = {f"{m}_{c}": (m, c) for (m, c) in uniq}
-        existing_keys = set(bucket.keys())
-        for key, (mid, cid) in wanted_keys.items():
-            if key not in existing_keys:
-                missing.append({'model_id': mid, 'condition_id': cid})
-                try:
-                    pchip_cache.delete_cached_model(mid, cid, 'rpm')
-                    pchip_cache.delete_cached_model(mid, cid, 'noise_db')
-                except Exception:
-                    pass  # 日志已在 deleteCached 内部记录
+      # 计算缺失集合
+      wanted_keys = {f"{m}_{c}": (m, c) for (m, c) in uniq}
+      existing_keys = set(bucket.keys())
+      missing = []
+      for key, (mid, cid) in wanted_keys.items():
+          if key not in existing_keys:
+              missing.append({'model_id': mid, 'condition_id': cid})
 
-        for mid, cid in uniq:
-            k = f"{mid}_{cid}"
-            b = bucket.get(k)
-            if not b:
-                continue
-            info = b['info']
+      series = []
+      for mid, cid in uniq:
+          k = f"{mid}_{cid}"
+          b = bucket.get(k)
+          if not b:
+              continue
+          info = b['info']  # 含品牌/型号/工况/风阻等
 
-            # 构建/读取 PCHIP 模型（两个轴各一份）
-            rpm_xs, rpm_ys = _collect_axis_points(b, 'rpm')
-            noise_xs, noise_ys = _collect_axis_points(b, 'noise_db')
+          # 四合一 PCHIP
+          perf = perf_map.get(k) or {}
+          pset = (perf.get('pchip') or {})
 
-            # 新增：如果某轴已无点，清理该轴缓存
-            if not rpm_xs:
-                try: pchip_cache.delete_cached_model(info['model_id'], info['condition_id'], 'rpm')
-                except Exception: pass
-            if not noise_xs:
-                try: pchip_cache.delete_cached_model(info['model_id'], info['condition_id'], 'noise_db')
-                except Exception: pass
+          # 直接使用原始数组；不再填充 -1，占位留给前端清洗
+          rpm_arr   = b.get('rpm') or []
+          noise_arr = b.get('noise_db') or []
+          air_arr   = b.get('airflow') or []
 
-            rpm_model = get_or_build_pchip(info['model_id'], info['condition_id'], 'rpm', rpm_xs, rpm_ys) if rpm_xs else None
-            noise_model = get_or_build_pchip(info['model_id'], info['condition_id'], 'noise_db', noise_xs, noise_ys) if noise_xs else None
+          series.append(dict(
+              key=k,
+              name=f"{info['brand']} {info['model']} - {info['condition']}",
+              brand=info['brand'],
+              model=info['model'],
+              condition=info['condition'],
+              model_id=info['model_id'],
+              condition_id=info['condition_id'],
+              resistance_type=info.get('resistance_type'),
+              resistance_location=info.get('resistance_location'),
+              data={
+                  'rpm': rpm_arr,
+                  'noise_db': noise_arr,
+                  'airflow': air_arr
+              },
+              pchip={
+                  'rpm_to_airflow':   pset.get('rpm_to_airflow'),
+                  'rpm_to_noise_db':  pset.get('rpm_to_noise_db'),
+                  'noise_to_rpm':     pset.get('noise_to_rpm'),
+                  'noise_to_airflow': pset.get('noise_to_airflow')
+              }
+          ))
 
-            def _to_placeholder_array(arr):
-                out = []
-                for v in (arr or []):
-                    try:
-                        if v is None:
-                            out.append(-1.0)
-                        else:
-                            fv = float(v)
-                            if math.isnan(fv):
-                                out.append(-1.0)
-                            else:
-                                out.append(fv)
-                    except Exception:
-                        out.append(-1.0)
-                return out
-
-            series.append(dict(
-                key=k,
-                name=f"{info['brand']} {info['model']} - {info['condition']}",
-                brand=info['brand'], model=info['model'],
-                condition=info['condition'],
-                model_id=info['model_id'], condition_id=info['condition_id'],
-                resistance_type=info.get('resistance_type'),
-                resistance_location=info.get('resistance_location'),
-                rpm=_to_placeholder_array(b['rpm']),
-                noise_db=_to_placeholder_array(b['noise_db']),
-                airflow=b['airflow'],
-                pchip={'rpm': _thin_model(rpm_model), 'noise_db': _thin_model(noise_model)
-                }
-            ))
-        return resp_ok({'series': series, 'missing': missing})
+      return resp_ok({'series': series, 'missing': missing})
     except Exception as e:
-        app.logger.exception(e)
-        return resp_err('INTERNAL_ERROR', f'后端异常: {e}', 500)
+      app.logger.exception(e)
+      return resp_err('INTERNAL_ERROR', f'后端异常: {e}', 500)
 
 # =========================================
 # Log Query
@@ -1445,10 +1409,154 @@ def api_recent_updates():
     except Exception as e:
         app.logger.exception(e)
         return resp_err('INTERNAL_ERROR', str(e), 500)
+
+@app.post('/api/spectrum-models')
+def api_spectrum_models():
+    """
+    修改要点：
+      - 对每个 (model_id, condition_id) 先校验磁盘缓存 meta 与当前 param_hash/code_version/audio_data_hash 是否一致；
+      - 若一致：返回瘦身后的 model（原行为）；
+      - 若不一致：检查 perf_audio_binding 是否存在绑定音频：
+          * 若无绑定：将该 pair 标记为 missing（客户端展示“该组数据暂无噪声频谱”）
+          * 若有绑定：触发异步重建 schedule_rebuild(...)；短等待 5 秒尝试获取结果，超时则把该 pair 标记为 rebuilding（客户端展示“频谱重建中，请稍后再试”）
+      - 不把 meta 返回给前端（按要求）。
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        raw_pairs = data.get('pairs') or []
+        uniq, seen = [], set()
+        for p in raw_pairs:
+            try:
+                mid = int(p.get('model_id')); cid = int(p.get('condition_id'))
+            except Exception:
+                continue
+            t = (mid, cid)
+            if t in seen: continue
+            seen.add(t); uniq.append(t)
+        if not uniq:
+            return resp_ok({'models': [], 'missing': [], 'rebuilding': []})
+
+        params = load_default_params()
+        param_hash = compute_param_hash(params)
+        code_ver = CODE_VERSION or ''
+
+        models, missing, rebuilding = [], [], []
+        eng = engine
+
+        for mid, cid in uniq:
+            # 尝试读取现有缓存
+            j = spectrum_cache.load(mid, cid)
+            cur_meta = (j.get('meta') if isinstance(j, dict) else {}) or {}
+            cur_model_raw = (j.get('model') if isinstance(j, dict) else {}) or {}
+            slog.info("[/api/spectrum-models] pair=(%s,%s) cache_exists=%s", mid, cid, bool(j))
+
+            # 查绑定
+            with eng.begin() as conn:
+                row = conn.execute(text("""
+                    SELECT audio_batch_id, audio_data_hash, perf_batch_id
+                    FROM perf_audio_binding
+                    WHERE model_id=:m AND condition_id=:c
+                    ORDER BY created_at DESC LIMIT 1
+                """), {'m': mid, 'c': cid}).fetchone()
+                binding = row._mapping if row else None
+            if not binding:
+                slog.info("  no binding found → missing(no_audio_bound)")
+            else:
+                slog.info("  binding found: audio_batch_id=%s perf_batch_id=%s", binding.get('audio_batch_id'), binding.get('perf_batch_id'))
+
+            # 一致性校验
+            cached_ok = False
+            if cur_meta:
+                meta_param = str(cur_meta.get('param_hash') or '')
+                meta_code = str(cur_meta.get('code_version') or '')
+                meta_audio = str(cur_meta.get('audio_data_hash') or '')
+                bind_audio = (binding.get('audio_data_hash') or '') if binding else ''
+                expected_audio_hash = bind_audio or meta_audio
+                cached_ok = (meta_param == param_hash and meta_code == code_ver and meta_audio == expected_audio_hash and bool(cur_model_raw))
+                slog.info("  check cache: meta_param=%s cur_param=%s meta_code=%s cur_code=%s meta_audio=%s expect_audio=%s -> ok=%s",
+                          meta_param, param_hash, meta_code, code_ver, meta_audio, expected_audio_hash, cached_ok)
+
+            if cached_ok:
+                # 瘦身输出
+                m = cur_model_raw
+                calib = m.get('calibration') or {}
+                calib_model = calib.get('calib_model') or {}
+                slim = {
+                    'version': m.get('version'),
+                    'centers_hz': m.get('centers_hz') or m.get('freq_hz') or m.get('freq') or [],
+                    'band_models_pchip': m.get('band_models_pchip') or [],
+                    'rpm_min': m.get('rpm_min') or calib_model.get('x0'),
+                    'rpm_max': m.get('rpm_max') or calib_model.get('x1'),
+                    'calibration': {
+                        'rpm_peak': calib.get('rpm_peak'),
+                        'rpm_peak_tol': calib.get('rpm_peak_tol'),
+                        'session_delta_db': calib.get('session_delta_db'),
+                    },
+                    'anchor_presence': m.get('anchor_presence') or {}
+                }
+                models.append({'key': f'{mid}_{cid}', 'model_id': mid, 'condition_id': cid, 'model': slim, 'type': j.get('type') or 'spectrum_v2'})
+                continue
+
+            # 缓存不一致 → 重建或提示无绑定
+            if not binding:
+                missing.append({'model_id': mid, 'condition_id': cid, 'reason': 'no_audio_bound'})
+                continue
+
+            audio_batch_id = binding.get('audio_batch_id')
+            with eng.begin() as conn:
+                ab_row = conn.execute(text("SELECT base_path FROM audio_batch WHERE batch_id=:ab LIMIT 1"), {'ab': audio_batch_id}).fetchone()
+                base_path = ab_row._mapping.get('base_path') if ab_row else None
+
+            if not base_path:
+                slog.warning("  binding exists but audio base_path missing (batch_id=%s)", audio_batch_id)
+                missing.append({'model_id': mid, 'condition_id': cid, 'reason': 'audio_missing_on_disk'})
+                continue
+
+            # 异步重建
+            slog.info("  scheduling rebuild mid=%s cid=%s batch=%s base_path=%s", mid, cid, audio_batch_id, base_path)
+            fut = schedule_rebuild(mid, cid, audio_batch_id, base_path, params, binding.get('perf_batch_id'))
+
+            # 快路径（最多 0.2 秒）：极少数很快完成的任务直接返回模型；否则立即标记 rebuilding
+            try:
+                res = fut.result(timeout=0.2)
+                slog.info("  rebuild quick result: %s", res)
+                if res and res.get('ok'):
+                    j2 = spectrum_cache.load(mid, cid) or {}
+                    m = (j2.get('model') or {})
+                    calib = m.get('calibration') or {}
+                    calib_model = calib.get('calib_model') or {}
+                    slim = {
+                        'version': m.get('version'),
+                        'centers_hz': m.get('centers_hz') or m.get('freq_hz') or m.get('freq') or [],
+                        'band_models_pchip': m.get('band_models_pchip') or [],
+                        'rpm_min': m.get('rpm_min') or calib_model.get('x0'),
+                        'rpm_max': m.get('rpm_max') or calib_model.get('x1'),
+                        'calibration': {
+                            'rpm_peak': calib.get('rpm_peak'),
+                            'rpm_peak_tol': calib.get('rpm_peak_tol'),
+                            'session_delta_db': calib.get('session_delta_db'),
+                        },
+                        'anchor_presence': m.get('anchor_presence') or {}
+                    }
+                    models.append({'key': f'{mid}_{cid}', 'model_id': mid, 'condition_id': cid, 'model': slim, 'type': j2.get('type') or 'spectrum_v2'})
+                else:
+                    rebuilding.append({'model_id': mid, 'condition_id': cid})
+            except FuturesTimeoutError:
+                slog.info("  rebuild queued (no wait) → mark rebuilding")
+                rebuilding.append({'model_id': mid, 'condition_id': cid})
+            except Exception as ex:
+                slog.exception("  rebuild scheduling/result error: %s", ex)
+                rebuilding.append({'model_id': mid, 'condition_id': cid})
+
+        return resp_ok({'models': models, 'missing': missing, 'rebuilding': rebuilding})
+    except Exception as e:
+        app.logger.exception(e)
+        return resp_err('INTERNAL_ERROR', f'频谱模型接口异常: {e}', 500)
+
     
 # =========================================
 # Entrypoint
 # =========================================
 if __name__ == '__main__':
     app.logger.setLevel(logging.INFO)
-    app.run(host='0.0.0.0', port=5001, debug=False, use_reloader=False)
+    app.run(host='0.0.0.0', port=5001, debug=True, use_reloader=False)

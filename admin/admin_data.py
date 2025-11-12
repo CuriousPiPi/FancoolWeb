@@ -1215,6 +1215,24 @@ def api_perf_add():
         is_valid = int(payload.get('is_valid') if payload.get('is_valid') in (0, 1, '0', '1') else 0)
     except Exception:
         return resp_err('INVALID_INPUT', 'ID或is_valid格式错误')
+    
+    # 必填：前端生成 batch_id（UUIDv4）
+    batch_id = (payload.get('batch_id') or '').strip()
+    try:
+        parsed = uuid.UUID(batch_id, version=4)
+        if str(parsed) != batch_id:
+            raise ValueError()
+    except Exception:
+        return resp_err('INVALID_INPUT', 'batch_id 非法（需 UUIDv4）')
+    # 全局唯一：任意 model/condition 下均不得重复
+    try:
+        with _engine().begin() as conn:
+            dup = conn.execute(text("SELECT 1 FROM fan_performance_data WHERE batch_id=:bid LIMIT 1"),
+                               {'bid': batch_id}).fetchone()
+            if dup:
+                return resp_err('BATCH_ID_EXISTS', 'batch_id 已存在')
+    except Exception as e:
+        return resp_err('DB_READ_FAIL', f'校验 batch_id 失败: {e}', 500)
 
     # 前端更新描述（用于新批次的 notice）
     desc_front = (payload.get('description') or '').strip()
@@ -1229,19 +1247,36 @@ def api_perf_add():
     seen_rpm = set()
     try:
         for i, r in enumerate(rows_in, start=1):
+            # rpm 必填
             rpm = int(str(r.get('rpm')).strip())
-            if rpm <= 0: raise ValueError(f'第{i}行：rpm 必须为>0的整数')
-            if rpm in seen_rpm: raise ValueError(f'第{i}行：rpm 重复（同一提交内不允许重复）')
+            if rpm <= 0:
+                raise ValueError(f'第{i}行：rpm 必须为>0的整数')
+            if rpm in seen_rpm:
+                raise ValueError(f'第{i}行：rpm 重复（同一提交内不允许重复）')
             seen_rpm.add(rpm)
-            airflow = float(str(r.get('airflow_cfm')).strip())
-            if airflow <= 0: raise ValueError(f'第{i}行：airflow_cfm 必须>0')
-            noise_raw = r.get('noise_db'); noise_db = None
-            if noise_raw not in (None, ''): noise_db = _round1(float(str(noise_raw).strip()))
+
+            # 风量：允许留空；若填写则需 >0
+            air_raw = r.get('airflow_cfm')
+            airflow = None
+            if air_raw not in (None, ''):
+                airflow = float(str(air_raw).strip())
+                if airflow <= 0:
+                    raise ValueError(f'第{i}行：airflow_cfm 必须>0（或可留空）')
+
+            # 等效噪音：允许留空；若填写则一位小数
+            noise_raw = r.get('noise_db')
+            noise_db = None
+            if noise_raw not in (None, ''):
+                noise_db = _round1(float(str(noise_raw).strip()))
+
+            # 服务器侧兜底：至少需要风量或等效噪音之一（页面也已校验；若由总+环境计算，前端会回填 noise_db）
+            if airflow is None and noise_db is None:
+                raise ValueError(f'第{i}行：请至少填写风量或等效噪音（或在页面提供总噪音+环境噪音以计算等效噪音）')
+
             cleaned.append({'rpm': rpm, 'airflow_cfm': airflow, 'noise_db': noise_db})
     except Exception as e:
         return resp_err('INVALID_ROW', str(e))
 
-    new_batch = str(uuid.uuid4())
     try:
         with _engine().begin() as conn:
             prev_batches = []
@@ -1263,7 +1298,7 @@ def api_perf_add():
                         'm': model_id,
                         'c': condition_id,
                         'affected': old_bid,
-                        'desc': new_batch  # 被哪个新批次替换
+                        'desc': batch_id  # 被哪个新批次替换
                     })
 
                 # 关闭旧批次
@@ -1280,7 +1315,7 @@ def api_perf_add():
                     (model_id, condition_id, batch_id, rpm, airflow_cfm, noise_db, is_valid)
                     VALUES (:mid,:cid,:bid,:rpm,:air,:ndb,:valid)
                 """), {
-                    'mid': model_id, 'cid': condition_id, 'bid': new_batch,
+                    'mid': model_id, 'cid': condition_id, 'bid': batch_id,
                     'rpm': r['rpm'], 'air': r['airflow_cfm'], 'ndb': r['noise_db'], 'valid': is_valid
                 })
 
@@ -1295,12 +1330,11 @@ def api_perf_add():
                 """), {
                     'm': model_id,
                     'c': condition_id,
-                    'affected': new_batch,
+                    'affected': batch_id,
                     'action': action_value,
                     'desc': desc_front
                 })
     except Exception as e:
         return resp_err('DB_WRITE_FAIL', f'写入失败: {e}', 500)
 
-
-    return resp_ok({'inserted': len(cleaned), 'batch_id': new_batch}, message=f'成功插入 {len(cleaned)} 行')
+    return resp_ok({'inserted': len(cleaned), 'batch_id': batch_id}, message=f'成功插入 {len(cleaned)} 行')

@@ -1,6 +1,6 @@
 (function(){
   // 对外 API
-  const API = { mount, render, resize, setTheme, setOnXAxisChange };
+  const API = { mount, render, resize, setOnXAxisChange };
 
   // 内部状态
   let root = null;
@@ -12,15 +12,336 @@
   let lastIsNarrow = null;
   let isFs = false;
 
+  let spectrumRoot = null;
+  let spectrumInner = null;
+  let spectrumChart = null;
+  let spectrumEnabled = false;
+  let lastSpectrumOption = null;
+  const spectrumModelCache = new Map();
+  const SPECTRUM_X_MIN = 20;
+  const SPECTRUM_X_MAX = 20000;
+  let __spectrumRaf = null;
+  let __skipSpectrumOnce = false;
+
+  let __legendRailEl = null;
+  let __legendScrollEl = null;
+  let __legendActionsEl = null;
+  let __specPending = false;
+  let __specFetchInFlight = false;
+  let __specRerunQueued = false;
+
+  const NARROW_BREAKPOINT = 1024;   // 窄屏阈值（可按需调整）
+  const NARROW_HYSTERESIS = 48;     // 迟滞窗口（像素），用于防抖
+  const LEGEND_OFFSET = 50;     // Legend 顶部下移像素
+  let spectrumDockEl = null;
+
+
+function ensureSpectrumDock() {
+  if (spectrumDockEl && spectrumDockEl.isConnected) return spectrumDockEl;
+
+  const btn = document.createElement('button');
+  btn.id = 'spectrumDock';
+  btn.type = 'button';
+  btn.className = 'spectrum-dock';
+  btn.setAttribute('aria-label', '展开/收起频谱');
+
+  btn.innerHTML = `
+    <svg class="chev" viewBox="0 0 16 16" width="16" height="16" aria-hidden="true" focusable="false">
+      <path d="M3.2 6.2a1 1 0 0 1 1.4 0L8 9.6l3.4-3.4a1 1 0 1 1 1.4 1.4L8.7 11.7a1 1 0 0 1-1.4 0L3.2 7.6a1 1 0 0 1 0-1.4z" fill="currentColor"></path>
+    </svg>
+    <span class="label">展开频谱</span>
+  `;
+
+  btn.addEventListener('click', (e) => {
+    e.preventDefault();
+    // 统一交给 SpectrumController（含动画/高度/构建/Loading）
+    SpectrumController.setEnabled(!SpectrumController.isEnabled(), { animate: true });
+  });
+
+  const shell =
+    document.getElementById('chart-settings') ||
+    (root && root.closest('.fc-chart-container')) ||
+    document.body;
+
+  try { shell.appendChild(btn); } catch(_) { document.body.appendChild(btn); }
+
+  spectrumDockEl = btn;
+  syncSpectrumDockUi();
+  return spectrumDockEl;
+}
+
+function syncSpectrumDockUi() {
+  if (!spectrumDockEl) return;
+  const open = !!spectrumEnabled;
+  spectrumDockEl.classList.toggle('is-open', open);
+  const label = spectrumDockEl.querySelector('.label');
+  if (label) label.textContent = open ? '收起频谱' : '展开频谱';
+  spectrumDockEl.style.visibility = 'visible';
+}
+
+function placeSpectrumDock() {
+  const el = ensureSpectrumDock();
+  const shell =
+    document.getElementById('chart-settings') ||
+    (root && root.closest('.fc-chart-container')) ||
+    null;
+
+  if (!el || !shell) { if (el) el.style.visibility = 'hidden'; return; }
+  if (el.parentElement !== shell) {
+    try { shell.appendChild(el); } catch(_) {}
+  }
+  el.style.visibility = 'visible';
+}
+
+  // 新增：频谱动画“轮次”与定时器管理，根除竞态
+  let __specEpoch = 0;
+  const __specTimers = new Set();
+  function specBumpEpochAndClearTimers() {
+    __specEpoch++;
+    __specTimers.forEach(id => { try { clearTimeout(id); } catch(_) {} });
+    __specTimers.clear();
+  }
+  function specSetTimeout(fn, ms) {
+    const myEpoch = __specEpoch;
+    const id = setTimeout(() => {
+      __specTimers.delete(id);
+      if (myEpoch === __specEpoch) fn();
+    }, ms);
+    __specTimers.add(id);
+    return id;
+  }
+
+function ensureLegendRail(){
+  const shell = document.getElementById('chart-settings') || (root && root.closest('.fc-chart-container')) || null;
+  if (!shell) return null;
+  shell.classList.add('chart-flex');
+
+  let stack = shell.querySelector('.chart-stack');
+  if (!stack) {
+    stack = document.createElement('div');
+    stack.className = 'chart-stack';
+
+    if (root) stack.appendChild(root);
+    if (spectrumRoot) stack.appendChild(spectrumRoot);
+    shell.insertBefore(stack, shell.firstChild); 
+  }
+
+  if (__legendRailEl && __legendRailEl.isConnected) return __legendRailEl;
+
+  const rail = document.createElement('aside');
+  rail.id = 'legendRail';
+  // rail-actions 放在 legend-scroll 之前（顶部）
+  rail.innerHTML = `
+    <div class="rail-actions"></div>
+    <div class="legend-scroll" id="legendRailScroll"></div>
+  `;
+  shell.appendChild(rail);
+
+  __legendRailEl = rail;
+  __legendScrollEl = rail.querySelector('#legendRailScroll');
+  __legendActionsEl = rail.querySelector('.rail-actions');
+  return rail;
+}
+
+function updateLegendRailLayout(){
+  const shell = document.getElementById('chart-settings') || (root && root.closest('.fc-chart-container')) || null;
+  if (!shell) return;
+  shell.classList.add('chart-flex');
+
+  const narrow = layoutIsNarrow();
+  const integrated = isIntegratedLegendMode();
+  shell.classList.toggle('legend-integrated', integrated);
+  shell.classList.toggle('is-narrow', !!narrow);
+  if (!__legendRailEl) return;
+
+  try {
+    const topGap = narrow ? 0 : LEGEND_OFFSET;
+    __legendRailEl.style.setProperty('--legend-top-gap', `${topGap}px`);
+  } catch(_){}
+
+  // rail-actions 显隐逻辑：仅在“全屏 + 集成 + 拟合开启”时隐藏
+  const hideActions = isFs && integrated && showFitCurves;
+  if (__legendActionsEl) {
+    __legendActionsEl.style.display = hideActions ? 'none' : 'flex';
+  }
+
+  // 窄屏且非全屏直接 100%
+  if (narrow && !isFs) {
+    const prev = __legendRailEl.getAttribute('data-last-width');
+    if (prev !== '0') {
+      __legendRailEl.style.width = '100%';
+      try { shell.style.setProperty('--legend-rail-w', '0px'); } catch(_){}
+      __legendRailEl.setAttribute('data-last-width','0');
+    }
+    return;
+  }
+
+  const hostW = Math.max(0, Math.round(shell.getBoundingClientRect().width || 0));
+  const baseW = (hostW < 200)
+    ? Math.max(window.innerWidth || 0, document.documentElement.clientWidth || 0)
+    : hostW;
+
+  const sList = Array.isArray(lastPayload?.chartData?.series) ? lastPayload.chartData.series : [];
+  const themeName = (lastPayload && lastPayload.theme) || (document.documentElement.getAttribute('data-theme') || 'light');
+  const t = tokens(themeName);
+  const fitOn = !!showFitCurves && !!sList.length && integrated;
+
+  const applied = computeLegendRailWidth({ sList, integrated, fitOn, t, baseW });
+
+  const lastW = __legendRailEl.getAttribute('data-last-width');
+  if (lastW !== String(applied)) {
+    __legendRailEl.style.width = `${applied}px`;
+    if (integrated) {
+      __legendRailEl.style.minWidth = '0px';
+    }
+    try { shell.style.setProperty('--legend-rail-w', `${applied}px`); } catch(_){}
+    __legendRailEl.setAttribute('data-last-width', String(applied));
+  }
+}
+
+function renderLegendRailItems(){
+  ensureLegendRail();
+  if (!__legendScrollEl) return;
+
+  const sList = getSeriesArray();
+  const selMap = getLegendSelectionMap();
+  const isNarrowNow = layoutIsNarrow();
+  const integrated = isIntegratedLegendMode();
+  const fitOn = integrated && showFitCurves && sList.length;
+
+  // 非集成或未开启拟合：基础 Legend
+  if (!fitOn) {
+    const items = sList.map(s => {
+      const baseName = s.name || `${s.brand||''} ${s.model||''} - ${s.condition||''}`;
+      return {
+        name: baseName,
+        brand: s.brand || '',
+        model: s.model || '',
+        condition: s.condition || '',
+        color: s.color,
+        selected: selMap ? (selMap[baseName] !== false) : true
+      };
+    });
+
+    __legendScrollEl.innerHTML = items.map(it => {
+      const base = (it.brand || it.model) ? `${it.brand} ${it.model}` : it.name;
+      const offClass = it.selected ? '' : 'is-off';
+      if (isNarrowNow) {
+        const condInline = it.condition ? `<span class="cond-inline"> - ${it.condition}</span>` : '';
+        return `
+          <div class="legend-row hoverable-row ${offClass}" data-name="${it.name}">
+            <span class="dot" style="background:${it.color}"></span>
+            <span class="name" title="${base}${it.condition ? ' / ' + it.condition : ''}">
+              <span class="l1">${base}</span>${condInline}
+            </span>
+          </div>
+        `;
+      } else {
+        return `
+          <div class="legend-row hoverable-row ${offClass}" data-name="${it.name}">
+            <span class="dot" style="background:${it.color}"></span>
+            <span class="name has-l2" title="${base}${it.condition ? ' / ' + it.condition : ''}">
+              <span class="l1">${base}</span>
+              ${it.condition ? `<span class="l2">${it.condition}</span>` : ``}
+            </span>
+          </div>
+        `;
+      }
+    }).join('');
+
+    // 行交互
+    __legendScrollEl.querySelectorAll('.legend-row').forEach(node => {
+      const name = node.getAttribute('data-name') || '';
+      node.addEventListener('click', () => {
+        if (!name || !chart) return;
+        const sel = getLegendSelectionMap();
+        const currentlyVisible = sel ? (sel[name] !== false) : true;
+        const actionType = currentlyVisible ? 'legendUnSelect' : 'legendSelect';
+        node.classList.toggle('is-off', currentlyVisible);
+        try { chart.dispatchAction({ type: actionType, name }); } catch(_){}
+        if (spectrumEnabled && spectrumChart) {
+          try { spectrumChart.dispatchAction({ type: actionType, name }); } catch(_){}
+        }
+        if (showFitCurves) refreshFitPanel();
+      });
+      node.addEventListener('mouseenter', () => { if (name && chart) try { chart.dispatchAction({ type: 'highlight', seriesName: name }); } catch(_){} });
+      node.addEventListener('mouseleave', () => { if (name && chart) try { chart.dispatchAction({ type: 'downplay', seriesName: name }); } catch(_){} });
+    });
+
+    return;
+  }
+
+  // 集成拟合模式：新的合并头部（标题 + 输入 + 单位 + 关闭按钮）
+  const headHtml = `
+    <div class="integrated-fit-head is-active">
+      <div class="title">
+        ${FIT_ALGO_NAME} 拟合当前位置
+        <input id="fitXInputLegend" type="number" step="1" />
+        <span id="fitXUnitLegend" class="unit"></span>
+      </div>
+      <button id="fitCloseBtnLegend" class="btn-close-top integrated" type="button" aria-label="关闭"></button>
+    </div>
+  `;
+  __legendScrollEl.innerHTML = `
+    <div class="legend-integrated-wrapper fit-on">
+      ${headHtml}
+      <div class="legend-fit-grid is-fit-on"></div>
+    </div>
+  `;
+
+  // 绑定关闭按钮事件
+  const btnCloseLegend = __legendScrollEl.querySelector('#fitCloseBtnLegend');
+  if (btnCloseLegend) {
+    btnCloseLegend.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      showFitCurves = false;
+      // 同步按钮状态（侧栏底部的实时拟合按钮）
+      const btnsRoot = getById('fitButtons');
+      const btnFit = btnsRoot ? btnsRoot.querySelector('#btnFit') : null;
+      if (btnFit) btnFit.classList.remove('active');
+      toggleFitUI(false);
+      updateRailParkedState();
+      repaintPointer();
+      refreshFitPanel();
+      updateLegendRailLayout();
+      try { chart && chart.resize(); } catch(_){}
+    });
+  }
+  // 内容实际渲染交给 refreshFitPanel
+}
+
+function syncLegendRailFromChart(){
+  if (!__legendScrollEl) return;
+  const sel = getLegendSelectionMap();
+  __legendScrollEl.querySelectorAll('.legend-row').forEach(node => {
+    const name = node.getAttribute('data-name');
+    const selected = sel ? (sel[name] !== false) : true;
+    node.classList.toggle('is-off', !selected);
+  });
+}
+
+function updateLegendRail(){
+  ensureLegendRail();
+  renderLegendRailItems();
+  updateLegendRailLayout();
+
+  // 将 #fitButtons 放到 rail 底部
+  const btns = getById('fitButtons');
+  if (btns && __legendActionsEl && btns.parentElement !== __legendActionsEl) {
+    try { __legendActionsEl.appendChild(btns); } catch(_){}
+  }
+}
+
   function getCssTransitionMs(){
     try {
       const raw = getComputedStyle(document.documentElement).getPropertyValue('--transition-speed').trim();
-      if (!raw) return 300;
+      if (!raw) return 250;
       if (raw.endsWith('ms')) return Math.max(0, parseFloat(raw));
       if (raw.endsWith('s'))  return Math.max(0, parseFloat(raw) * 1000);
       const n = parseFloat(raw);
-      return Number.isFinite(n) ? n : 300;
-    } catch(_) { return 300; }
+      return Number.isFinite(n) ? n : 250;
+    } catch(_) { return 250; }
   }
   // NEW: 追踪 root 的几何变化（位置/尺寸），用于在容器“移动但不改变尺寸”时重放置拟合气泡
   let __lastRootRect = { left:0, top:0, width:0, height:0 };
@@ -32,8 +353,7 @@
   }
 
   // 拟合/指针状态
-  const FIT_ALGO_NAME = '趋势拟合';
-  let showRawCurves = true;
+  const FIT_ALGO_NAME = 'PCHIP';
   let showFitCurves = false;
   let fitUIInstalled = false;
 
@@ -66,7 +386,9 @@
     const r = root.getBoundingClientRect();
     return { left: Math.round(r.left), top: Math.round(r.top), width: Math.round(r.width), height: Math.round(r.height) };
   }
+
   function primeRootRect(){ __lastRootRect = getRootRect(); }
+
   function maybeStartRootPosWatch(ms=800){
     const until = performance.now() + Math.max(0, ms|0);
     __posWatchUntil = Math.max(__posWatchUntil, until);
@@ -75,11 +397,11 @@
         __posWatchRaf = null;
         const now = performance.now();
         const cur = getRootRect();
-        // 当 root 的位置或尺寸变化时，重放置拟合 UI（bubble/指针）
+        // 当 root 的位置或尺寸变化时，重放置拟合 UI 与外置频谱按钮
         if (cur.left !== __lastRootRect.left || cur.top !== __lastRootRect.top ||
             cur.width !== __lastRootRect.width || cur.height !== __lastRootRect.height) {
           __lastRootRect = cur;
-          try { placeFitUI(); repaintPointer(); } catch(_){}
+          try { placeFitUI(); repaintPointer(); placeSpectrumDock(); } catch(_){}
         }
         if (now < __posWatchUntil) {
           __posWatchRaf = requestAnimationFrame(tick);
@@ -125,251 +447,431 @@
     bubble.style.position = 'fixed';
   }
 
-  function bindGlobalListeners(){
-    window.addEventListener('resize', onWindowResize, { passive:true });
+function bindGlobalListeners(){
+  window.addEventListener('resize', onWindowResize, { passive:true });
 
-    // 滚动时基于“相对图表偏移”重算一次气泡位置（rAF 节流）
-    let __scrollRaf = null;
-    const onAnyScroll = () => {
-      if (__scrollRaf) return;
-      __scrollRaf = requestAnimationFrame(() => {
-        __scrollRaf = null;
-        try { placeFitUI(); } catch(_) {}
-      });
-    };
-    window.addEventListener('scroll', onAnyScroll, { passive: true, capture: true });
-
-    // NEW: 监听侧栏/主容器的过渡与属性变化，侧栏展开/收起/拖拽期间跟随图表容器移动
-    (function hookLayoutMovers(){
-      const watchMovement = () => { try { placeFitUI(); repaintPointer(); } catch(_) {} };
-      const kickWatch = () => { watchMovement(); maybeStartRootPosWatch(900); };
-
-      const sidebar = document.getElementById('sidebar');
-      if (sidebar) {
-        ['transitionrun','transitionstart','transitionend'].forEach(ev=>{
-          sidebar.addEventListener(ev, kickWatch, { passive:true });
-        });
-        try {
-          const mo = new MutationObserver(kickWatch);
-          mo.observe(sidebar, { attributes:true, attributeFilter:['class','style'] });
-        } catch(_){}
-      }
-      const mainPanels = document.getElementById('main-panels');
-      if (mainPanels) {
-        ['transitionrun','transitionstart','transitionend'].forEach(ev=>{
-          mainPanels.addEventListener(ev, kickWatch, { passive:true });
-        });
-        try {
-          const mo2 = new MutationObserver(kickWatch);
-          mo2.observe(mainPanels, { attributes:true, attributeFilter:['class','style'] });
-        } catch(_){}
-      }
-    })();
-
-    document.addEventListener('fullscreenchange', async () => {
-      isFs = !!document.fullscreenElement;
-
-      // 全屏切换时，先把气泡挂到正确宿主（Top Layer 内/外）
-      adoptBubbleHost();
-
-      // 重置一次拟合气泡位置（使用默认定位）
-      bubbleUserMoved = false;
-      if (!isFs) {
-        if (screen.orientation && screen.orientation.unlock) {
-          try { screen.orientation.unlock(); } catch(_) {}
-        }
-      }
-      onWindowResize();
-      requestAnimationFrame(() => {
-        try { placeFitUI(); repaintPointer(); } catch(_) {}
-      });
-    }, { passive:true });
-  }
-
-  function bindChartListeners(){
-    chart.on('legendselectchanged', () => { if (showFitCurves) refreshFitBubble(); });
-    chart.on('dataZoom', () => {
-      clampXQueryIntoVisibleRange();
-      repaintPointer();
-      if (showFitCurves) refreshFitBubble();
+  // 滚动时基于“相对图表偏移”重算一次位置（rAF 节流）
+  let __scrollRaf = null;
+  const onAnyScroll = () => {
+    if (__scrollRaf) return;
+    __scrollRaf = requestAnimationFrame(() => {
+      __scrollRaf = null;
+      try { placeFitUI(); placeSpectrumDock(); } catch(_) {}
     });
-  }
+  };
+  window.addEventListener('scroll', onAnyScroll, { passive: true, capture: true });
 
-  function onWindowResize(){
-    if (!chart) return;
-    const nowNarrow = layoutIsNarrow();
-    if (lastIsNarrow === null) lastIsNarrow = nowNarrow;
+  (function hookLayoutMovers(){
+    const watchMovement = () => { try { placeFitUI(); repaintPointer(); placeSpectrumDock(); } catch(_) {} };
+    const kickWatch = () => { watchMovement(); maybeStartRootPosWatch(900); };
 
-    // NEW: 窗口 resize 期间也跟踪 root 几何漂移（例如响应式 reflow）
-    maybeStartRootPosWatch(900);
+    const sidebar = document.getElementById('sidebar');
+    if (sidebar) {
+      ['transitionrun','transitionstart','transitionend'].forEach(ev=>{
+        sidebar.addEventListener(ev, kickWatch, { passive:true });
+      });
+      try {
+        const mo = new MutationObserver(kickWatch);
+        mo.observe(sidebar, { attributes:true, attributeFilter:['class','style'] });
+      } catch(_){}
+    }
+    const mainPanels = document.getElementById('main-panels');
+    if (mainPanels) {
+      ['transitionrun','transitionstart','transitionend'].forEach(ev=>{
+        mainPanels.addEventListener(ev, kickWatch, { passive:true });
+      });
+      try {
+        const mo2 = new MutationObserver(kickWatch);
+        mo2.observe(mainPanels, { attributes:true, attributeFilter:['class','style'] });
+      } catch(_){}
+    }
+  })();
 
-    if (nowNarrow !== lastIsNarrow) {
-      lastIsNarrow = nowNarrow;
-      if (lastPayload) render(lastPayload); else chart.resize();
-    } else {
-      chart.resize();
-      if (lastOption) {
-        const { x, y, visible } = computePrefixCenter(lastOption);
-        placeAxisOverlayAt(x, y, visible && !lastOption.__empty);
-        placeFitUI();
-        repaintPointer();
+  document.addEventListener('fullscreenchange', async () => {
+    isFs = !!document.fullscreenElement;
+
+    const modeHost =
+      document.getElementById('chart-settings') ||
+      (root && root.closest('.fc-chart-container')) ||
+      document.documentElement;
+
+    adoptBubbleHost();
+    bubbleUserMoved = false;
+
+    if (window.visualViewport) {
+      try { window.visualViewport.removeEventListener('resize', onWindowResize); } catch(_) {}
+      if (isFs) {
+        try { window.visualViewport.addEventListener('resize', onWindowResize, { passive: true }); } catch(_) {}
       }
     }
+
+    try { chart && chart.dispatchAction({ type: 'hideTip' }); } catch(_) {}
+    try { spectrumChart && spectrumChart.dispatchAction({ type: 'hideTip' }); } catch(_) {}
+
+    if (!isFs) {
+      if (spectrumRoot) spectrumRoot.style.marginTop = '0px';
+
+      // 非全屏：统一清理模式标记与内联高度属性，回到 CSS 自适应
+      try { modeHost.removeAttribute('data-chart-mode'); } catch(_) {}
+      if (root) {
+        try { root.style.minHeight = ''; } catch(_) {}
+      }
+      try {
+        if (spectrumRoot) {
+          spectrumRoot.style.removeProperty('max-height');
+          spectrumRoot.style.removeProperty('flex');
+          spectrumRoot.style.removeProperty('--fs-spec-h');
+        }
+      } catch(_) {}
+
+      if (screen.orientation && screen.orientation.unlock) {
+        try { screen.orientation.unlock(); } catch(_) {}
+      }
+    }
+
+    updateFullscreenHeights();
+
+    if (lastPayload) render(lastPayload); else if (chart) chart.resize();
+
+    requestAnimationFrame(() => {
+      try {
+        // 交由 SpectrumController 在模式切换后统一同步（避免复写 tooltip 附着语义）
+        SpectrumController.onFullscreenChange(isFs);
+
+        placeFitUI();
+        repaintPointer();
+        updateSpectrumLayout();
+        updateLegendRailLayout();
+        updateLegendRail();
+        updateRailParkedState();
+        // 外置按钮：全屏下暂时隐藏，常规模式显示并重放置
+        syncSpectrumDockUi();
+        placeSpectrumDock();
+
+        if (chart) chart.resize();
+        if (spectrumChart) spectrumChart.resize();
+      } catch(_) {}
+    });
+  }, { passive:true });
+}
+
+function bindChartListeners(){
+  chart.on('legendmouseover', (p) => {
+    if (!spectrumEnabled || !spectrumChart || !p || !p.name) return;
+    try { spectrumChart.dispatchAction({ type: 'highlight', seriesName: p.name }); } catch(_) {}
+  });
+  chart.on('legendmouseout', (p) => {
+    if (!spectrumEnabled || !spectrumChart || !p || !p.name) return;
+    try { spectrumChart.dispatchAction({ type: 'downplay', seriesName: p.name }); } catch(_) {}
+  });
+  chart.on('highlight', (p) => {
+    if (!spectrumEnabled || !spectrumChart || !p || !p.seriesName) return;
+    try { spectrumChart.dispatchAction({ type: 'highlight', seriesName: p.seriesName }); } catch(_) {}
+  });
+  chart.on('downplay', (p) => {
+    if (!spectrumEnabled || !spectrumChart || !p || !p.seriesName) return;
+    try { spectrumChart.dispatchAction({ type: 'downplay', seriesName: p.seriesName }); } catch(_) {}
+  });
+
+  chart.on('dataZoom', () => {
+    clampXQueryIntoVisibleRange();
+    layoutScheduler.mark('pointer');
+    if (showFitCurves) layoutScheduler.mark('fitUI');
+
+    if (__skipSpectrumOnce || suppress.active('spectrum')) return;
+    // 改：统一经由 SpectrumController（内部会 rAF 合并与安全检查）
+    SpectrumController.onXQueryChange(xQueryByMode[currentXModeFromPayload(lastPayload)]);
+  });
+}
+
+function onWindowResize(){
+  if (!chart) return;
+
+  suppress.run('spectrum', 500);
+
+  updateFullscreenHeights();
+  const nowNarrow = layoutIsNarrow();
+  if (lastIsNarrow === null) lastIsNarrow = nowNarrow;
+  maybeStartRootPosWatch(900);
+
+  if (nowNarrow !== lastIsNarrow) {
+    lastIsNarrow = nowNarrow;
+    if (lastPayload) render(lastPayload); else chart.resize();
+  } else {
+    chart.resize();
+    try { spectrumEnabled && spectrumChart && spectrumChart.resize(); } catch(_) {}
+
+    if (lastOption) {
+      const { x, y, visible } = computePrefixCenter(lastOption);
+      placeAxisOverlayAt(x, y, visible && !lastOption.__empty);
+    }
+    layoutScheduler.mark('fitUI','pointer');
   }
+
+  layoutScheduler.mark('spectrum','legend','railPark','dock','axisSwitch');
+  __refreshFsSpecMaxHeightIfExpanded();
+}
 
   let __chartRO = null;
-  function installChartResizeObserver(){
-    if (__chartRO || !root || typeof ResizeObserver === 'undefined') return;
-    __chartRO = new ResizeObserver(entries => {
-      for (const entry of entries) {
-        const cr = entry.contentRect || {};
-        if (chart && cr.width > 0 && cr.height > 0) {
-          // NEW: 容器尺寸变化 → 启动短暂的几何跟踪，覆盖“移动 + 尺寸变动”的过渡阶段
-          primeRootRect();
-          maybeStartRootPosWatch(900);
+function installChartResizeObserver(){
+  if (__chartRO || !root || typeof ResizeObserver === 'undefined') return;
+  __chartRO = new ResizeObserver(entries => {
+    for (const entry of entries) {
+      const cr = entry.contentRect || {};
+      if (chart && cr.width > 0 && cr.height > 0) {
+        suppress.run('spectrum', 500);
 
-          // 当容器宽度变化导致“窄/宽布局”跨阈值时，重建 option（让 legend 立即切换布局）
-          const nowNarrow = layoutIsNarrow();
-          if (lastIsNarrow === null) lastIsNarrow = nowNarrow;
-          if (nowNarrow !== lastIsNarrow) {
-            lastIsNarrow = nowNarrow;
-            try {
-              if (lastPayload) { render(lastPayload); }
-              else { chart.resize(); }
-            } catch(_){}
-            // render() 会自行调用 placeFitUI / repaintPointer / 更新 overlay，无需继续执行后续分支
-            continue;
-          }
+        primeRootRect();
+        maybeStartRootPosWatch(900);
 
-          // 未跨阈值：保持原有轻量刷新路径
-          try { chart.resize(); } catch(_){}
-          try {
-            if (lastOption) {
-              const { x, y, visible } = computePrefixCenter(lastOption);
-              placeAxisOverlayAt(x, y, visible && !lastOption.__empty);
-            }
-            placeFitUI();
-            repaintPointer();
-            updateAxisSwitchPosition({ force: true, animate: false });
-          } catch(_){}
+        const nowNarrow = layoutIsNarrow();
+        if (lastIsNarrow === null) lastIsNarrow = nowNarrow;
+        if (nowNarrow !== lastIsNarrow) {
+          lastIsNarrow = nowNarrow;
+          try { if (lastPayload) { render(lastPayload); } else { chart.resize(); } } catch(_){}
+          layoutScheduler.mark('spectrum','legend','railPark','dock');
+          continue;
         }
+
+        try { chart.resize(); } catch(_){}
+        try { spectrumEnabled && spectrumChart && spectrumChart.resize(); } catch(_){}
+
+        try {
+          if (lastOption) {
+            const { x, y, visible } = computePrefixCenter(lastOption);
+            placeAxisOverlayAt(x, y, visible && !lastOption.__empty);
+          }
+        } catch(_) {}
+
+        layoutScheduler.mark('fitUI','pointer','axisSwitch','spectrum','legend','dock');
       }
-    });
-    __chartRO.observe(root);
-  }
+    }
+  });
+  __chartRO.observe(root);
+}
 
   function isMobile(){
     return /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent)
       || (window.matchMedia && window.matchMedia('(pointer:coarse)').matches);
   }
 
-  function layoutIsNarrow() {
-    // 以“图表容器实际宽度”判定（优先 root 的实际可见宽度，其次 chart.getWidth）
-    const w =
-      (root && root.getBoundingClientRect ? Math.floor(root.getBoundingClientRect().width) : 0) ||
-      (chart && typeof chart.getWidth === 'function' ? chart.getWidth() : 0);
+function layoutIsNarrow() {
+  // 以“图表外层容器”的实际宽度判定，避免 rail 改变自身宽度导致的反馈抖动
+  const host = document.getElementById('chart-settings') || (root && root.closest('.fc-chart-container')) || document.documentElement;
+  const w =
+    (host && host.getBoundingClientRect && Math.floor(host.getBoundingClientRect().width)) ||
+    (window.innerWidth || 0);
 
-    let narrow = w > 0 ? (w < 800) : false;
-    // 全屏 + 移动端不视为窄屏
-    if (isFs && isMobile()) narrow = false;
-    return narrow;
+  // 迟滞窗口：进入阈值略小、退出阈值略大，避免边界来回切换
+  const half = Math.max(0, Math.floor(NARROW_HYSTERESIS / 2));
+  const enterNarrowAt = NARROW_BREAKPOINT - half; // 进入窄屏阈值
+  const exitNarrowAt  = NARROW_BREAKPOINT + half; // 退出窄屏阈值
+
+  let narrow;
+  if (lastIsNarrow === true) {
+    // 已经是窄屏 → 只有当宽度明显超过退出阈值才切回桌面
+    narrow = (w < exitNarrowAt);
+  } else if (lastIsNarrow === false) {
+    // 已经是桌面 → 只有当宽度明显小于进入阈值才切换到窄屏
+    narrow = (w < enterNarrowAt);
+  } else {
+    // 初次判定
+    narrow = (w < NARROW_BREAKPOINT);
   }
 
-  // ===== 对外 API =====
+  // 全屏 + 移动端不视为窄屏（保持原规则）
+  if (isFs && isMobile()) narrow = false;
+  return narrow;
+}
+
 function mount(rootEl) {
-  root = rootEl;
-  if (!root) {
+  if (!rootEl) {
     warnOnce('[ChartRenderer] mount(rootEl) 需要一个有效的 DOM 容器');
     return;
   }
-  ensureEcharts();  // 统一解析初始主题
+  root = rootEl; // 在函数最开始设置 root 变量
+
+  ensureSpectrumHost();
+
+  // 确保 DOM 结构正确
+  const shell = root.closest('.fc-chart-container');
+  if (shell) {
+    let stack = shell.querySelector('.chart-stack');
+    if (!stack) {
+      stack = document.createElement('div');
+      stack.className = 'chart-stack';
+      
+      if (root.parentElement) {
+        root.parentElement.insertBefore(stack, root);
+      }
+      stack.appendChild(root);
+    }
+
+    // 确保 spectrumRoot 也被移入 stack
+    if (spectrumRoot && spectrumRoot.parentElement !== stack) {
+        stack.appendChild(spectrumRoot);
+    }
+  }
+
+  ensureLegendRail();
+  updateLegendRailLayout();
+
+  ensureEcharts();
   const initialTheme =
     (window.ThemePref && typeof window.ThemePref.resolve === 'function')
       ? window.ThemePref.resolve()
       : (document.documentElement.getAttribute('data-theme') || 'light');
 
-  // 写入 DOM（不触发后端上报）
   if (window.ThemePref && typeof window.ThemePref.setDom === 'function') {
     window.ThemePref.setDom(initialTheme);
   } else {
     document.documentElement.setAttribute('data-theme', initialTheme);
   }
 
-  // 首次挂载时渲染空数据状态（沿用 initialTheme）
   if (!chart) return;
+  
   const emptyPayload = { chartData: { series: [] }, theme: initialTheme };
   render(emptyPayload);
 }
 
-function setTheme(theme) {
-  const t = (window.ThemePref && typeof window.ThemePref.save === 'function')
-    ? window.ThemePref.save(theme, { notifyServer: false }) // 渲染器不直接上报
-    : String(theme || 'light').toLowerCase();
-
-  if (window.ThemePref && typeof window.ThemePref.setDom === 'function') {
-    window.ThemePref.setDom(t);
-  } else {
-    document.documentElement.setAttribute('data-theme', t);
-    try { localStorage.setItem('theme', t); } catch(_) {}
+function ensureSpectrumHost() {
+  // 若已存在 host，仅保证有 .spectrum-inner 子元素
+  if (spectrumRoot && spectrumRoot.isConnected) {
+    let inner = spectrumRoot.querySelector('.spectrum-inner');
+    if (!inner) {
+      inner = document.createElement('div');
+      inner.className = 'spectrum-inner';
+      spectrumRoot.appendChild(inner);
+    }
+    try {
+      inner.style.position = 'relative';
+      inner.style.width = '100%';
+      inner.style.overflow = 'visible';
+    } catch(_) {}
+    spectrumInner = inner;
+    return spectrumRoot;
   }
-  if (lastPayload) render(lastPayload);
+
+  // 新建 Host + inner（无剪裁层）
+  let host = document.getElementById('spectrumHost');
+  if (!host) { host = document.createElement('div'); host.id = 'spectrumHost'; }
+
+  const shell = document.getElementById('chart-settings') || (root && root.closest('.fc-chart-container')) || document.body;
+  let stack = shell && shell.querySelector('.chart-stack');
+  if (!stack && root && root.parentElement) {
+    stack = document.createElement('div');
+    stack.className = 'chart-stack';
+    root.parentElement.insertBefore(stack, root);
+    stack.appendChild(root);
+    if (shell && stack.parentElement !== shell) shell.insertBefore(stack, shell.firstChild);
+  }
+  if (stack && host.parentElement !== stack) stack.appendChild(host);
+  else if (!stack && root && host.parentElement !== root.parentElement) root.parentElement?.insertBefore(host, root.nextSibling);
+
+  let inner = host.querySelector('.spectrum-inner');
+  if (!inner) { inner = document.createElement('div'); inner.className = 'spectrum-inner'; host.appendChild(inner); }
+  try {
+    inner.style.position = 'relative';
+    inner.style.width = '100%';
+    inner.style.overflow = 'visible';
+  } catch(_) {}
+
+  spectrumRoot = host;
+  spectrumInner = inner;
+  return host;
 }
 
-  function render(payload){
-    lastPayload = payload || lastPayload;
-    if (!root){ warnOnce('[ChartRenderer] 请先调用 mount(rootEl)'); return; }
-    if (!window.echarts){ requestAnimationFrame(()=>render(lastPayload)); return; }
-    ensureEcharts();
-    if (!chart) return;
+function updateFullscreenHeights() {
+  const fsEl = document.fullscreenElement;
+  const activeFs = !!fsEl;
+  isFs = activeFs;
 
-    const prevXMode = currentXModeFromPayload(lastPayload);
-    const prevEmpty = !!(lastOption && lastOption.__empty);
+  requestAnimationFrame(() => {
+    try { chart && chart.resize(); } catch (_) { }
+    try { spectrumEnabled && spectrumChart && spectrumChart.resize(); } catch (_) { }
+  });
+}
 
-    syncThemeAttr((lastPayload && lastPayload.theme) || 'light');
+function render(payload){
+  lastPayload = payload || lastPayload;
+  if (!root){ warnOnce('[ChartRenderer] 请先调用 mount(rootEl)'); return; }
+  if (!window.echarts){ requestAnimationFrame(()=>render(lastPayload)); return; }
+  ensureEcharts();
+  if (!chart) return;
 
-    if (!fitUIInstalled && showFitCurves) { ensureFitUI(); fitUIInstalled = true; }
+  __dataEpoch++;
+  try {
+    // 后端已输出 canonicalSeries：直接使用
+    canonicalSeries = Array.isArray(lastPayload?.chartData?.series) ? lastPayload.chartData.series : [];
+    __canonicalEpoch = __dataEpoch;
+  } catch(_) {
+    canonicalSeries = [];
+  }
 
-    const option = buildOption(lastPayload);
-    const nextXMode = currentXModeFromPayload(lastPayload);
-    const nextEmpty = !!option.__empty;
+  // 构建快照（rpm + noise_db）
+  buildDerivedSnapshots(canonicalSeries);
 
-    if (prevXMode !== nextXMode || prevEmpty !== nextEmpty) {
-      try { chart.clear(); } catch(_){}
-    }
+  const prevXMode = currentXModeFromPayload(lastPayload);
+  const prevEmpty = !!(lastOption && lastOption.__empty);
 
-    chart.setOption(option, true);
-    chart.resize();
+  syncThemeAttr((lastPayload && lastPayload.theme) || 'light');
 
-    requestAnimationFrame(() => updateAxisSwitchPosition({ force:true, animate:false }));
-    if (option.__empty) {
-      try { chart.dispatchAction({ type: 'updateAxisPointer', currTrigger: 'leave' }); } catch(_){}
-    }
+  if (!fitUIInstalled && showFitCurves) { ensureFitUI(); fitUIInstalled = true; }
 
-    const { x, y, visible } = computePrefixCenter(option);
-    placeAxisOverlayAt(x, y, visible && !option.__empty);
+  const option = buildOption(lastPayload);
+  const nextXMode = currentXModeFromPayload(lastPayload);
+  const nextEmpty = !!option.__empty;
 
-    lastOption = option;
-    lastIsNarrow = layoutIsNarrow();
+  if (prevXMode !== nextXMode || prevEmpty !== nextEmpty) {
+    try { chart.clear(); } catch(_){}
+  }
 
-    // 窄屏也显示拟合 UI
-    toggleFitUI(showFitCurves);
-    placeFitUI();
+  chart.setOption(option, true);
+  chart.resize();
 
-    // NEW: 渲染后短暂跟踪一次位置，以覆盖同步/异步布局抖动
-    primeRootRect();
-    maybeStartRootPosWatch(600);
+  lastOption = option;
+  syncSpectrumBgWithMain(option && option.backgroundColor);
+
+  requestAnimationFrame(() => updateAxisSwitchPosition({ force:true, animate:false }));
+  if (option.__empty) {
+    try { chart.dispatchAction({ type: 'updateAxisPointer', currTrigger: 'leave' }); } catch(_){}
+  }
+
+  const { x, y, visible } = computePrefixCenter(option);
+  placeAxisOverlayAt(x, y, visible && !option.__empty);
+
+  lastIsNarrow = layoutIsNarrow();
+
+  toggleFitUI(showFitCurves);
+  placeFitUI();
+  updateRailParkedState();
+
+  ensureSpectrumDock();
+  syncSpectrumDockUi();
+  placeSpectrumDock();
+
+  updateLegendRail();
+
+  primeRootRect();
+  maybeStartRootPosWatch(600);
 
     try {
       const onFinished = () => {
         try { chart.off('finished', onFinished); } catch(_){}
         repaintPointer();
+        updateSpectrumLayout();
+        if (spectrumEnabled && !__skipSpectrumOnce) {
+          requestAndRenderSpectrum(true);
+        }
+        setTimeout(() => { __skipSpectrumOnce = false; }, 450);
+        try { syncLegendRailFromChart(); } catch(_){}
       };
       chart.on('finished', onFinished);
     } catch(_){}
-    requestAnimationFrame(repaintPointer);
 
-    if (showFitCurves) refreshFitBubble();
-  }
+      requestAnimationFrame(repaintPointer);
+      if (showFitCurves) refreshFitPanel();
+    }
 
   function resize(){ if (chart) chart.resize(); }
 
@@ -379,31 +881,27 @@ function setTheme(theme) {
     document.documentElement.setAttribute('data-theme', t);
   }
 
-  function tokens(theme) {
-    const dark = (theme||'').toLowerCase()==='dark';
-    return {
-      fontFamily:'system-ui,-apple-system,"Segoe UI","Helvetica Neue","Microsoft YaHei",Arial,sans-serif',
-      axisLabel: dark ? '#d1d5db' : '#4b5563',
-      axisName:  dark ? '#9ca3af' : '#6b7280',
-      axisLine:  dark ? '#374151' : '#e5e7eb',
-      gridLine:  dark ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.08)',
-      tooltipBg: dark ? 'var(--bg-bubble)' : 'rgba(255,255,255,0.98)',
-      tooltipBorder: dark ? '#374151' : '#e5e7eb',
-      tooltipText: dark ? '#f3f4f6' : '#1f2937',
-      tooltipShadow: dark ? '0 6px 20px rgba(0,0,0,0.35)' : '0 6px 20px rgba(0,0,0,0.12)',
-      pagerIcon: dark ? '#93c5fd' : '#2563eb'
-    };
-  }
+function tokens(theme) {
+  const dark = (String(theme||'').toLowerCase() === 'dark');
+  // 颜色仍用原逻辑；阴影与背板由 CSS 变量控制
+  return {
+    fontFamily:'system-ui,-apple-system,"Segoe UI","Helvetica Neue","Microsoft YaHei",Arial,sans-serif',
+    axisLabel: dark ? '#d1d5db' : '#4b5563',
+    axisName:  dark ? '#9ca3af' : '#6b7280',
+    axisLine:  dark ? '#374151' : '#e5e7eb',
+    gridLine:  dark ? 'rgba(255,255,255,0.10)' : 'rgba(0,0,0,0.08)',
+    tooltipBg: 'var(--tooltip-bg, var(--bg-bubble))',
+    tooltipBorder: dark ? '#374151' : '#e5e7eb',
+    tooltipText: dark ? '#f3f4f6' : '#1f2937',
+    tooltipShadow: 'var(--shadow-lg)',
+    pagerIcon: dark ? '#93c5fd' : '#2563eb'
+  };
+}
 
-  function measureText(text, size, weight, family){
-    const ctx = __textMeasureCtx;
-    ctx.font = `${String(weight||400)} ${Number(size||14)}px ${family||'sans-serif'}`;
-    const m = ctx.measureText(text || '');
-    const width = m.width || 0;
-    const ascent = (typeof m.actualBoundingBoxAscent === 'number') ? m.actualBoundingBoxAscent : size * 0.8;
-    const descent = (typeof m.actualBoundingBoxDescent === 'number') ? m.actualBoundingBoxDescent : size * 0.2;
-    return { width, height: ascent + descent };
-  }
+function measureText(text, size, weight, family){
+  const font = `${String(weight||400)} ${Number(size||14)}px ${family||'sans-serif'}`;
+  return TextMeasurer.measure(font, text || '');
+}
 
   const TITLE_GLUE = '  -  ';
   function computePrefixCenter(option){
@@ -439,371 +937,289 @@ function setTheme(theme) {
   const X_MIN_CLAMP = 0;
   function isFiniteNumber(v){ const n = Number(v); return Number.isFinite(n); }
 
-  function buildSeries(rawSeries, xMode) {
-    let maxAir = 0;
-    let minX = +Infinity, maxX = -Infinity;
+function buildSeries(rawSeries, xMode) {
+  let maxAir = 0;
+  let minX = +Infinity, maxX = -Infinity;
 
-    const series = rawSeries.map(s => {
-      const xSrc  = Array.isArray(s[xMode]) ? s[xMode] : [];
-      const ySrc  = Array.isArray(s.airflow) ? s.airflow : [];
-      const tipSrc = Array.isArray(xMode === 'rpm' ? s.noise_db : s.rpm)
-        ? (xMode === 'rpm' ? s.noise_db : s.rpm) : [];
+  const series = (rawSeries || []).map(s => {
+    // 强制要求 canonical 结构
+    const rpmArr   = Array.isArray(s?.data?.rpm) ? s.data.rpm : [];
+    const noiseArr = Array.isArray(s?.data?.noise_db) ? s.data.noise_db : [];
+    const flowArr  = Array.isArray(s?.data?.airflow) ? s.data.airflow : [];
 
-      const n = Math.min(xSrc.length, ySrc.length);
-      const data = [];
-      for (let i = 0; i < n; i++) {
-        const xRaw = xSrc[i];
-        const yRaw = ySrc[i];
-        const yv = Number(yRaw);
-        const xv = Number(xRaw);
+    const xSrc   = (xMode === 'noise_db') ? noiseArr : rpmArr;
+    const tipSrc = (xMode === 'noise_db') ? rpmArr   : noiseArr;
 
-        if (isFiniteNumber(yv)) {
-          if (isFiniteNumber(xv) && xv !== X_PLACEHOLDER_NEG) {
-            minX = Math.min(minX, xv);
-            maxX = Math.max(maxX, xv);
-            maxAir = Math.max(maxAir, yv);
-            const tipRaw = tipSrc[i];
-            const tip = isFiniteNumber(Number(tipRaw)) ? Number(tipRaw) : undefined;
-            data.push({ value: [xv, yv], tip });
-          } else {
-            data.push({ value: [X_PLACEHOLDER_NEG, yv], tip: undefined, __missingX: true });
-          }
+    const n = Math.min(xSrc.length, flowArr.length);
+    const data = [];
+    for (let i = 0; i < n; i++) {
+      const xv = Number(xSrc[i]);
+      const yv = Number(flowArr[i]);
+      if (Number.isFinite(yv)) {
+        if (Number.isFinite(xv) && xv !== X_PLACEHOLDER_NEG) {
+          minX = Math.min(minX, xv);
+          maxX = Math.max(maxX, xv);
+          maxAir = Math.max(maxAir, yv);
+          const tipRaw = tipSrc[i];
+          const tip = Number.isFinite(Number(tipRaw)) ? Number(tipRaw) : undefined;
+          data.push({ value: [xv, yv], tip });
+        } else {
+          data.push({ value: [X_PLACEHOLDER_NEG, yv], tip: undefined, __missingX: true });
         }
       }
-
-      return {
-        name: s.name,
-        type: 'line',
-        smooth: true,
-        connectNulls: false,
-        showSymbol: true,
-        symbol: 'circle',
-        symbolSize: 8,
-        lineStyle: { width: 3, color: s.color },
-        itemStyle: { color: s.color },
-        label: { show: true, position: 'top', color: 'gray' },
-        legendHoverLink: true,
-        emphasis: {
-          focus: 'series',
-          blurScope: 'coordinateSystem',
-          lineStyle: { width: 4 },
-          itemStyle: { borderWidth: 1.2, shadowColor: 'rgba(0,0,0,0.25)', shadowBlur: 8 },
-          label: { show: true }
-        },
-        blur: {
-          lineStyle: { opacity: 0.18 },
-          itemStyle: { opacity: 0.18 },
-          label: { show: false }
-        },
-        data
-      };
-    });
-
-    if (minX === +Infinity) { minX = 0; maxX = 100; }
-    if (maxAir <= 0) maxAir = 100;
-
-    const span = Math.max(1, maxX - minX);
-    const pad = Math.floor(span * 0.2);
-    return { series, xMin: Math.max(minX - pad, 0), xMax: maxX + pad, yMax: Math.ceil(maxAir * 1.4) };
-  }
-
-  function getExportBg() {
-    const bgBody = getComputedStyle(document.body).backgroundColor;
-    return bgBody && bgBody !== 'rgba(0, 0, 0, 0)' ? bgBody : '#ffffff';
-  }
-
-  function buildOption(payload) {
-    const { chartData, theme } = payload || {};
-    const t = tokens(theme||'light');
-    const sList = Array.isArray(chartData?.series) ? chartData.series : [];
-    const xMode = currentXModeFromPayload(payload);
-
-    const isNarrow = layoutIsNarrow();
-    const exportBg = (payload && payload.chartBg) || getExportBg();
-    const bgNormal = isFs ? exportBg : 'transparent';
-    const transitionMs = getCssTransitionMs();
-
-    if (!sList.length || (!showRawCurves && !showFitCurves)) {
-      toggleFitUI(false);
-      return { 
-        __empty:true,
-        backgroundColor: bgNormal,
-        title:{ text:'请 先 添 加 数 据', left:'center', top:'middle',
-          textStyle:{ color:t.axisLabel, fontFamily:t.fontFamily, fontSize: 20, fontWeight: 600 }
-        },
-        toolbox:{ show:false },
-        tooltip:{ show:false, triggerOn:'none' }
-      };
     }
 
-    const built = buildSeries(sList, xMode);
-
-    const xName = xMode==='rpm' ? '转速(RPM)' : '噪音(dB)';
-    const titlePrefix = xMode==='rpm' ? '转速' : '噪音';
-    const titleTop = 10, titleFontSize = 20, titleFontWeight = 600;
-    const titleText = `${titlePrefix}${TITLE_GLUE}风量曲线`;
-    const titleMeasure = measureText(titleText, titleFontSize, titleFontWeight, t.fontFamily);
-    const gridTop = Math.max(54, titleTop + Math.ceil(titleMeasure.height) + 12);
-
-    // 构造 legend 文本数据（保持原有 formatter 的语义）
-    const legendMeta = {};
-    sList.forEach(s=>{
-      const brand = s.brand || s.brand_name_zh || s.brand_name || '';
-      const model = s.model || s.model_name || '';
-      const condition = s.condition_name_zh || s.condition || '';
-      const key   = s.name || [brand, model].filter(Boolean).join(' ') || String(s.key || '');
-      legendMeta[key] = { brand, model, condition };
-    });
-    function desktopLegendFormatter(name){
-      const m = legendMeta[name] || {};
-      const line1 = [m.brand, m.model].filter(Boolean).join(' ');
-      const line2 = m.condition || '';
-      if (line2) return `{l1|${line1}}\n{l2|${line2}}`;
-      return `{l1|${line1||name}}`;
-    }
-    function mobileLegendFormatter(name){
-      const m = legendMeta[name] || {};
-      const left  = [m.brand, m.model].filter(Boolean).join(' ');
-      const right = m.condition || '';
-      if (right) return `{m1|${left}} {m1|-} {m2|${right}}`;
-      return `{m1|${left||name}}`;
-    }
-
-    // ========== 关键变更开始 ==========
-    const isN = isNarrow;
-
-    // 估算“legend 实际占用宽度”（图标 + 间距 + 文本最长行），用于计算 grid.right
-    let legendItemTextMaxW = 0;
-    if (!isN) {
-      const l1Size=13, l1Weight=600;
-      const l2Size=11, l2Weight=500;
-      // Create a single offscreen canvas context for text measurement
-      const canvas = document.createElement('canvas');
-      const ctx = canvas.getContext('2d');
-      // Precompute font strings
-      const l1Font = `${l1Weight} ${l1Size}px ${t.fontFamily}`;
-      const l2Font = `${l2Weight} ${l2Size}px ${t.fontFamily}`;
-      sList.forEach(s=>{
-        const brand = s.brand || s.brand_name_zh || s.brand_name || '';
-        const model = s.model || s.model_name || '';
-        const condition = s.condition_name_zh || s.condition || '';
-        const line1 = [brand, model].filter(Boolean).join(' ') || (s.name || '');
-        const line2 = condition || '';
-        ctx.font = l1Font;
-        const w1 = ctx.measureText(line1).width;
-        let w2 = 0;
-        if (line2) {
-          ctx.font = l2Font;
-          w2 = ctx.measureText(line2).width;
-        }
-        legendItemTextMaxW = Math.max(legendItemTextMaxW, Math.max(w1, w2));
-      });
-    }
-
-    // legend 图标与文字的间距估值
-    const iconW = 18;
-    const iconTextGap = 8;
-    const safety = 12; // 轻微安全冗余，避免测量误差
-    const legendComputedW = !isN ? (iconW + iconTextGap + legendItemTextMaxW + safety) : 0;
-
-    // 桌面：legend 仍用 right 定位。绘图区右边距 = max(180, legend.right + legendComputedW + 10)
-    // 其中 10 为“绘图区右边”到“legend 左边”的固定间距
-    const legendRightDesktop = 20; 
-    const gridRightDesktop = !isN
-      ? Math.max(180, legendRightDesktop + legendComputedW + 10)
-      : 20; // 窄屏仍保留原 20
-
-    // 窄屏 bottom：在原有“随条目数增加”的基础上，不小于 80px
-    const narrowBottomAuto = Math.min(320, 50 + (sList.length || 1) * 22);
-    const gridBottom = isN ? Math.max(140, narrowBottomAuto) : 40;
-    // ========== 关键变更结束 ==========
-
-    const legendCfg = isN ? {
-      type: 'scroll',
-      orient: 'vertical',
-      left: 20, right: 6, bottom: 6,
-      itemWidth: 16, itemHeight: 10, align: 'auto',
-      pageIconColor: t.pagerIcon, pageTextStyle: { color: t.axisLabel },
-      textStyle: { color: t.axisLabel, fontFamily: t.fontFamily,
-        rich: { m1:{ fontSize:13,fontWeight:600,color:t.axisLabel,lineHeight:18 },
-                m2:{ fontSize:11,fontWeight:500,color:t.axisName,lineHeight:16 } } },
-      formatter: mobileLegendFormatter
-    } : {
-      type: 'scroll',
-      orient: 'vertical',
-      right: legendRightDesktop,       // 仍用 right 定位
-      top: gridTop,
-      bottom: 10,
-      itemWidth: 18, itemHeight: 10, itemGap: 16, align: 'auto',
-      pageIconColor: t.pagerIcon, pageTextStyle: { color: t.axisLabel },
-      textStyle: { color: t.axisLabel, fontFamily: t.fontFamily,
-        rich: { l1:{ fontSize:13,fontWeight:600,color:t.axisLabel,lineHeight:18 },
-                l2:{ fontSize:11,fontWeight:500,color:t.axisName,lineHeight:14 } } },
-      formatter: desktopLegendFormatter
-    };
-    legendCfg.data = sList.map(s => s.name);
-    try {
-      const prevSel = chart && chart.getOption && chart.getOption().legend && chart.getOption().legend[0] && chart.getOption().legend[0].selected;
-      if (prevSel) legendCfg.selected = prevSel;
-    } catch(_){}
-
-    const finalSeries = [];
-    if (showRawCurves) built.series.forEach(s => finalSeries.push(s));
-
-    if (showFitCurves) {
-      ensureFitModels(sList, xMode);
-      const width = Math.max(300, chart.getWidth ? chart.getWidth() : 800);
-      const sampleCount = computeSampleCount(width);
-      sList.forEach(s => {
-        const model = fitModelsCache[xMode].get(s.name);
-        if (!model || model.x0 == null || model.x1 == null) return;
-        const sMin = Math.min(model.x0, model.x1);
-        const sMax = Math.max(model.x0, model.x1);
-        const xmin = Math.max(built.xMin, sMin);
-        const xmax = Math.min(built.xMax, sMax);
-        if (!(xmax > xmin)) return;
-
-        const pts = resampleSingle(model, xmin, xmax, sampleCount);
-        finalSeries.push({
-          id: `fit-line:${xMode}:${s.name}`,
-          name: s.name,
-          type: 'line',
-          smooth: false,
-          showSymbol: false,
-          connectNulls: false,
-          data: pts.map(p => [p.x, p.y]),
-          lineStyle: { width: 2.5, type:'dashed', color: s.color, opacity: 0.95 },
-          itemStyle: { color: s.color },
-          legendHoverLink: true,
-          emphasis: { focus: 'series', blurScope: 'coordinateSystem', lineStyle: { width: 3.5, opacity: 1 }, itemStyle: { opacity: 1 } },
-          blur: { lineStyle: { opacity: 0.2 }, itemStyle: { opacity: 0.2 } },
-          silent: false,
-          tooltip: { show: false },
-          z: 3
-        });
-      });
-    }
-
-    const rawMin = Math.max(X_MIN_CLAMP, built.xMin);
-    const rawMax = built.xMax * 1.2;
-    let xMinForAxis = Math.floor(rawMin);
-    let xMaxForAxis = Math.ceil(rawMax);
-    if (!(xMaxForAxis > xMinForAxis)) xMaxForAxis = xMinForAxis + 1;
-
-    const toolboxFeatures = isNarrow ? {
-      restore: {},
-      saveAsImage: { backgroundColor: exportBg, pixelRatio: window.devicePixelRatio || 1 },
-      myFullscreen: {
-        show: true,
-        title: !!document.fullscreenElement ? '退出全屏' : '全屏查看',
-        icon: !!document.fullscreenElement
-          ? 'path://M3 7v7h7M3 14l7-7M21 17v-7h-7M21 10l-7 7'
-          : 'path://M3 10v-7h7M3 3l7 7M21 14v7h-7M21 21l-7-7',
-        onclick: () => toggleFullscreen()
-      }
-    } : {
-      dataZoom: { yAxisIndex: 'none' },
-      restore: {},
-      saveAsImage: { backgroundColor: exportBg, pixelRatio: window.devicePixelRatio || 1 },
-      myFullscreen: {
-        show: true,
-        title: !!document.fullscreenElement ? '退出全屏' : '全屏查看',
-        icon: !!document.fullscreenElement
-          ? 'path://M3 7v7h7M3 14l7-7M21 17v-7h-7M21 10l-7 7'
-          : 'path://M3 10v-7h7M3 3l7 7M21 14v7h-7M21 21l-7-7',
-        onclick: () => toggleFullscreen()
-      }
-    };
-
+    const name = s.name || `${s.brand || ''} ${s.model || ''} - ${s.condition || ''}`;
     return {
-      __empty:false,
-      __titlePrefix:titlePrefix,
+      name,
+      type: 'line',
+      smooth: true,
+      connectNulls: false,
+      showSymbol: true,
+      symbol: 'circle',
+      symbolSize: 8,
+      lineStyle: { width: 3, color: s.color },
+      itemStyle: { color: s.color },
+      label: { show: true, position: 'top', color: 'gray' },
+      legendHoverLink: true,
+      emphasis: {
+        focus: 'series',
+        blurScope: 'coordinateSystem',
+        lineStyle: { width: 4 },
+        itemStyle: { borderWidth: 1.2, shadowColor: 'rgba(0,0,0,0.25)', shadowBlur: 8 },
+        label: { show: true }
+      },
+      blur: {
+        lineStyle: { opacity: 0.18 },
+        itemStyle: { opacity: 0.18 },
+        label: { show: false }
+      },
+      data
+    };
+  });
 
+  if (minX === +Infinity) { minX = 0; maxX = 100; }
+  if (maxAir <= 0) maxAir = 100;
+
+  const span = Math.max(1, maxX - minX);
+  const pad = Math.floor(span * 0.2);
+  return { series, xMin: Math.max(minX - pad, 0), xMax: maxX + pad, yMax: Math.ceil(maxAir * 1.4) };
+}
+
+function buildOption(payload) {
+  const { chartData, theme } = payload || {};
+  const t = tokens(theme||'light');
+  const sList = getSeriesArray();
+  const xMode = currentXModeFromPayload(payload);
+
+  const isNarrow = layoutIsNarrow();
+  const exportBg = (payload && payload.chartBg) || getExportBg();
+  const bgNormal = isFs ? exportBg : 'transparent';
+  const transitionMs = getCssTransitionMs();
+
+  if (!sList.length) {
+    toggleFitUI(false);
+    return {
+      __empty:true,
       backgroundColor: bgNormal,
-      color: sList.map(s=>s.color),
-      textStyle:{ fontFamily:t.fontFamily },
-      stateAnimation: { duration: transitionMs, easing: 'cubicOut' },
-      animationDurationUpdate: transitionMs,
-      animationEasingUpdate: 'cubicOut',
-
-      // 关键：右边距/底边距按新规则
-      grid:{ left:40, right: gridRightDesktop, top: gridTop, bottom: gridBottom },
-
-      title: { text: titleText, left: 'center', top: titleTop,
-        textStyle: { color: t.axisLabel, fontSize: 20, fontWeight: 600, fontFamily: t.fontFamily } },
-
-      legend: legendCfg,
-
-      xAxis:{
-        type:'value', name:xName, nameLocation:'middle', nameGap:25, nameMoveOverlap:true,
-        nameTextStyle:{ color:t.axisName, fontWeight:600, fontFamily:t.fontFamily, textShadowColor:'rgba(0,0,0,0.28)', textShadowBlur:4, textShadowOffsetY:1 },
-        axisLabel:{ color:t.axisLabel, fontSize:12, fontFamily:t.fontFamily, margin:10 },
-        axisLine:{ lineStyle:{ color:t.axisLine }},
-        splitLine:{ show:true, lineStyle:{ color:t.gridLine }},
-        min: xMinForAxis, max: xMaxForAxis
+      title:{ text:'请 先 添 加 数 据', left:'center', top:'middle',
+        textStyle:{ color:t.axisLabel, fontFamily:t.fontFamily, fontSize: 20, fontWeight: 600 }
       },
-      yAxis:{
-        type:'value', name:'风量(CFM)', min:0, max: built.yMax * 1.3,
-        nameTextStyle:{ color:t.axisName, fontWeight:600, textShadowColor:'rgba(0,0,0,0.28)', textShadowBlur:4, textShadowOffsetY:1 },
-        axisLabel:{ color:t.axisLabel }, axisLine:{ lineStyle:{ color:t.axisLine }},
-        splitLine:{ show:true, lineStyle:{ color:t.gridLine }}
-      },
-
-      tooltip: {
-        appendToBody: true,
-        confine: true,
-        axisPointer: { type: "cross", label: { color: t.tooltipText } },
-        trigger: 'item',
-        backgroundColor: t.tooltipBg,
-        borderColor: t.tooltipBorder, borderWidth: 1, borderRadius: 12,
-        textStyle: { color: t.tooltipText },
-        position: function (pos, _params, dom) {
-          const x = Array.isArray(pos) ? pos[0] : 0;
-          const y = Array.isArray(pos) ? pos[1] : 0;
-          const vw = window.innerWidth  || document.documentElement.clientWidth || 0;
-          const vh = window.innerHeight || document.documentElement.clientHeight || 0;
-          const dw = dom?.offsetWidth  || 0;
-          const dh = dom?.offsetHeight || 0;
-          const pad = 8, gap = 12;
-
-          let left = x + gap;
-          let top  = y + gap;
-
-          if (left + dw > vw - pad) left = Math.max(pad, x - gap - dw);
-          if (top  + dh > vh - pad) top  = Math.max(pad, y - gap - dh);
-          if (left < pad) left = pad;
-          if (top  < pad) top  = pad;
-
-          return [Math.round(left), Math.round(top)];
-        },
-        extraCssText: `
-          position: fixed;
-          backdrop-filter: blur(4px) saturate(120%);
-          -webkit-backdrop-filter: blur(4px) saturate(120%);
-          box-shadow: ${t.tooltipShadow};
-          z-index: 1000000;
-        `,
-        formatter: function(p){
-          const xModeNow = currentXModeFromPayload(lastPayload);
-          const xLabel = xModeNow==='rpm' ? 'RPM, ' : 'dB, ';
-          const infoLabel = xModeNow==='rpm' ? 'dB' : 'RPM';
-          const x = p.value?.[0], y = p.value?.[1];
-          const tip = p.data?.tip ?? '';
-          const dot = `<span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${p.color};margin-right:4px;"></span>`;
-          return `${dot}${p.seriesName}<br/>&nbsp;&nbsp;&nbsp;&nbsp;${y}CFM @${x}${xLabel}${tip}${infoLabel}`;
-        }
-      },
-
-      toolbox:{ top: -5, right: 0, feature:toolboxFeatures },
-
-      dataZoom: [
-        { type: 'inside', xAxisIndex: 0, throttle: 50, zoomOnMouseWheel: true, moveOnMouseWheel: true, moveOnMouseMove: true ,filterMode: "none", startValue: xMinForAxis, endValue: xMaxForAxis*0.85 },
-        { type: 'inside', yAxisIndex: 0, throttle: 50, zoomOnMouseWheel: 'alt', moveOnMouseWheel: 'alt', moveOnMouseMove: true ,filterMode: "none", endValue: built.yMax}
-      ],
-
-      series: finalSeries
+      toolbox:{ show:false },
+      tooltip:{ show:false, triggerOn:'none' }
     };
   }
+
+  // 使用预构建快照
+  const snap = getSnapshotForMode(xMode);
+  const built = snap || buildSeries(sList, xMode);
+
+  const xName = xMode==='rpm' ? '转速(RPM)' : '噪音(dB)';
+  const titlePrefix = xMode==='rpm' ? '转速' : '噪音';
+  const titleTop = 10;
+  const titleText = `${titlePrefix}${TITLE_GLUE}风量曲线`;
+  const titleMeasure = measureText(titleText, 20, 600, t.fontFamily);
+  const gridTop = Math.max(54, titleTop + Math.ceil(titleMeasure.height) + 12);
+
+  const gridRight = 30;
+  const gridBottom = isNarrow ? 60 : 60;
+
+  const legendCfg = { show: false, data: sList.map(s=> (s.name || `${s.brand||''} ${s.model||''} - ${s.condition||''}`)) };
+  try {
+    const prevSel = chart?.getOption?.().legend?.[0]?.selected;
+    if (prevSel) legendCfg.selected = prevSel;
+  } catch(_){}
+
+  const finalSeries = [];
+  built.series.forEach(s => finalSeries.push(s));
+
+  if (showFitCurves) {
+    ensureFitModels(sList, xMode);
+    const width = Math.max(300, chart.getWidth ? chart.getWidth() : 800);
+    const sampleCount = computeSampleCount(width);
+    sList.forEach(s => {
+      const name = s.name || `${s.brand||''} ${s.model||''} - ${s.condition||''}`;
+      const model = fitModelsCache[xMode].get(name);
+      if (!model || model.x0 == null || model.x1 == null) return;
+      const sMin = Math.min(model.x0, model.x1);
+      const sMax = Math.max(model.x0, model.x1);
+      const xmin = Math.max(built.xMin, sMin);
+      const xmax = Math.min(built.xMax, sMax);
+      if (!(xmax > xmin)) return;
+      const pts = resampleSingle(model, xmin, xmax, sampleCount);
+      finalSeries.push({
+        id: `fit-line:${xMode}:${name}`,
+        name,
+        type: 'line',
+        smooth: false,
+        showSymbol: false,
+        connectNulls: false,
+        data: pts.map(p => [p.x, p.y]),
+        lineStyle: { width: 2.2, type:'dashed', color: s.color, opacity: 0.95 },
+        itemStyle: { color: s.color },
+        legendHoverLink: true,
+        emphasis: { focus: 'series', blurScope: 'coordinateSystem', lineStyle: { width: 3.2, opacity: 1 }, itemStyle: { opacity: 1 } },
+        blur: { lineStyle: { opacity: 0.2 }, itemStyle: { opacity: 0.2 } },
+        silent: false,
+        tooltip: { show: false },
+        z: 3
+      });
+    });
+  }
+
+  const rawMin = Math.max(X_MIN_CLAMP, built.xMin);
+  const rawMax = built.xMax * 1.2;
+  let xMinForAxis = Math.floor(rawMin);
+  let xMaxForAxis = Math.ceil(rawMax);
+  if (!(xMaxForAxis > xMinForAxis)) xMaxForAxis = xMinForAxis + 1;
+
+  const exportAllFeature = {
+    show: true,
+    title: '导出为图片',
+    icon: 'path://M12 2v10m0 0 4-4m-4 4-4-4M4 20h16v2H4z',
+    onclick: () => { try { exportCombinedImage(); } catch(e){ console.warn('导出失败', e); } }
+  };
+
+  const fitIcon = 'path://M2 18 L8 12 L12 16 L22 6 L22 9 L12 19 L8 15 L2 21 Z';
+  const myFitToggle = {
+    show: true,
+    title: showFitCurves ? '关闭拟合' : '实时拟合',
+    icon: fitIcon,
+    onclick: () => {
+      try { chart && chart.dispatchAction({ type: 'hideTip' }); } catch(_){}
+      showFitCurves = !showFitCurves;
+
+      // 同步浮动/集成 UI
+      toggleFitUI(showFitCurves);
+      placeFitUI();
+      repaintPointer();
+      refreshFitPanel();
+      updateLegendRailLayout();
+      updateRailParkedState();
+
+      // 关键修复：同步侧栏拟合按钮的激活态（避免与 toolbox 状态不同步）
+      const btnsRoot = getById('fitButtons');
+      const btnFit = btnsRoot ? btnsRoot.querySelector('#btnFit') : null;
+      if (btnFit) btnFit.classList.toggle('active', !!showFitCurves);
+
+      try { chart && chart.resize(); } catch(_){}
+    }
+  };
+
+  const fsEnterIcon = 'path://M4 4h6v2H6v4H4V4Zm10 0h6v6h-2V6h-4V4Zm6 10v6h-6v-2h4v-4h2ZM4 14h2v4h4v2H4v-6z';
+  const fsExitIcon  = 'path://M6 6h2v2H8v2H6V6Zm10 0h2v4h-2V8h-2V6h2Zm2 10v2h-4v-2h2v-2h2v2ZM6 16h2v2h4v2H6v-4z';
+  const myFullscreen = {
+    show: true,
+    title: isFs ? '退出全屏' : '全屏查看',
+    icon: isFs ? fsExitIcon : fsEnterIcon,
+    onclick: () => toggleFullscreen()
+  };
+
+  const toolboxFeatures = isNarrow ? {
+    restore: {},
+    myFitToggle,
+    myExportAll: exportAllFeature,
+    myFullscreen
+  } : {
+    dataZoom: { yAxisIndex: 'none' },
+    restore: {},
+    myFitToggle,
+    myExportAll: exportAllFeature,
+    myFullscreen
+  };
+
+  return {
+    __empty:false,
+    __titlePrefix:titlePrefix,
+    backgroundColor: bgNormal,
+    color: sList.map(s=>s.color),
+    textStyle:{ fontFamily:t.fontFamily },
+    stateAnimation: { duration: transitionMs, easing: 'cubicOut' },
+    animationDurationUpdate: transitionMs,
+    animationEasingUpdate: 'cubicOut',
+    grid:{ left:40, right: gridRight, top: gridTop, bottom: gridBottom },
+    title: { text: titleText, left: 'center', top: titleTop,
+      textStyle: { color: t.axisLabel, fontSize: 20, fontWeight: 600, fontFamily:t.fontFamily } },
+    legend: legendCfg,
+    xAxis:{
+      type:'value', name:xName, nameLocation:'middle', nameGap:25, nameMoveOverlap:true,
+      nameTextStyle:{ color:t.axisName, fontWeight:600, fontFamily:t.fontFamily, textShadowColor:'rgba(0,0,0,0.28)', textShadowBlur:4, textShadowOffsetY:1 },
+      axisLabel:{ color:t.axisLabel, fontSize:12, fontFamily:t.fontFamily, margin:10 },
+      axisLine:{ lineStyle:{ color:t.axisLine }},
+      splitLine:{ show:true, lineStyle:{ color:t.gridLine }},
+      min: xMinForAxis, max: xMaxForAxis
+    },
+    yAxis:{
+      type:'value', name:'风量(CFM)', min:0, max: built.yMax * 1.3,
+      nameTextStyle:{ color:t.axisName, fontWeight:600, textShadowColor:'rgba(0,0,0,0.28)', textShadowBlur:4, textShadowOffsetY:1 },
+      axisLabel:{ color:t.axisLabel }, axisLine:{ lineStyle:{ color:t.axisLine }},
+      splitLine:{ show:true, lineStyle:{ color:t.gridLine }}
+    },
+    tooltip: optionTooltipBase(t),
+    toolbox:{ top: 0, right: 10, feature:toolboxFeatures },
+    dataZoom: [
+      { type: 'inside', xAxisIndex: 0, throttle: 50, zoomOnMouseWheel: true, moveOnMouseWheel: true, moveOnMouseMove: true ,filterMode: "none", startValue: xMinForAxis, endValue: xMaxForAxis*0.85 },
+      { type: 'inside', yAxisIndex: 0, throttle: 50, zoomOnMouseWheel: 'alt', moveOnMouseWheel: 'alt', moveOnMouseMove: true ,filterMode: "none", endValue: built.yMax}
+    ],
+    series: finalSeries
+  };
+}
+
+function optionTooltipBase(t){
+  return {
+    ...buildTooltipBase(t, { appendToBody: !isFs }),
+    confine: false,
+    trigger: 'item',
+    triggerOn: 'mousemove|click|touchstart|touchmove',
+    axisPointer: { type: 'cross', label: { color: t.tooltipText } },
+    borderRadius: 12,
+    position: function (pos, _params, dom) {
+      const x = Array.isArray(pos) ? pos[0] : 0;
+      const y = Array.isArray(pos) ? pos[1] : 0;
+      const vw = window.innerWidth  || document.documentElement.clientWidth || 0;
+      const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+      const dw = dom?.offsetWidth  || 0;
+      const dh = dom?.offsetHeight || 0;
+      const pad = 8, gap = 12;
+      let left = x + gap;
+      let top  = y + gap;
+      if (left + dw > vw - pad) left = Math.max(pad, x - gap - dw);
+      if (top  + dh > vh - pad) top  = Math.max(pad, y - gap - dh);
+      if (left < pad) left = pad;
+      if (top  < pad) top = pad;
+      return [Math.round(left), Math.round(top)];
+    },
+    formatter: function(p){
+      const xModeNow = currentXModeFromPayload(lastPayload);
+      const xLabel = xModeNow==='rpm' ? 'RPM, ' : 'dB, ';
+      const infoLabel = xModeNow==='rpm' ? 'dB' : 'RPM';
+      const x = p.value?.[0], y = p.value?.[1];
+      const tip = p.data?.tip ?? '';
+      const dot = `<span style="display:inline-block;width:12px;height:12px;border-radius:50%;background:${p.color};margin-right:4px;"></span>`;
+      return `${dot}${p.seriesName}<br/>&nbsp;&nbsp;&nbsp;&nbsp;${y}CFM @${x}${xLabel}${tip}${infoLabel}`;
+    }
+  };
+}
 
   // ===== UI：X 轴切换 =====
   let xAxisOverride = null;
@@ -821,8 +1237,8 @@ function setTheme(theme) {
         <div class="switch-container" id="xAxisSwitchContainer">
           <div class="switch-track" id="xAxisSwitchTrack">
             <div class="switch-slider" id="xAxisSwitchSlider">
-              <!--<span class="switch-label switch-label-right">转速</span>-->
-              <!--<span class="switch-label switch-label-left">噪音</span>-->
+              <span class="switch-label switch-label-right">转速</span>
+              <span class="switch-label switch-label-left">噪音</span>
             </div>
           </div>
         </div>`;
@@ -837,127 +1253,136 @@ function setTheme(theme) {
     return overlay;
   }
 
-  function updateAxisSwitchPosition(opts = {}) {
-    const { force = false, animate = false } = opts;
-    // 修改点：去掉“force 例外”，在保护窗口内一律跳过，避免 render() 的刷新把动画干掉
-    if (performance.now() < axisSnapSuppressUntil) return;
+function updateAxisSwitchPosition(opts = {}) {
+  const { animate = false } = opts;
 
-    const track  = getById('xAxisSwitchTrack');
-    const slider = getById('xAxisSwitchSlider');
-    if (!track || !slider) return;
+  const track  = getById('xAxisSwitchTrack');
+  const slider = getById('xAxisSwitchSlider');
+  if (!track || !slider) return;
 
-    const sliderWidth = slider.offsetWidth || 0;
-    const trackWidth  = track.offsetWidth || 0;
-    const maxX = Math.max(0, trackWidth - sliderWidth);
+  const sliderWidth = slider.offsetWidth || 0;
+  const trackWidth  = track.offsetWidth || 0;
+  const maxX = Math.max(0, trackWidth - sliderWidth);
 
-    const currType = currentXModeFromPayload(lastPayload);
-    const toNoise  = (currType === 'noise_db');
+  const currType = currentXModeFromPayload(lastPayload);
+  const toNoise  = (currType === 'noise_db');
 
-    slider.style.transition = animate ? 'transform .25s ease' : slider.style.transition || ''; // 不强行抹掉已存在的过渡
-    slider.style.transform  = `translateX(${toNoise ? maxX : 0}px)`;
-    track.setAttribute('aria-checked', String(toNoise));
+  // 只有需要动画时才覆盖 transition，避免把之前设置的过渡清掉
+  if (animate) {
+    slider.style.transition = 'transform .25s ease';
+  }
+  slider.style.transform  = `translateX(${toNoise ? maxX : 0}px)`;
+  track.setAttribute('aria-checked', String(toNoise));
+}
+
+function bindXAxisSwitch(){
+  const xAxisSwitchTrack = getById('xAxisSwitchTrack');
+  const xAxisSwitchSlider = getById('xAxisSwitchSlider');
+  if (!xAxisSwitchTrack || !xAxisSwitchSlider) return;
+
+  let sliderWidth = 0, trackWidth = 0, maxX = 0;
+  let dragging = false, dragMoved = false, startX = 0, base = 0, activePointerId = null;
+
+  try {
+    xAxisSwitchTrack.setAttribute('role', 'switch');
+    xAxisSwitchTrack.setAttribute('aria-checked', String((currentXModeFromPayload(lastPayload) || 'rpm') !== 'rpm'));
+  } catch(_) {}
+
+  function measure() {
+    sliderWidth = xAxisSwitchSlider.offsetWidth || 0;
+    trackWidth  = xAxisSwitchTrack.offsetWidth || 0;
+    maxX = Math.max(0, trackWidth - sliderWidth);
   }
 
-  function bindXAxisSwitch(){
-    const xAxisSwitchTrack = getById('xAxisSwitchTrack');
-    const xAxisSwitchSlider = getById('xAxisSwitchSlider');
-    if (!xAxisSwitchTrack || !xAxisSwitchSlider) return;
+  function pos(type, animate = true) {
+    const toNoise = (type === 'noise_db' || type === 'noise');
+    const x = toNoise ? maxX : 0;
+    // 统一 0.25s ease
+    xAxisSwitchSlider.style.transition = animate ? 'transform .25s ease' : xAxisSwitchSlider.style.transition || '';
+    xAxisSwitchSlider.style.transform  = `translateX(${x}px)`;
+    xAxisSwitchTrack.setAttribute('aria-checked', String(toNoise));
+  }
 
-    let sliderWidth = 0, trackWidth = 0, maxX = 0;
-    let dragging = false, dragMoved = false, startX = 0, base = 0, activePointerId = null;
+  function applyType(newType) {
+    const normalized = (newType === 'noise') ? 'noise_db' : newType;
+    if (normalized !== 'rpm' && normalized !== 'noise_db') return;
+    if (xAxisOverride === normalized) return;
+    xAxisOverride = normalized;
+    try { localStorage.setItem('x_axis_type', normalized); } catch(_){}
+    pos(normalized, true);
 
-    try {
-      xAxisSwitchTrack.setAttribute('role', 'switch');
-      xAxisSwitchTrack.setAttribute('aria-checked', String((currentXModeFromPayload(lastPayload) || 'rpm') !== 'rpm'));
-    } catch(_) {}
+    __skipSpectrumOnce = true;
+    if (lastPayload) render(lastPayload);
+    if (typeof onXAxisChange === 'function') { try { onXAxisChange(normalized); } catch(_) {} }
+  }
 
-    function measure() { sliderWidth = xAxisSwitchSlider.offsetWidth || 0; trackWidth  = xAxisSwitchTrack.offsetWidth || 0; maxX = Math.max(0, trackWidth - sliderWidth); }
-    function pos(type, animate = true) {
-      const toNoise = (type === 'noise_db' || type === 'noise');
-      const x = toNoise ? maxX : 0;
-      xAxisSwitchSlider.style.transition = animate ? 'transform .5s ease' : 'none';
-      xAxisSwitchSlider.style.transform  = `translateX(${x}px)`;
-      xAxisSwitchTrack.setAttribute('aria-checked', String(toNoise));
-    }
-    function protectSliderAnimationWindow() {
-      axisSnapSuppressUntil = performance.now() + 360;
-      clearTimeout(axisSnapSuppressTimer);
-      axisSnapSuppressTimer = setTimeout(() => { axisSnapSuppressUntil = 0; }, 400);
-    }
-    xAxisSwitchSlider.addEventListener('transitionend', () => { axisSnapSuppressUntil = 0; });
+  function nearestType() {
+    const m = new DOMMatrix(getComputedStyle(xAxisSwitchSlider).transform);
+    const cur = m.m41 || 0;
+    return cur > maxX / 2 ? 'noise_db' : 'rpm';
+  }
 
-    function applyType(newType) {
-      const normalized = (newType === 'noise') ? 'noise_db' : newType;
-      if (normalized !== 'rpm' && normalized !== 'noise_db') return;
-      if (xAxisOverride === normalized) return;
-      xAxisOverride = normalized;
-      try { localStorage.setItem('x_axis_type', normalized); } catch(_) {}
-      pos(normalized, true);
-      protectSliderAnimationWindow();
-      if (lastPayload) render(lastPayload);
-      if (typeof onXAxisChange === 'function') { try { onXAxisChange(normalized); } catch(_) {} }
-    }
-    function nearestType() {
-      const m = new DOMMatrix(getComputedStyle(xAxisSwitchSlider).transform);
-      const cur = m.m41 || 0;
-      return cur > maxX / 2 ? 'noise_db' : 'rpm';
-    }
-
-    function onPointerDown(e) {
-      if (e.button !== undefined && e.button !== 0) return;
-      measure();
-      dragging = true; dragMoved = false;
-      activePointerId = e.pointerId ?? null;
-      startX = e.clientX;
-      const m = new DOMMatrix(getComputedStyle(xAxisSwitchSlider).transform);
-      base = m.m41 || 0;
-      xAxisSwitchSlider.style.transition = 'none';
-      try { if (activePointerId != null) xAxisSwitchSlider.setPointerCapture(activePointerId); } catch(_){}
-      e.preventDefault?.();
-    }
-    function onPointerMove(e) {
-      if (!dragging) return;
-      const dx = e.clientX - startX;
-      if (!dragMoved && Math.abs(dx) > 2) dragMoved = true;
-      let x = base + dx;
-      x = Math.max(0, Math.min(x, maxX));
-      xAxisSwitchSlider.style.transform = `translateX(${x}px)`;
-    }
-    function finishDrag() {
-      if (!dragging) return;
-      dragging = false;
-      try { if (activePointerId != null) xAxisSwitchSlider.releasePointerCapture(activePointerId); } catch(_){}
-      activePointerId = null;
-      const newType = nearestType();
-      pos(newType, true);
-      applyType(newType);
-    }
-    function cancelDrag() {
-      if (!dragging) return;
-      dragging = false;
-      try { if (activePointerId != null) xAxisSwitchSlider.releasePointerCapture(activePointerId); } catch(_){}
-      activePointerId = null;
-      pos(currentXModeFromPayload(lastPayload), true);
-    }
-
-    xAxisSwitchTrack.addEventListener('click', () => {
-      if (dragMoved) { dragMoved = false; return; }
-      const curr = currentXModeFromPayload(lastPayload);
-      const next = (curr === 'rpm') ? 'noise_db' : 'rpm';
-      pos(next, true);
-      applyType(next);
-    });
-
-    xAxisSwitchTrack.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('pointermove', onPointerMove, { passive: true });
-    window.addEventListener('pointerup', finishDrag, { passive: true });
-    window.addEventListener('pointercancel', cancelDrag);
-    window.addEventListener('blur', cancelDrag);
-
+  function onSliderPointerDown(e) {
+    if (e.button !== undefined && e.button !== 0) return;
     measure();
-    pos(currentXModeFromPayload(lastPayload), false);
-    window.addEventListener('resize', () => { const keep = currentXModeFromPayload(lastPayload); measure(); pos(keep, false); }, { passive:true });
+    dragging = true; dragMoved = false;
+    activePointerId = e.pointerId ?? null;
+    startX = e.clientX;
+    const m = new DOMMatrix(getComputedStyle(xAxisSwitchSlider).transform);
+    base = m.m41 || 0;
+    // 拖拽过程中取消过渡，避免跟随出现惯性
+    xAxisSwitchSlider.style.transition = 'none';
+    try { if (activePointerId != null) xAxisSwitchSlider.setPointerCapture(activePointerId); } catch(_){}
+    e.preventDefault?.();
   }
+  function onSliderPointerMove(e) {
+    if (!dragging) return;
+    const dx = e.clientX - startX;
+    if (!dragMoved && Math.abs(dx) > 2) dragMoved = true;
+    let x = base + dx;
+    x = Math.max(0, Math.min(x, maxX));
+    xAxisSwitchSlider.style.transform = `translateX(${x}px)`;
+  }
+  function onSliderPointerUp() {
+    if (!dragging) return;
+    dragging = false;
+    try { if (activePointerId != null) xAxisSwitchSlider.releasePointerCapture(activePointerId); } catch(_){}
+    activePointerId = null;
+    const newType = nearestType();
+    pos(newType, true);
+    applyType(newType);
+  }
+  function onSliderPointerCancel() {
+    if (!dragging) return;
+    dragging = false;
+    try { if (activePointerId != null) xAxisSwitchSlider.releasePointerCapture(activePointerId); } catch(_){}
+    activePointerId = null;
+    pos(currentXModeFromPayload(lastPayload), true);
+  }
+
+  xAxisSwitchTrack.addEventListener('click', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (dragMoved) { dragMoved = false; return; }
+    const curr = currentXModeFromPayload(lastPayload);
+    const next = (curr === 'rpm') ? 'noise_db' : 'rpm';
+    pos(next, true);
+    applyType(next);
+  });
+
+  xAxisSwitchTrack.addEventListener('pointerdown', onSliderPointerDown);
+  window.addEventListener('pointermove', onSliderPointerMove, { passive: true });
+  window.addEventListener('pointerup', onSliderPointerUp, { passive: true });
+  window.addEventListener('pointercancel', onSliderPointerCancel);
+  window.addEventListener('blur', onSliderPointerCancel);
+
+  measure();
+  pos(currentXModeFromPayload(lastPayload), false);
+  window.addEventListener('resize', () => {
+    const keep = currentXModeFromPayload(lastPayload);
+    measure(); pos(keep, false);
+  }, { passive:true });
+}
 
   function placeAxisOverlayAt(x, y, show){
     const overlay = ensureAxisOverlay();
@@ -968,156 +1393,131 @@ function setTheme(theme) {
     requestAnimationFrame(() => updateAxisSwitchPosition({ force:true, animate:false }));
   }
 
-  // ===== UI：拟合气泡 / 指针 =====
-  function ensureNarrowHint(){
-    let hint = getById('narrowHint');
-    if (!hint){
-      hint = document.createElement('div');
-      hint.id = 'narrowHint';
-      hint.className = 'fit-narrow-hint';
-      hint.textContent = `${FIT_ALGO_NAME}曲线请在图表右上角切换至全屏模式`;
-      appendToRoot(hint);
-    }
-    return hint;
-  }
+function ensureFitUI(){
+  let btns = getById('fitButtons');
+  if (!btns){
+    btns = document.createElement('div');
+    btns.id = 'fitButtons';
+    btns.className = 'fit-buttons';
+    btns.innerHTML = `
+      <button class="btn" id="btnFit" type="button">实时拟合</button>
+    `;
+    appendToRoot(btns);
 
-  function ensureFitUI(){
-    // 拟合开关按钮（窄屏也显示）
-    let btns = getById('fitButtons');
-    if (!btns){
-      btns = document.createElement('div');
-      btns.id = 'fitButtons';
-      btns.className = 'fit-buttons';
-      btns.innerHTML = `
-        <button class="btn" id="btnRaw">ECHARTS<br>曲线</button>
-        <button class="btn" id="btnFit">${FIT_ALGO_NAME}<br>曲线</button>
-      `;
-      appendToRoot(btns);
-      const btnRaw = btns.querySelector('#btnRaw');
-      const btnFit = btns.querySelector('#btnFit');
-      function syncButtons(){
-        btnRaw.classList.toggle('active', showRawCurves);
-        btnFit.classList.toggle('active', showFitCurves);
-      }
-      function ensureAtLeastOne(onWhich){
-        if (!showRawCurves && !showFitCurves){
-          if (onWhich === 'raw') showFitCurves = true; else showRawCurves = true;
-        }
-      }
-      btnRaw.addEventListener('click', ()=>{
-        showRawCurves = !showRawCurves;
-        ensureAtLeastOne('raw');
-        syncButtons();
-        if (lastPayload) render(lastPayload);
-        requestAnimationFrame(placeFitUI);
-      });
-      btnFit.addEventListener('click', ()=>{
-        showFitCurves = !showFitCurves;
-        ensureAtLeastOne('fit');
-        // 切换后重置气泡位置
-        bubbleUserMoved = false; bubblePos.left = null; bubblePos.top = null;
-        syncButtons();
-        if (lastPayload) render(lastPayload);
-        requestAnimationFrame(placeFitUI);
-      });
+    const btnFit = btns.querySelector('#btnFit');
+    function syncButtons(){
+      btnFit.classList.toggle('active', showFitCurves);
+    }
+
+    btnFit.addEventListener('click', (e)=>{
+      e.preventDefault();
+      e.stopPropagation();
+      showFitCurves = !showFitCurves;
+      bubbleUserMoved = false;
+      bubblePos.left = null;
+      bubblePos.top  = null;
+
       syncButtons();
-    }
+      toggleFitUI(showFitCurves);
+      placeFitUI();
+      repaintPointer();
+      refreshFitPanel();          // 改：统一刷新 FitPanel
+      updateLegendRailLayout();   // 切换拟合后立刻定宽
+      updateRailParkedState();
+      try { chart && chart.resize(); } catch(_) {}
+    });
 
-    // 气泡：挂到 body，使用 fixed；但位置以“相对图表”的偏移（bubblePos）计算
-    let bubble = getById('fitBubble');
-    if (!bubble){
-      bubble = document.createElement('div');
-      bubble.id = 'fitBubble';
-      bubble.className = 'fit-bubble';
-      bubble.innerHTML = `
-        <div class="head">
-          <div class="title">${FIT_ALGO_NAME} 估算值</div>
-          <div class="x-input">
-            <span>当前位置</span>
-            <input id="fitXInput" type="number" step="1" />
-            <span id="fitXUnit"></span>
-          </div>
-        </div>
-        <div id="fitBubbleRows"></div>
-        <div class="hint">按系列可见性（Legend）过滤，按风量从大到小排序</div>
-      `;
-      // 关键：挂到 body，避免任何图表容器 overflow 剪裁
-      document.body.appendChild(bubble);
-      bubble.style.position = 'fixed';
-
-      adoptBubbleHost();
-      bindBubbleDrag(bubble);
-
-      const xInput = bubble.querySelector('#fitXInput');
-      xInput.addEventListener('input', onBubbleInputLive);
-      xInput.addEventListener('change', onBubbleInputCommit);
-      xInput.addEventListener('keydown', (e)=>{ if (e.key === 'Enter') { onBubbleInputCommit(); } });
-    }
-
-    // 指针
-    let ptr = getById('fitPointer');
-    if (!ptr){
-      ptr = document.createElement('div');
-      ptr.id = 'fitPointer';
-      ptr.className = 'fit-pointer';
-      ptr.innerHTML = `<div class="line"></div><div class="handle" id="fitPointerHandle"></div>`;
-      appendToRoot(ptr);
-      bindPointerDrag();
-    }
+    syncButtons();
   }
+
+  // 指针（两种模式都需要）
+  let ptr = getById('fitPointer');
+  if (!ptr){
+    ptr = document.createElement('div');
+    ptr.id = 'fitPointer';
+    ptr.className = 'fit-pointer';
+    ptr.innerHTML = `<div class="line"></div><div class="handle" id="fitPointerHandle"></div>`;
+    appendToRoot(ptr);
+    bindPointerDrag();
+  }
+
+ let bubble = getById('fitBubble');
+ if (!bubble){
+   bubble = document.createElement('div');
+   bubble.id = 'fitBubble';
+   bubble.className = 'fit-bubble';
+   bubble.innerHTML = `
+     <div class="head">
+       <div class="title">
+         PCHIP 拟合当前位置
+         <input id="fitXInput" type="number" step="1" />
+         <span id="fitXUnit"></span>
+       </div>
+       <button id="fitCloseBtn" class="btn-close-top" type="button" aria-label="关闭">×</button>
+     </div>
+     <div id="fitBubbleRows"></div>
+     <div class="foot">
+       <div class="hint">按系列可见性（Legend）过滤，按风量从大到小排序</div>
+     </div>
+   `;
+   document.body.appendChild(bubble);
+   bubble.style.position = 'fixed';
+
+   adoptBubbleHost();
+   bindBubbleDrag(bubble);
+
+   const xInput = bubble.querySelector('#fitXInput');
+   xInput.addEventListener('input', onBubbleInputLive);
+   xInput.addEventListener('change', onBubbleInputCommit);
+   xInput.addEventListener('keydown', (e)=>{ if (e.key === 'Enter') { onBubbleInputCommit(); } });
+
+   const btnsRoot = getById('fitButtons');
+   const btnFit = btnsRoot ? btnsRoot.querySelector('#btnFit') : null;
+   const btnClose = bubble.querySelector('#fitCloseBtn');
+   if (btnClose){
+     btnClose.addEventListener('click', (e) => {
+       e.preventDefault();
+       e.stopPropagation();
+       showFitCurves = false;
+       if (btnFit) btnFit.classList.remove('active');
+       toggleFitUI(false);
+       updateRailParkedState();
+       repaintPointer();
+       refreshFitPanel();
+       updateLegendRailLayout();
+       try { chart && chart.resize(); } catch(_) {}
+     });
+   }
+ }
+}
 
   let bubbleUserMoved = false;
   const bubblePos = { left: null, top: null };
 
-  function bindBubbleDrag(bubble){
-    if (!bubble) return;
+function bindBubbleDrag(bubble){
+  if (!bubble) return;
 
-    let activePointerId = null;
-    let startX = 0, startY = 0;
-    let baseLeftFixed = 0, baseTopFixed = 0;
-    let rStart = null;
-    let dragging = false;
-    const DRAG_THRESHOLD = 4;
-    const pad = 6;
+  const pad = 6;
 
-    function isInteractiveTarget(el){
-      return !!(el && (el.closest('input, textarea, select, button, [contenteditable=""], [contenteditable="true"]')));
-    }
-    function onPointerDown(e){
-      if (e.button !== undefined && e.button !== 0) return;
-      if (isInteractiveTarget(e.target)) return;
-
-      // 记录拖拽起点（以 viewport/fixed 坐标）
+  createDragController(bubble, {
+    axis: 'both',
+    threshold: 4,
+    onStart: (e) => {
+      // 忽略输入等交互控件
+      if (e.target && e.target.closest('input, textarea, select, button, [contenteditable]')) return false;
       const rect = bubble.getBoundingClientRect();
-      baseLeftFixed = rect.left;
-      baseTopFixed  = rect.top;
-      startX = e.clientX; startY = e.clientY;
-      rStart = root ? root.getBoundingClientRect() : { left:0, top:0 };
-
-      dragging = false;
-      activePointerId = e.pointerId ?? null;
-      try { if (activePointerId != null) bubble.setPointerCapture(activePointerId); } catch(_){}
-    }
-    function onPointerMove(e){
-      if (activePointerId != null && (e.pointerId ?? null) !== activePointerId) return;
-      if (activePointerId == null) return;
-
-      const dx = e.clientX - startX;
-      const dy = e.clientY - startY;
-
-      if (!dragging && Math.hypot(dx, dy) > DRAG_THRESHOLD){
-        dragging = true;
-        bubble.classList.add('dragging');
-      }
-      if (!dragging) return;
-
-      // 允许拖出图表区域：只对可视区做轻微钳制，避免完全丢失
+      bubble.__baseLeftFixed = rect.left;
+      bubble.__baseTopFixed  = rect.top;
+      bubble.__rootRectStart = root ? root.getBoundingClientRect() : { left:0, top:0 };
+      bubble.classList.add('dragging');
+    },
+    onMove: ({ dx, dy }) => {
+      const vw = window.innerWidth, vh = window.innerHeight;
       const bw = bubble.offsetWidth  || 0;
       const bh = bubble.offsetHeight || 0;
-      const vw = window.innerWidth, vh = window.innerHeight;
 
-      let newLeft = baseLeftFixed + dx;
-      let newTop  = baseTopFixed  + dy;
+      let newLeft = bubble.__baseLeftFixed + dx;
+      let newTop  = bubble.__baseTopFixed  + dy;
 
       newLeft = Math.min(Math.max(-bw + pad, newLeft), Math.max(pad, vw - pad));
       newTop  = Math.min(Math.max(-bh + pad, newTop ), Math.max(pad, vh - pad));
@@ -1127,143 +1527,145 @@ function setTheme(theme) {
       bubble.style.right  = 'auto';
       bubble.style.bottom = 'auto';
 
-      // 将 fixed 坐标换算为“相对图表”的偏移，后续滚动/缩放时据此还原
-      const rNow = rStart || (root ? root.getBoundingClientRect() : { left:0, top:0 });
+      const rNow = bubble.__rootRectStart || (root ? root.getBoundingClientRect() : { left:0, top:0 });
       bubblePos.left = newLeft - rNow.left;
       bubblePos.top  = newTop  - rNow.top;
       bubbleUserMoved = true;
+    },
+    onEnd: () => {
+      bubble.classList.remove('dragging');
     }
-    function endDrag(){
-      if (activePointerId == null) return;
-      try { bubble.releasePointerCapture(activePointerId); } catch(_){}
-      activePointerId = null; dragging = false; bubble.classList.remove('dragging');
-    }
+  });
+}
 
-    bubble.addEventListener('pointerdown', onPointerDown);
-    window.addEventListener('pointermove', onPointerMove, { passive:true });
-    window.addEventListener('pointerup',   endDrag,       { passive:true  });
-    window.addEventListener('pointercancel', endDrag,     { passive:true  });
-    window.addEventListener('blur', endDrag);
+function toggleFitUI(showFit){
+  const btns = getById('fitButtons');
+  const bubble = getById('fitBubble');
+  const ptr = getById('fitPointer');
+  const empty  = !lastOption || lastOption.__empty;
+  const integrated = isIntegratedLegendMode();
+
+  // 新增：未激活状态下将“实时拟合”按钮背景设为 --bg-secondary
+  const btnFit = btns ? btns.querySelector('#btnFit') : null;
+  if (btnFit) {
+    // showFit 为 true 表示激活，恢复默认背景；未激活则使用 --bg-secondary
+    btnFit.style.backgroundColor = showFit ? '' : 'var(--bg-secondary)';
   }
 
-  function toggleFitUI(showFit){
-    const btns = getById('fitButtons');
-    const bubble = getById('fitBubble');
-    const ptr = getById('fitPointer');
-    const empty  = !lastOption || lastOption.__empty;
+  // 拟合按钮：始终跟随是否有内容可显示
+  if (btns) btns.style.visibility = empty ? 'hidden' : 'visible';
 
-    if (btns) btns.style.visibility = empty ? 'hidden' : 'visible';
-
-    const showFloating = showFit && !empty; // 窄屏也允许
+  // 仅切换 panel 模式与可见性；内容由 refreshFitPanel/renderFitPanel 统一渲染
+  if (integrated) {
+    if (bubble) bubble.style.visibility = 'hidden';
+    if (ptr) ptr.style.visibility = (showFit && !empty) ? 'visible' : 'hidden';
+    // 集成模式下，renderLegendRailItems 会绘制基础容器；refreshFitPanel 会填充内容
+    renderLegendRailItems();
+  } else {
+    const showFloating = showFit && !empty;
     if (bubble) bubble.style.visibility = showFloating ? 'visible' : 'hidden';
     if (ptr)    ptr.style.visibility    = showFloating ? 'visible' : 'hidden';
   }
 
-  function placeFitUI(){
-    const btns = getById('fitButtons');
-    const bubble = getById('fitBubble');
-    if (!lastOption) return;
+  updateRailParkedState();
+}
 
-    const grid = lastOption.grid || { left:40, right: 260, top: 60, bottom: 40 };
-    const chartW = chart ? chart.getWidth() : (root ? root.clientWidth : 800);
-    const chartH = chart ? chart.getHeight() : (root ? root.clientHeight : 600);
-    const left = (typeof grid.left==='number') ? grid.left : 40;
-    const rightGap = (typeof grid.right==='number') ? grid.right : 260;
-    const top = (typeof grid.top==='number') ? grid.top : 60;
-    const bottomGap = (typeof grid.bottom==='number') ? grid.bottom : 40;
+function placeFitUI(){
+  const btns = getById('fitButtons');
+  const bubble = getById('fitBubble');
+  if (!lastOption) return;
+  const integrated = isIntegratedLegendMode();
 
-    if (btns){
-      // CHANGED: 当 legend 进入窄屏布局时，按钮改为纵向排列
-      const narrow = layoutIsNarrow();
-      btns.style.flexDirection = narrow ? 'column' : 'row';
-
+  if (btns && __legendActionsEl) {
+    btns.style.position = 'static';
+    btns.style.right = '';
+    btns.style.bottom = '';
+    btns.style.visibility = (lastOption.__empty) ? 'hidden' : 'visible';
+  } else if (btns && !integrated) {
+    const narrow = layoutIsNarrow();
+    btns.style.flexDirection = narrow ? 'column' : 'row';
+    if (isFs) {
+      btns.style.position = 'fixed';
+      btns.style.right = '12px';
+      btns.style.bottom = '12px';
+    } else {
+      btns.style.position = 'absolute';
       btns.style.right = '10px';
       btns.style.bottom = '10px';
-      btns.style.position = 'absolute';
-      btns.style.visibility = (lastOption.__empty) ? 'hidden' : 'visible';
     }
-
-    if (bubble){
-      // bubble 在 body 上，使用 fixed；但位置等于“图表左上角 + 相对偏移 bubblePos”
-      const r = root ? root.getBoundingClientRect() : { left:0, top:0 };
-      const vw = window.innerWidth, vh = window.innerHeight;
-      const bw = bubble.offsetWidth  || 0;
-      const bh = bubble.offsetHeight || 0;
-      const pad = 6;
-
-      // 默认偏移：绘图区左上角（不偏移）
-      const defaultOffsetX = left;
-      const defaultOffsetY = top;
-
-      let offX, offY;
-      if (!bubbleUserMoved || bubblePos.left == null || bubblePos.top == null){
-        offX = defaultOffsetX;
-        offY = defaultOffsetY;
-        bubblePos.left = offX;
-        bubblePos.top  = offY;
-      } else {
-        offX = bubblePos.left;
-        offY = bubblePos.top;
-      }
-
-      // 计算 fixed 位置
-      let fx = r.left + offX;
-      let fy = r.top  + offY;
-
-      // 轻微可视区钳制（不把气泡完全挤出屏幕）
-      fx = Math.min(Math.max(-bw + pad, fx), Math.max(pad, vw - pad));
-      fy = Math.min(Math.max(-bh + pad, fy), Math.max(pad, vh - pad));
-
-      bubble.style.position = 'fixed';
-      bubble.style.left = Math.round(fx) + 'px';
-      bubble.style.top  = Math.round(fy) + 'px';
-      bubble.style.right  = 'auto';
-      bubble.style.bottom = 'auto';
-
-      const showFloating = showFitCurves && !lastOption.__empty;
-      bubble.style.visibility = showFloating ? 'visible' : 'hidden';
-
-      const unit = (currentXModeFromPayload(lastPayload) === 'rpm') ? 'RPM' : 'dB';
-      const unitSpan = bubble.querySelector('#fitXUnit');
-      if (unitSpan) unitSpan.textContent = unit;
-    }
+    btns.style.visibility = (lastOption.__empty) ? 'hidden' : 'visible';
   }
 
-  function bindPointerDrag(){
-    const handle = getById('fitPointerHandle');
-    if (!handle) return;
+  const unitStr = (currentXModeFromPayload(lastPayload) === 'rpm') ? 'RPM' : 'dB';
 
-    let dragging=false, startX=0, baseX=0, activePointerId=null;
+  if (!integrated && bubble){
+    const r = root ? root.getBoundingClientRect() : { left:0, top:0 };
+    const grid = lastOption.grid || { left:40, top:60 };
+    const left = (typeof grid.left==='number') ? grid.left : 40;
+    const top = (typeof grid.top==='number') ? grid.top : 60;
 
-    function measureGrid(){
-      if (!lastOption) return { left:40, right: (chart ? chart.getWidth() - 260 : 800), top: 60, height: 300 };
-      const grid = lastOption.grid || { left:40, right: 260, top: 60, bottom: 40 };
-      const chartW = chart ? chart.getWidth() : (root ? root.clientWidth : 800);
-      const chartH = chart ? chart.getHeight() : (root ? root.clientHeight : 600);
-      const left = (typeof grid.left==='number') ? grid.left : 40;
-      const rightGap = (typeof grid.right==='number') ? grid.right : 260;
-      const top = (typeof grid.top==='number') ? grid.top : 60;
-      const bottomGap = (typeof grid.bottom==='number') ? grid.bottom : 40;
-      const right = chartW - rightGap;
-      const height = chartH - top - bottomGap;
-      return { left, right, top, height };
+    let offX, offY;
+    if (!bubbleUserMoved || bubblePos.left == null || bubblePos.top == null){
+      offX = left;
+      offY = top;
+      bubblePos.left = offX;
+      bubblePos.top  = offY;
+    } else {
+      offX = bubblePos.left;
+      offY = bubblePos.top;
     }
 
-    function onDown(e){
-      if (e.button !== undefined && e.button !== 0) return;
-      dragging = true;
-      activePointerId = e.pointerId ?? null;
-      startX = e.clientX;
+    const fx = r.left + offX;
+    const fy = r.top  + offY;
+
+    bubble.style.position = 'fixed';
+    bubble.style.left = Math.round(fx) + 'px';
+    bubble.style.top  = Math.round(fy) + 'px';
+    bubble.style.right  = 'auto';
+    bubble.style.bottom = 'auto';
+
+    const showFloating = showFitCurves && !lastOption.__empty;
+    bubble.style.visibility = showFloating ? 'visible' : 'hidden';
+
+    const unitSpan = bubble.querySelector('#fitXUnit');
+    if (unitSpan) unitSpan.textContent = unitStr;
+  }
+
+  if (integrated) {
+    const unitSpan = getById('fitXUnitLegend');
+    if (unitSpan) unitSpan.textContent = unitStr;
+  }
+}
+
+function bindPointerDrag(){
+  const handle = getById('fitPointerHandle');
+  if (!handle) return;
+
+  let baseX = 0;
+
+  createDragController(handle, {
+    axis: 'x',
+    threshold: 2,
+    onStart: (e) => {
       const ptr = getById('fitPointer');
       baseX = parseFloat(ptr?.style.left || '0');
       handle.style.cursor = 'grabbing';
-      try { if (activePointerId != null) handle.setPointerCapture(activePointerId); } catch(_){}
-      e.preventDefault?.();
-    }
-    function onMove(e){
-      if (!dragging) return;
-      const grid = measureGrid();
-      const dx = e.clientX - startX;
+    },
+    onMove: ({ dx }) => {
+      const grid = (function measureGrid(){
+        if (!lastOption) return { left:40, right: (chart ? chart.getWidth() - 260 : 800), top: 60, height: 300 };
+        const grid = lastOption.grid || { left:40, right: 260, top: 60, bottom: 40 };
+        const chartW = chart ? chart.getWidth() : (root ? root.clientWidth : 800);
+        const chartH = chart ? chart.getHeight() : (root ? root.clientHeight : 600);
+        const left = (typeof grid.left==='number') ? grid.left : 40;
+        const rightGap = (typeof grid.right==='number') ? grid.right : 260;
+        const top = (typeof grid.top==='number') ? grid.top : 60;
+        const bottomGap = (typeof grid.bottom==='number') ? grid.bottom : 40;
+        const right = chartW - rightGap;
+        const height = chartH - top - bottomGap;
+        return { left, right, top, height };
+      })();
+
       let x = baseX + dx;
       x = Math.max(grid.left, Math.min(x, grid.right));
       const ptr = getById('fitPointer');
@@ -1274,29 +1676,23 @@ function setTheme(theme) {
       if (Number.isFinite(xVal)) {
         xQueryByMode[mode] = clampXDomain(xVal);
         syncBubbleInput();
-        if (showFitCurves) refreshFitBubble();
+        if (showFitCurves) refreshFitPanel(); // 改：统一刷新
+        SpectrumController.onXQueryChange(xQueryByMode[mode]);
       }
-    }
-    function onUp(){
-      if (!dragging) return;
-      dragging=false;
+    },
+    onEnd: () => {
       handle.style.cursor = 'grab';
-      try { if (activePointerId != null) handle.releasePointerCapture(activePointerId); } catch(_){}
-      activePointerId=null;
     }
-    function onCancel(){
-      if (!dragging) return;
-      dragging=false;
-      handle.style.cursor = 'grab';
-      try { if (activePointerId != null) handle.releasePointerCapture(activePointerId); } catch(_){}
-      activePointerId=null;
-    }
+  });
+}
 
-    handle.addEventListener('pointerdown', onDown);
-    window.addEventListener('pointermove', onMove, { passive:true });
-    window.addEventListener('pointerup', onUp, { passive:true });
-    window.addEventListener('pointercancel', onCancel);
-    window.addEventListener('blur', onCancel);
+  function scheduleSpectrumRebuild(){
+    if (!spectrumEnabled || !spectrumChart) return;
+    if (__spectrumRaf) return;
+    __spectrumRaf = requestAnimationFrame(() => {
+      __spectrumRaf = null;
+      buildAndSetSpectrumOption();
+    });
   }
 
   function pxToDataX(xPixel){
@@ -1338,7 +1734,7 @@ function setTheme(theme) {
     ptr.style.visibility = 'visible';
 
     syncBubbleInput();
-    if (showFitCurves) refreshFitBubble();
+    if (showFitCurves) refreshFitPanel();
   }
 
   function syncBubbleInput(){
@@ -1355,127 +1751,102 @@ function setTheme(theme) {
     inp.setAttribute('step', (mode === 'noise_db') ? '0.1' : '1');
   }
 
-  function onBubbleInputLive(){
-    const inp = getById('fitXInput');
-    if (!inp) return;
-    const mode = currentXModeFromPayload(lastPayload);
-    const raw = Number(inp.value);
-    if (!Number.isFinite(raw)) return;
-    xQueryByMode[mode] = clampXDomain(raw);
-    clampXQueryIntoVisibleRange();
+function onBubbleInputLive(){
+  const inp = getById('fitXInput');
+  if (!inp) return;
+  const mode = currentXModeFromPayload(lastPayload);
+  const raw = Number(inp.value);
+  if (!Number.isFinite(raw)) return;
+  xQueryByMode[mode] = clampXDomain(raw);
+  clampXQueryIntoVisibleRange();
 
-    const xPixel = dataToPxX(xQueryByMode[mode]);
-    const ptr = getById('fitPointer');
-    if (ptr && Number.isFinite(xPixel)) ptr.style.left = xPixel + 'px';
+  const xPixel = dataToPxX(xQueryByMode[mode]);
+  const ptr = getById('fitPointer');
+  if (ptr && Number.isFinite(xPixel)) ptr.style.left = xPixel + 'px';
 
-    if (showFitCurves) refreshFitBubble();
-  }
-  function onBubbleInputCommit(){
-    repaintPointer();
-    refreshFitBubble();
-  }
+  if (showFitCurves) refreshFitPanel();    
+  SpectrumController.onXQueryChange(xQueryByMode[mode]);
+}
 
-  function refreshFitBubble(){
-    const bubble = getById('fitBubble');
-    if (!bubble || !showFitCurves || !lastPayload || !chart) return;
-    if (lastOption && lastOption.__empty) { bubble.style.visibility = 'hidden'; return; }
-    const rowsEl = bubble.querySelector('#fitBubbleRows');
-    const mode = currentXModeFromPayload(lastPayload);
-    const x = xQueryByMode[mode];
-    if (x == null) return;
+function onBubbleInputCommit(){
+  repaintPointer();
+  refreshFitPanel();                        
+  SpectrumController.onXQueryChange(xQueryByMode[currentXModeFromPayload(lastPayload)]);
+}
 
-    const sList = Array.isArray(lastPayload?.chartData?.series) ? lastPayload.chartData.series : [];
-    ensureFitModels(sList, mode);
 
-    const opt = chart.getOption() || {};
-    const selMap = (opt.legend && opt.legend[0] && opt.legend[0].selected) || {};
-    const items = [];
-    sList.forEach(s => {
-      const visible = (selMap[s.name] !== false);
-      if (!visible) return;
-      const model = fitModelsCache[mode].get(s.name);
-      if (!model) return;
+function ensureFitModels(sList, xMode){
+  const models = fitModelsCache[xMode];
+  sList.forEach(s => {
+    const ph = s && s.pchip
+      ? (xMode === 'noise_db' ? s.pchip.noise_to_airflow : s.pchip.rpm_to_airflow)
+      : null;
 
-      const dom0 = Math.min(model.x0, model.x1);
-      const dom1 = Math.max(model.x0, model.x1);
-      let y = NaN;
-      if (x >= dom0 && x <= dom1) y = evalPchipJS(model, x);
-      items.push({ name: s.name, color: s.color, y });
-    });
-
-    const fmt = (v)=> Math.round(v);
-    const withVal = items.filter(it => Number.isFinite(it.y)).sort((a,b)=> b.y - a.y);
-    const noVal   = items.filter(it => !Number.isFinite(it.y));
-
-    const base = (withVal.length && withVal[0].y > 0) ? withVal[0].y : 0;
-    const pctVal = (v)=> (Number.isFinite(v) && base > 0) ? Math.round((v / base) * 100) : null;
-
-    const valTexts = items.map(it => Number.isFinite(it.y) ? `${fmt(it.y)} CFM` : '-');
-    const maxValChars = valTexts.reduce((m,s)=>Math.max(m, s.length), 1);
-    const pctWidthCh = 6;
-
-    const ordered = withVal.concat(noVal);
-    rowsEl.innerHTML = ordered.map(it => {
-      const has = Number.isFinite(it.y);
-      const valText = has ? `${fmt(it.y)} CFM` : '-';
-      const pct = has ? pctVal(it.y) : null;
-      const pctText = (pct==null) ? '-' : `(${pct}%)`;
-      return `
-        <div class="row">
-          <span class="dot" style="background:${it.color}"></span>
-          <span>${it.name}</span>
-          <span style="margin-left:auto; display:inline-flex; align-items:center; gap:8px;">
-            <span style="min-width:${maxValChars}ch; text-align:right; font-weight:800; font-variant-numeric:tabular-nums;">${valText}</span>
-            <span style="width:${pctWidthCh}ch; text-align:right; font-variant-numeric:tabular-nums;">${pctText}</span>
-          </span>
-        </div>
-      `;
-    }).join('');
-  }
-
-  function ensureFitModels(sList, xMode){
-    const models = fitModelsCache[xMode];
-    sList.forEach(s => {
-      const ph = s && s.pchip ? (xMode === 'noise_db' ? s.pchip.noise_db : s.pchip.rpm) : null;
-      if (ph && Array.isArray(ph.x) && Array.isArray(ph.y) && Array.isArray(ph.m) && ph.x0 != null && ph.x1 != null) {
-        models.set(s.name, ph);
-      } else {
-        models.delete(s.name);
-      }
-    });
-  }
-
-  function evalPchipJS(model, x){
-    if (!model || !Array.isArray(model.x) || !Array.isArray(model.y) || !Array.isArray(model.m)) return NaN;
-    const xs = model.x, ys = model.y, ms = model.m;
-    const n = xs.length;
-    if (n === 0) return NaN;
-    if (n === 1) return ys[0];
-
-    let xv = x;
-    if (xv <= xs[0]) xv = xs[0];
-    if (xv >= xs[n - 1]) xv = xs[n - 1];
-
-    let lo = 0, hi = n - 2, i = 0;
-    while (lo <= hi) {
-      const mid = (lo + hi) >> 1;
-      if (xs[mid] <= xv && xv <= xs[mid + 1]) { i = mid; break; }
-      if (xv < xs[mid]) hi = mid - 1; else lo = mid + 1;
+    const name = s.name || `${s.brand||''} ${s.model||''} - ${s.condition||''}`;
+    if (ph && Array.isArray(ph.x) && Array.isArray(ph.y) && Array.isArray(ph.m) && ph.x0 != null && ph.x1 != null) {
+      models.set(name, ph);
+    } else {
+      models.delete(name);
     }
-    if (lo > hi) i = Math.max(0, Math.min(n - 2, lo));
+  });
+}
 
-    const x0 = xs[i], x1 = xs[i + 1];
-    const h = (x1 - x0) || 1;
-    const t = (xv - x0) / h;
-    const y0 = ys[i], y1 = ys[i + 1];
-    const m0 = ms[i] * h, m1 = ms[i + 1] * h;
-
-    const h00 = (2 * t*t*t - 3 * t*t + 1);
-    const h10 = (t*t*t - 2 * t*t + t);
-    const h01 = (-2 * t*t*t + 3 * t*t);
-    const h11 = (t*t*t - t*t);
-    return h00 * y0 + h10 * m0 + h01 * y1 + h11 * m1;
+function evalPchipJS(model, x){
+  if (!model || !Array.isArray(model.x) || !Array.isArray(model.y) || !Array.isArray(model.m)) return NaN;
+  // 初始化模型级缓存
+  if (!model.__cache){
+    Object.defineProperty(model, '__cache', {
+      value: new Map(),
+      enumerable: false,
+      configurable: false,
+      writable: false
+    });
   }
+  const rounded = Math.round(x * 1000) / 1000;
+  const key = rounded;
+  if (model.__cache.has(key)) return model.__cache.get(key);
+
+  const xs = model.x, ys = model.y, ms = model.m;
+  const n = xs.length;
+  if (n === 0) return NaN;
+  if (n === 1){
+    const v0 = ys[0];
+    model.__cache.set(key, v0);
+    return v0;
+  }
+
+  let xv = rounded;
+  if (xv <= xs[0]) xv = xs[0];
+  if (xv >= xs[n - 1]) xv = xs[n - 1];
+
+  let lo = 0, hi = n - 2, i = 0;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (xs[mid] <= xv && xv <= xs[mid + 1]) { i = mid; break; }
+    if (xv < xs[mid]) hi = mid - 1; else lo = mid + 1;
+  }
+  if (lo > hi) i = Math.max(0, Math.min(n - 2, lo));
+
+  const x0 = xs[i], x1 = xs[i + 1];
+  const h = (x1 - x0) || 1;
+  const t = (xv - x0) / h;
+  const y0 = ys[i], y1 = ys[i + 1];
+  const m0 = ms[i] * h, m1 = ms[i + 1] * h;
+
+  const h00 = (2 * t*t*t - 3 * t*t + 1);
+  const h10 = (t*t*t - 2 * t*t + t);
+  const h01 = (-2 * t*t*t + 3 * t*t);
+  const h11 = (t*t*t - t*t);
+  const val = h00 * y0 + h10 * m0 + h01 * y1 + h11 * m1;
+
+  // 写入缓存（LRU 简易：超限随机删除首项）
+  if (model.__cache.size >= 256){
+    const it = model.__cache.keys().next();
+    if (it && !it.done) model.__cache.delete(it.value);
+  }
+  model.__cache.set(key, val);
+  return val;
+}
 
   function computeSampleCount(widthPx){
     const n = Math.round(widthPx / 20); // 每 20px 一个点
@@ -1530,9 +1901,10 @@ function setTheme(theme) {
     if (xQueryByMode[mode] > vmax) xQueryByMode[mode] = vmax;
   }
 
-  // 全屏
   async function enterFullscreen(){
-    const target = root || document.getElementById('chartHost') || document.documentElement;
+    const shell = document.getElementById('chart-settings');
+    const target = shell || (root && root.parentElement) || root || document.documentElement;
+  
     try {
       if (target.requestFullscreen) { await target.requestFullscreen(); }
       else { await document.documentElement.requestFullscreen(); }
@@ -1543,27 +1915,1736 @@ function setTheme(theme) {
     } catch(err){
       console.warn('requestFullscreen 失败：', err);
     } finally {
-      adoptBubbleHost();                 // 关键：把气泡迁移进全屏元素
+      adoptBubbleHost();
       bubbleUserMoved = false;
+  
+      updateFullscreenHeights();
       if (lastPayload) render(lastPayload); else if (chart) chart.resize();
-      requestAnimationFrame(() => { try { placeFitUI(); repaintPointer(); } catch(_) {} });
+  
+      requestAnimationFrame(() => {
+        try {
+          placeFitUI(); repaintPointer(); updateSpectrumLayout();
+          updateLegendRailLayout();  // 全屏下立刻重排 rail
+          updateLegendRail();
+        } catch(_) {}
+      });
     }
   }
 
   async function exitFullscreen(){
-    try { if (document.fullscreenElement) await document.exitFullscreen(); }
-    catch(err){ console.warn('exitFullscreen 失败：', err); }
-    finally {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+    } catch(err) {
+      console.warn('exitFullscreen 失败：', err);
+    } finally {
       isFs = false;
-      adoptBubbleHost();                 // 迁回 body
+      adoptBubbleHost();
       bubbleUserMoved = false;
-      if (lastPayload) render(lastPayload); else if (chart) chart.resize();
-      requestAnimationFrame(() => { try { placeFitUI(); repaintPointer(); } catch(_) {} });
+
+      // 退出全屏：统一清理内联高度，交给 CSS 恢复
+      if (root) { try { root.style.minHeight = ''; } catch(_) {} }
+      try {
+        if (spectrumRoot) {
+          spectrumRoot.style.removeProperty('max-height');
+          spectrumRoot.style.removeProperty('flex');
+          spectrumRoot.style.removeProperty('--fs-spec-h');
+        }
+      } catch(_) {}
+
+      updateFullscreenHeights();
+      updateSpectrumLayout();
+
+      if (lastPayload) render(lastPayload);
+      else if (chart) chart.resize();
+
+      requestAnimationFrame(() => {
+        try { placeFitUI(); repaintPointer(); } catch(_) {}
+      });
+    }
+  }
+  
+  function toggleFullscreen(){ if (document.fullscreenElement) exitFullscreen(); else enterFullscreen(); }
+
+  function ensureSpectrumChart() {
+    ensureSpectrumHost();
+    if (spectrumChart || !window.echarts || !spectrumInner) return;
+    spectrumChart = echarts.init(spectrumInner, null, { renderer:'canvas', devicePixelRatio: window.devicePixelRatio || 1 });
+  }
+
+async function toggleSpectrumUI(show) {
+  ensureSpectrumHost();
+  spectrumEnabled = !!show;
+  if (!spectrumRoot) return;
+
+  specBumpEpochAndClearTimers();
+
+  const shell =
+    document.getElementById('chart-settings') ||
+    (root && root.closest('.fc-chart-container')) ||
+    document.documentElement;
+
+  try { spectrumChart && spectrumChart.dispatchAction({ type: 'hideTip' }); } catch(_) {}
+
+  const bgMs = getCssTransitionMs();
+  const safetyMs = Math.max(240, bgMs + 120);
+  const myEpoch = __specEpoch;
+
+  if (show) {
+    ensureSpectrumChart();
+
+    if (isFs) {
+      // 关键：先标记为 spectrum 模式，避免 :fullscreen:not([data-chart-mode="spectrum"]) 把高度钳成 0
+      try { shell.setAttribute('data-chart-mode', 'spectrum'); } catch(_) {}
+
+      // 全屏：沿用 max-height 逻辑
+      spectrumRoot.style.setProperty('flex', '0 0 auto', 'important');
+      spectrumRoot.style.setProperty('max-height', '0px');
+
+      const targetPx = __computeFsSpecTargetPx();
+      spectrumRoot.style.setProperty('--fs-spec-h', targetPx + 'px');
+      void spectrumRoot.offsetHeight;
+
+      requestAndRenderSpectrum().catch(()=>{}).then(() => {
+        if (myEpoch !== __specEpoch) return;
+        try { spectrumChart && spectrumChart.resize(); } catch(_) {}
+      });
+
+      requestAnimationFrame(() => {
+        if (myEpoch !== __specEpoch) return;
+        const onEnd = (e) => {
+          if (myEpoch !== __specEpoch) return;
+          if (e && e.propertyName && e.propertyName !== 'max-height') return;
+          try { spectrumRoot.removeEventListener('transitionend', onEnd); } catch(_) {}
+          try { chart && chart.resize(); } catch(_) {}
+          try { spectrumChart && spectrumChart.resize(); } catch(_) {}
+        };
+        try { spectrumRoot.addEventListener('transitionend', onEnd, { once: true }); } catch(_) {}
+        spectrumRoot.style.setProperty('max-height', targetPx + 'px');
+      });
+    } else {
+      // 非全屏：先把 inner 固定到“目标像素高”，立即 resize 一次；父容器靠 CSS 过渡做揭示
+      const targetPx = __computeNfSpecTargetPx();
+      if (spectrumInner) {
+        spectrumInner.style.height = targetPx + 'px';
+        try { ensureSpectrumChart(); spectrumChart && spectrumChart.resize(); } catch(_) {}
+        spectrumInner.style.transition = 'transform var(--transition-speed, .25s) ease';
+        spectrumInner.style.opacity = '1';
+      }
+      spectrumRoot.classList.add('anim-scale', 'reveal-from-0');
+      try { shell.setAttribute('data-chart-mode', 'spectrum'); } catch(_) {}
+      requestAndRenderSpectrum().catch(()=>{}).then(() => {
+        if (myEpoch !== __specEpoch) return;
+        try { spectrumChart && spectrumChart.resize(); } catch(_) {}
+      });
+      requestAnimationFrame(() => {
+        if (myEpoch !== __specEpoch) return;
+        const onEnd = (e) => {
+          if (myEpoch !== __specEpoch) return;
+          if (e && e.propertyName !== 'height') return;
+          try { spectrumRoot.removeEventListener('transitionend', onEnd); } catch(_) {}
+          spectrumRoot.classList.remove('anim-scale', 'reveal-from-0', 'revealed');
+          if (spectrumInner) {
+            spectrumInner.style.transition = '';
+            spectrumInner.style.opacity = '';
+            spectrumInner.style.height = '';
+          }
+          try { spectrumChart && spectrumChart.resize(); } catch(_) {}
+          revealSpectrumIfNeeded();
+        };
+        try { spectrumRoot.addEventListener('transitionend', onEnd, { once:true }); } catch(_) {}
+        spectrumRoot.classList.add('revealed');
+        specSetTimeout(() => {
+          if (myEpoch !== __specEpoch) return;
+          spectrumRoot.classList.remove('anim-scale', 'reveal-from-0', 'revealed');
+          if (spectrumInner) {
+            spectrumInner.style.transition = '';
+            spectrumInner.style.opacity = '';
+            spectrumInner.style.height = '';
+          }
+        }, safetyMs);
+      });
+    }
+  } else {
+    // 收起分支保持原实现（cleanupAfter 会移除 data-chart-mode）
+    const cleanupAfter = () => {
+      if (myEpoch !== __specEpoch) return;
+      try { shell.removeAttribute('data-chart-mode'); } catch(_) {}
+      if (root) try { root.style.minHeight = ''; } catch(_) {}
+      spectrumRoot.classList.remove('anim-scale', 'revealed', 'reveal-from-0', 'collapse-to-0');
+      if (spectrumInner) {
+        spectrumInner.style.transition = '';
+        spectrumInner.style.opacity = '';
+        spectrumInner.style.height = '';
+      }
+      try {
+        spectrumRoot.style.removeProperty('max-height');
+        spectrumRoot.style.removeProperty('flex');
+      } catch(_) {}
+    };
+
+    if (isFs) {
+      const curH = Math.max(1, Math.round((spectrumRoot.getBoundingClientRect().height || 1)));
+      spectrumRoot.style.setProperty('flex', '0 0 auto', 'important');
+      spectrumRoot.style.setProperty('--fs-spec-h', curH + 'px');
+      spectrumRoot.style.setProperty('max-height', curH + 'px');
+
+      requestAnimationFrame(() => {
+        if (myEpoch !== __specEpoch) return;
+        const onEnd = (e) => {
+          if (myEpoch !== __specEpoch) return;
+          if (e && e.propertyName && e.propertyName !== 'max-height') return;
+          try { spectrumRoot.removeEventListener('transitionend', onEnd); } catch(_) {}
+          cleanupAfter();
+          try {
+            spectrumRoot.style.removeProperty('max-height');
+            spectrumRoot.style.removeProperty('flex');
+            spectrumRoot.style.removeProperty('--fs-spec-h');
+          } catch(_) {}
+          updateFullscreenHeights();
+          try { chart && chart.resize(); } catch(_) {}
+        };
+        try { spectrumRoot.addEventListener('transitionend', onEnd, { once:true }); } catch(_) {}
+        spectrumRoot.style.setProperty('max-height', '0px');
+      });
+
+      specSetTimeout(() => { try { cleanupAfter(); updateFullscreenHeights(); } catch(_) {} }, Math.max(900, (getCssTransitionMs()||350)+300));
+    } else {
+      // 非全屏：先把 inner 固定为“当前像素高”，随后仅靠父容器 height 过渡做收起
+      const curH = Math.max(1, Math.round((spectrumRoot.getBoundingClientRect().height || 1)));
+      if (spectrumInner) {
+        spectrumInner.style.height = curH + 'px';        // 画布保持最终内容尺寸，只是被父容器逐步遮住
+        spectrumInner.style.transition = 'transform var(--transition-speed, .25s) ease';
+        spectrumInner.style.opacity = '1';
+      }
+
+      spectrumRoot.classList.add('anim-scale', 'collapse-to-0');
+
+      requestAnimationFrame(() => {
+        if (myEpoch !== __specEpoch) return;
+
+        const onEnd = (e) => {
+          if (myEpoch !== __specEpoch) return;
+          if (e && e.propertyName !== 'height') return;
+          try { spectrumRoot.removeEventListener('transitionend', onEnd); } catch(_) {}
+          cleanupAfter();
+          spectrumRoot.classList.remove('anim-scale', 'collapse-to-0');
+        };
+
+        try { spectrumRoot.addEventListener('transitionend', onEnd, { once:true }); } catch(_) {}
+        try { shell.removeAttribute('data-chart-mode'); } catch(_) {}   // 触发 height 从 dvh → 0 的 CSS 过渡
+      });
     }
   }
 
-  function toggleFullscreen(){ if (document.fullscreenElement) exitFullscreen(); else enterFullscreen(); }
+  // 同步外置按钮
+  try {
+    syncSpectrumDockUi();
+  } catch(_) {}
+  try {
+    placeSpectrumDock();
+  } catch(_) {}
+}
+  
+function updateSpectrumLayout() {
+  if (!spectrumRoot || !spectrumInner) return;
+
+  if (isFs) {
+    if (spectrumRoot) spectrumRoot.style.height = '';
+    if (spectrumInner) spectrumInner.style.height = '';
+  }
+  // NEW: 任何模式下都尽量触发频谱 resize，使其跟随容器宽度
+  if (spectrumChart) { try { spectrumChart.resize(); } catch(_) {} }
+}
+
+function getXQueryOrDefault(mode){
+  let x = xQueryByMode[mode];
+  if (x == null) {
+    const [vx0, vx1] = getVisibleXRange();
+    x = (vx0 + vx1) / 2;
+  }
+  return x;
+}
+
+function getSeriesRpmForCurrentX(series, spectrumModel){
+  const mode = currentXModeFromPayload(lastPayload);
+  if (mode === 'rpm') {
+    const rpm = Number(getXQueryOrDefault('rpm'));
+    return Number.isFinite(rpm) && rpm > 0 ? rpm : 0;
+  } else {
+    const noiseX = Number(getXQueryOrDefault('noise_db'));
+    const ph = series?.pchip?.noise_to_rpm;
+    if (ph && Array.isArray(ph.x) && Array.isArray(ph.y) && Array.isArray(ph.m)) {
+      const rpm = Number(evalPchipJS(ph, noiseX));
+      return Number.isFinite(rpm) && rpm > 0 ? rpm : 0;
+    }
+    return rpmMaxForSeries(series, spectrumModel);
+  }
+}
+
+async function requestAndRenderSpectrum(forceFull = false) {
+  ensureSpectrumHost();
+  ensureSpectrumChart();
+  updateSpectrumLayout();
+
+  const sList = getSeriesArray();
+  if (!Array.isArray(sList) || !sList.length) {
+    // 清空 pending/missing
+    SpectrumController.__setPendingKeys([]);
+    SpectrumController.__setMissingKeys([]);
+    buildAndSetSpectrumOption(forceFull);
+    return;
+  }
+
+  const wanted = new Set();
+  const pairs = [];
+  const seen = new Set();
+  sList.forEach(s => {
+    const midRaw = (s.modelId != null) ? s.modelId : s.model_id;
+    const cidRaw = (s.conditionId != null) ? s.conditionId : s.condition_id;
+    const mid = Number(midRaw);
+    const cid = Number(cidRaw);
+    if (!Number.isInteger(mid) || !Number.isInteger(cid)) return;
+    const key = `${mid}_${cid}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    wanted.add(key);
+    pairs.push({ model_id: mid, condition_id: cid });
+  });
+
+  const wantedArr = Array.from(wanted);
+
+  // 全部命中缓存：直接渲染
+  const allCached = wantedArr.length > 0 && wantedArr.every(k => spectrumModelCache.has(k));
+  if (allCached) {
+    __specPending = false;
+    SpectrumController.__setPendingKeys([]);
+    SpectrumController.__setMissingKeys([]);
+    setSpectrumLoading(false);
+    buildAndSetSpectrumOption(forceFull);
+    return;
+  }
+
+  if (__specFetchInFlight) {
+    try { buildAndSetSpectrumOption(true); } catch(_) {}
+    __specRerunQueued = true;
+    return;
+  }
+
+  __specFetchInFlight = true;
+  try {
+    const fetchRes = await fetchSpectrumModelsForPairs(pairs);
+
+    const pendingKeys = wantedArr.filter(k => !spectrumModelCache.has(k) && !fetchRes.missingKeys.has(k));
+    __specPending = pendingKeys.length > 0;
+
+    // 写入 controller 状态
+    SpectrumController.__setPendingKeys(pendingKeys);
+    SpectrumController.__setMissingKeys(Array.from(fetchRes.missingKeys || []));
+
+    buildAndSetSpectrumOption(forceFull);
+
+    if (__specPending) {
+      setSpectrumLoading(true, `${pendingKeys.length}条频谱渲染中，可能需要数分钟，你可以先浏览其他数据...`);
+      specSetTimeout(() => {
+        if (spectrumEnabled) requestAndRenderSpectrum(false);
+      }, 1500);
+    } else {
+      setSpectrumLoading(false);
+    }
+  } finally {
+    __specFetchInFlight = false;
+    if (__specRerunQueued && spectrumEnabled) {
+      __specRerunQueued = false;
+      try { buildAndSetSpectrumOption(true); } catch(_) {}
+    }
+  }
+}
+
+async function fetchSpectrumModelsForPairs(pairs) {
+  if (!Array.isArray(pairs) || !pairs.length) {
+    return { modelsLoaded: 0, missingKeys: new Set(), rebuildingKeys: new Set() };
+  }
+  const resp = await fetch('/api/spectrum-models', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ pairs })
+  });
+  const j = await resp.json();
+  const ok = !!(j && typeof j === 'object' && j.success === true);
+  if (!ok) throw new Error((j && j.error_message) || '频谱模型接口失败');
+
+  const data = j.data || {};
+  const models = Array.isArray(data.models) ? data.models : [];
+  let loaded = 0;
+
+  models.forEach(item => {
+    const mid = Number(item.model_id), cid = Number(item.condition_id);
+    const key = `${mid}_${cid}`;
+    const model = (item && item.model) || null;
+    if (model && Array.isArray(model.centers_hz) && Array.isArray(model.band_models_pchip)) {
+      spectrumModelCache.set(key, model);
+      loaded++;
+    }
+  });
+
+  const toKeySet = (arr) => {
+    const s = new Set();
+    (Array.isArray(arr) ? arr : []).forEach(e => {
+      const mid = Number(e && e.model_id), cid = Number(e && e.condition_id);
+      if (Number.isInteger(mid) && Number.isInteger(cid)) s.add(`${mid}_${cid}`);
+    });
+    return s;
+  };
+
+  return {
+    modelsLoaded: loaded,
+    missingKeys: toKeySet(data.missing),
+    rebuildingKeys: toKeySet(data.rebuilding)
+  };
+}
+
+// 新增整个函数：依据当前 Legend 可见性构建频谱线并渲染
+function getLegendSelectionMap(){
+  try {
+    const opt = chart.getOption() || {};
+    return (opt.legend && opt.legend[0] && opt.legend[0].selected) || {};
+  } catch(_) { return {}; }
+}
+
+function rpmMaxForSeries(s, model) {
+  const fromModel = Number(model && model.rpm_max);
+  if (Number.isFinite(fromModel) && fromModel > 0) return fromModel;
+  const arr = Array.isArray(s?.data?.rpm) ? s.data.rpm.filter(v => Number.isFinite(Number(v))) : [];
+  if (arr.length) return Math.max.apply(null, arr.map(Number));
+  return 0;
+}
+
+function buildAndSetSpectrumOption(fullRefresh = false, themeOverride) {
+  if (!spectrumChart) return;
+
+  const themeName =
+    themeOverride ||
+    (lastPayload && lastPayload.theme) ||
+    (document.documentElement.getAttribute('data-theme') || 'light');
+
+  const allSeries = getSeriesArray();
+  const t = tokens(themeName);
+
+  const gridMain = (lastOption && lastOption.grid) || { left: 40, right: 260, top: 60, bottom: 40 };
+  const left = (typeof gridMain.left === 'number') ? gridMain.left : 40;
+  const rightGap = (typeof gridMain.right === 'number') ? gridMain.right : 260;
+
+  const fmtHz = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return String(v);
+    return n >= 1000 ? (n / 1000).toFixed(1) + ' kHz' : n.toFixed(1) + ' Hz';
+  };
+
+  const selMapFromMain = getLegendSelectionMap();
+
+  // 所有系列名称（供 legend.data 推断），显隐仍由 selected 控制
+  const namesAll = allSeries.map(s => s.name || `${s.brand || ''} ${s.model || ''} - ${s.condition || ''}`);
+
+  // 可见系列仅用于 yMax/空态等判定，避免隐藏曲线影响纵轴
+  const visibleSeriesForMetrics = allSeries.map(s => {
+    const name = s.name || `${s.brand || ''} ${s.model || ''} - ${s.condition || ''}`;
+    return { ...s, __name: name };
+  }).filter(s => (selMapFromMain ? selMapFromMain[s.__name] !== false : true));
+
+  const visibleKeys = visibleSeriesForMetrics
+    .map(s => {
+      const midRaw = (s.modelId != null) ? s.modelId : s.model_id;
+      const cidRaw = (s.conditionId != null) ? s.conditionId : s.condition_id;
+      return `${Number(midRaw)}_${Number(cidRaw)}`;
+    })
+    .sort()
+    .join('|');
+
+  let modelReadyCount = 0;
+  visibleSeriesForMetrics.forEach(s => {
+    const midRaw = (s.modelId != null) ? s.modelId : s.model_id;
+    const cidRaw = (s.conditionId != null) ? s.conditionId : s.condition_id;
+    const k = `${Number(midRaw)}_${Number(cidRaw)}`;
+    if (spectrumModelCache.has(k)) modelReadyCount++;
+  });
+
+  const needRecalcYMax =
+    fullRefresh ||
+    !lastSpectrumOption ||
+    lastSpectrumOption.__visibleHash !== visibleKeys ||
+    !Number.isFinite(lastSpectrumOption.__yMaxFixed) ||
+    lastSpectrumOption.__modelReadyCount !== modelReadyCount;
+
+  if (needRecalcYMax) {
+    const fixedMax = computeSpectrumYMaxFixed(); // 内部已按可见 series 计算
+    lastSpectrumOption = {
+      __yMax: fixedMax,
+      __yMaxFixed: fixedMax,
+      __visibleHash: visibleKeys,
+      __modelReadyCount: modelReadyCount
+    };
+  }
+
+  // 构建所有“有模型”的线，显隐交给 legend.selected
+  const lines = [];
+  let hasAnyDataVisible = false;
+  const selectedSet = new Set(
+    namesAll.filter(n => (selMapFromMain ? selMapFromMain[n] !== false : true))
+  );
+
+  allSeries.forEach(s => {
+    const name = s.name || `${s.brand || ''} ${s.model || ''} - ${s.condition || ''}`;
+    const midRaw = (s.modelId != null) ? s.modelId : s.model_id;
+    const cidRaw = (s.conditionId != null) ? s.conditionId : s.condition_id;
+    const mid = Number(midRaw), cid = Number(cidRaw);
+    if (!Number.isInteger(mid) || !Number.isInteger(cid)) return;
+
+    const model = spectrumModelCache.get(`${mid}_${cid}`);
+    if (!model) return;
+
+    const centers = Array.isArray(model.centers_hz) ? model.centers_hz : (model.freq_hz || model.freq || []);
+    const bands = Array.isArray(model.band_models_pchip) ? model.band_models_pchip : [];
+    if (!(centers.length && bands.length)) return;
+
+    const rpmTarget = getSeriesRpmForCurrentX(s, model);
+    const pts = [];
+    if (Number.isFinite(rpmTarget) && rpmTarget > 0) {
+      for (let i = 0; i < centers.length; i++) {
+        const hz = Number(centers[i]);
+        if (!Number.isFinite(hz)) continue;
+        const bm = bands[i];
+        if (!bm || !Array.isArray(bm.x) || !Array.isArray(bm.y) || !Array.isArray(bm.m)) continue;
+        const raw = Number(evalPchipJS(bm, rpmTarget));
+        const db = Number.isFinite(raw) ? Math.max(0, raw) : NaN;
+        if (!Number.isFinite(db)) continue;
+        pts.push([hz, db]);
+      }
+    }
+
+    // 仅当“可见且有数据”时，认为当前有可渲染数据（用于空态判定）
+    if (pts.length && selectedSet.has(name)) hasAnyDataVisible = true;
+
+    if (pts.length) {
+      lines.push({ id: `spec:${mid}_${cid}`, name, color: s.color, data: pts });
+    }
+  });
+
+  const canvasBg = (lastOption && lastOption.backgroundColor) || getExportBg();
+  const isPending =
+    !!__specPending ||
+    (typeof SpectrumController?.getPendingKeys === 'function' && SpectrumController.getPendingKeys().length > 0);
+
+  const optionObj = hasAnyDataVisible ? {
+    backgroundColor: canvasBg,
+    textStyle: { fontFamily: t.fontFamily },
+    title: {
+      text: buildSpectrumTitle(),
+      left: 'center',
+      top: 6,
+      textStyle: { color: t.axisLabel, fontWeight: 700, fontSize: 16, fontFamily: t.fontFamily }
+    },
+    grid: { left, right: rightGap, top: 38, bottom: 60 },
+    xAxis: {
+      type: 'log',
+      logBase: 10,
+      min: SPECTRUM_X_MIN,
+      max: SPECTRUM_X_MAX,
+      name: '频率',
+      nameGap: 25,
+      nameLocation: 'middle',
+      nameTextStyle: { color: t.axisName, fontWeight: 600 },
+      axisLabel: { color: t.axisLabel, formatter: fmtHz },
+      axisLine: { lineStyle: { color: t.axisLine } },
+      splitLine: { show: true, lineStyle: { color: t.gridLine } },
+      minorTick: { show: true, splitNumber: 9 },
+      minorSplitLine: { show: true, lineStyle: { color: t.gridLine, opacity: 0.4 } }
+    },
+    yAxis: {
+      type: 'value',
+      show: true,
+      min: 0,
+      max: Math.max(0, Number(lastSpectrumOption?.__yMaxFixed) || 60),
+      name: '声级(dB)',
+      nameTextStyle: { color: t.axisName, fontWeight: 600 },
+      axisLabel: { color: t.axisLabel },
+      axisLine: { lineStyle: { color: t.axisLine } },
+      splitLine: { show: true, lineStyle: { color: t.gridLine } }
+    },
+    tooltip: buildSpectrumTooltip(t),
+    legend: {
+      show: false,
+      selected: selMapFromMain,
+      data: namesAll  // 确保 legend 组件知道完整的系列列表
+    },
+    series: lines.map(l => ({
+      id: l.id,
+      name: l.name,
+      type: 'line',
+      showSymbol: false,
+      smooth: false,
+      connectNulls: false,
+      data: l.data,
+      lineStyle: { width: 1.5, color: l.color },
+      itemStyle: { color: l.color },
+      silent: false,
+      z: 1,
+      clip: true,
+      animation: true,
+      animationDuration: 650,
+      animationEasing: 'linear',
+      animationDelay: idx => idx * 14,
+      animationDurationUpdate: 500,
+      animationEasingUpdate: 'cubicOut',
+      universalTransition: true,
+      emphasis: { focus: 'series', blurScope: 'coordinateSystem' }
+    }))
+  } : (
+    isPending
+      ? {
+          backgroundColor: canvasBg,
+          grid: { left, right: rightGap, top: 36, bottom: 18 },
+          xAxis: { show: false, min: SPECTRUM_X_MIN, max: SPECTRUM_X_MAX },
+          yAxis: { show: false, min: 0, max: Math.max(0, Number(lastSpectrumOption?.__yMaxFixed) || 60) },
+          legend: { show: false, selected: selMapFromMain, data: namesAll },
+          series: []
+        }
+      : {
+          backgroundColor: canvasBg,
+          title: {
+            text: '当前无可渲染频谱',
+            left: 'center',
+            top: 'middle',
+            textStyle: { color: t.axisLabel, fontWeight: 600, fontSize: 14, fontFamily: t.fontFamily }
+          },
+          grid: { left, right: rightGap, top: 36, bottom: 18 },
+          xAxis: { show: false, min: SPECTRUM_X_MIN, max: SPECTRUM_X_MAX },
+          yAxis: { show: false, min: 0, max: Math.max(0, Number(lastSpectrumOption?.__yMaxFixed) || 60) },
+          legend: { show: false, selected: selMapFromMain, data: namesAll },
+          series: []
+        }
+  );
+
+  spectrumChart.setOption(optionObj, fullRefresh ? true : false);
+  spectrumChart.resize();
+}
+
+function buildSpectrumTooltip(t){
+  const fmtX = (v) => {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return String(v);
+    return n >= 1000 ? (n/1000).toFixed(1) + ' kHz' : n.toFixed(1) + ' Hz';
+  };
+
+  return {
+    ...buildTooltipBase(t, { appendToBody: !isFs }),
+    confine: false,
+    trigger: 'axis',
+    triggerOn: 'mousemove|click|touchstart|touchmove',
+    borderRadius: 10,
+    axisPointer: {
+      type: 'line',
+      snap: true,
+      label: {
+        // 横坐标无论 Hz 或 kHz 均保留一位小数
+        formatter: (obj) => fmtX(obj?.value)
+      }
+    },
+    position: function (pos) {
+      const x = Array.isArray(pos) ? pos[0] : 0;
+      const y = Array.isArray(pos) ? pos[1] : 0;
+      const gap = 12;
+      return [Math.round(x + gap), Math.round(y + gap)];
+    },
+    formatter: function (params) {
+      if (!Array.isArray(params) || !params.length) return '';
+      const x = params[0]?.axisValue;
+      // 横坐标标题统一一位小数
+      const head = `<div style="font-weight:800;margin-bottom:4px;">${fmtX(x)}</div>`;
+      const linesHtml = params.map(p => {
+        const v = Array.isArray(p.data) ? p.data[1] : (Number(p.value) || NaN);
+        const dB = Number.isFinite(v) ? v.toFixed(1) + ' dB' : '-';
+        return `<div style="display:flex;align-items:center;gap:6px;">
+                  <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${p.color};"></span>
+                  <span>${p.seriesName}</span>
+                  <span style="margin-left:auto;color:var(--text-muted);font-variant-numeric:tabular-nums;">${dB}</span>
+                </div>`;
+      }).join('');
+      return head + linesHtml;
+    }
+  };
+}
+
+// 新增：频谱标题文本
+function buildSpectrumTitle(){
+  const mode = currentXModeFromPayload(lastPayload);
+  const x = Number(getXQueryOrDefault(mode));
+  if (mode === 'rpm') return `A计权声级频谱 @ ${Math.round(x)} RPM`;
+  const v = Number.isFinite(x) ? x.toFixed(1) : '-';
+  return `A计权声级频谱 @ ${v} dB`;
+}
+
+function computeSpectrumYMaxFixed() {
+  const sList = getSeriesArray();
+  const selected = getLegendSelectionMap();
+
+  let globalMax = 0;
+  sList.forEach(s => {
+    const name = s.name || `${s.brand || ''} ${s.model || ''} - ${s.condition || ''}`;
+    if (selected && selected[name] === false) return;
+
+    // 兼容 modelId / model_id
+    const midRaw = (s.modelId != null) ? s.modelId : s.model_id;
+    const cidRaw = (s.conditionId != null) ? s.conditionId : s.condition_id;
+    const mid = Number(midRaw), cid = Number(cidRaw);
+    if (!Number.isInteger(mid) || !Number.isInteger(cid)) return;
+
+    const model = spectrumModelCache.get(`${mid}_${cid}`);
+    if (!model) return;
+
+    const centers = Array.isArray(model.centers_hz) ? model.centers_hz : (model.freq_hz || model.freq || []);
+    const bands = Array.isArray(model.band_models_pchip) ? model.band_models_pchip : [];
+    if (!centers.length || !bands.length) return;
+
+    const rpmMax = rpmMaxForSeries(s, model);
+    if (!Number.isFinite(rpmMax) || rpmMax <= 0) return;
+
+    for (let i = 0; i < centers.length; i++) {
+      const bandModel = bands[i];
+      if (!bandModel || !Array.isArray(bandModel.x) || !Array.isArray(bandModel.y) || !Array.isArray(bandModel.m)) continue;
+      const v = Number(evalPchipJS(bandModel, rpmMax));
+      const db = Number.isFinite(v) ? Math.max(0, v) : NaN;
+      if (Number.isFinite(db) && db > globalMax) globalMax = db;
+    }
+  });
+
+  return Math.max(10, Math.ceil(globalMax || 60));
+}
+
+function __ensureMainChartMinHeightForSpectrumMode() {
+  if (!root) return;
+  const vh = window.innerHeight || 800;
+  const clampH = Math.max(480, Math.min(600, Math.round(vh * 0.62)));
+  root.style.minHeight = clampH + 'px';
+}
+
+// 删除重复定义的 updateFullscreenHeights（保留前面的唯一版本）
+
+function revealSpectrumIfNeeded() {
+  if (!spectrumRoot) return;
+  const rect = spectrumRoot.getBoundingClientRect();
+  const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+  // 若底部超出可视区域，则滚动让其露出（对齐到开始位置）
+  if (rect.bottom > vh - 8) {
+    try { spectrumRoot.scrollIntoView({ behavior: 'smooth', block: 'start' }); } catch(_) {
+      // 兜底：使用 window.scrollTo
+      const se = document.scrollingElement || document.documentElement || document.body;
+      const top = (window.scrollY || se.scrollTop || 0) + (rect.top - 8);
+      window.scrollTo({ top, behavior: 'smooth' });
+    }
+  }
+}
+
+async function exportCombinedImage() {
+  if (!chart) return;
+
+  try { chart.dispatchAction({ type: 'hideTip' }); } catch(_) {}
+  try { spectrumChart && spectrumChart.dispatchAction({ type: 'hideTip' }); } catch(_) {}
+  try { chart.resize(); } catch(_) {}
+  try { spectrumEnabled && spectrumChart && spectrumChart.resize(); } catch(_) {}
+
+  // 等一帧，确保布局稳定
+  await new Promise(r => requestAnimationFrame(() => setTimeout(r, 0)));
+
+  const exportBg = getExportBg();
+  const dpr = window.devicePixelRatio || 1;
+
+  // 与主图一致：优先使用 payload.theme，避免与 DOM data-theme 时序不一致
+  const themeName =
+    (lastPayload && lastPayload.theme) ||
+    (document.documentElement.getAttribute('data-theme') || 'light');
+  const t = tokens(themeName);
+
+  // 2) 获取主图/频谱图片（高分辨率）
+  const mainUrl = chart.getDataURL({ pixelRatio: dpr, backgroundColor: exportBg, excludeComponents: [] });
+  let specUrl = null;
+  if (spectrumEnabled && spectrumChart) {
+    try {
+      specUrl = spectrumChart.getDataURL({ pixelRatio: dpr, backgroundColor: exportBg, excludeComponents: [] });
+    } catch(_) {}
+  }
+
+  // 3) 加载图片资源
+  const loadImg = (src) => new Promise((res, rej) => {
+    if (!src) return res(null);
+    const im = new Image();
+    im.onload = () => res(im);
+    im.onerror = rej;
+    im.crossOrigin = 'anonymous';
+    im.src = src;
+  });
+
+  const mainImg = await loadImg(mainUrl);
+  const specImg = await loadImg(specUrl);
+
+  if (!mainImg) return;
+
+  // 4) 用 CSS 像素布局（将高分辨率图按 dpr 缩放到 CSS 大小）
+  const mainCssW = mainImg.width / dpr;
+  const mainCssH = mainImg.height / dpr;
+  const specCssW = specImg ? (specImg.width / dpr) : 0;
+  const specCssH = specImg ? (specImg.height / dpr) : 0;
+
+  const chartsW = Math.max(mainCssW, specCssW);
+  const gap = 24;            // 主图与频谱之间的间距（CSS px）
+  const pad = 16;            // 画布内边距
+  const bottomPad = 16;      // 额外底部留白
+  const chartsH = mainCssH + (specImg ? (gap + specCssH) : 0);
+
+  // 5) 构造导出用 Legend（复刻侧栏）
+  const items = __buildLegendItemsForExport();
+  const lm = __measureLegendForExport(items, t);
+  const legendW = lm.colW;
+  const legendH = lm.totalH;
+
+  // 6) 计算输出画布的 CSS 尺寸，并用 dpr 放大像素尺寸
+  const cssW = pad + chartsW + gap + legendW + pad;
+  const cssH = pad + Math.max(chartsH, legendH) + bottomPad;
+  const out = document.createElement('canvas');
+  out.width = Math.max(1, Math.round(cssW * dpr));
+  out.height = Math.max(1, Math.round(cssH * dpr));
+  const ctx = out.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  // 背景
+  ctx.fillStyle = exportBg;
+  ctx.fillRect(0, 0, cssW, cssH);
+
+  // 7) 绘制主图与频谱（按 CSS 尺寸投放）
+  let x = pad, y = pad;
+  ctx.drawImage(mainImg, x, y, mainCssW, mainCssH);
+  y += mainCssH;
+
+  if (specImg) {
+    y += gap;
+    ctx.drawImage(specImg, x, y, specCssW, specCssH);
+  }
+
+  // 8) 绘制 Legend（右列，复刻两行样式）
+  let lx = pad + chartsW + gap;
+  let ly = pad;
+
+  ctx.textBaseline = 'alphabetic';
+
+  items.forEach(it => {
+    const color = it.selected ? (it.color || '#888') : 'rgba(128,128,128,.35)';
+    // dot
+    ctx.fillStyle = color;
+    const r = lm.dotW / 2;
+    ctx.beginPath();
+    ctx.arc(lx + r + lm.padX, ly + r + 2, r, 0, Math.PI * 2);
+    ctx.fill();
+
+    // texts
+    const textX = lx + lm.padX + lm.dotW + lm.gapDotText;
+    const line1Y = ly + lm.line1H - 6; // 视觉基线略向上，靠近侧栏观感
+    ctx.font = lm.line1Font;
+    ctx.fillStyle = it.selected ? t.tooltipText : 'rgba(0,0,0,.55)';
+    ctx.fillText(it.line1 || '', textX, line1Y);
+
+    let itemH = lm.line1H;
+    if (it.line2) {
+      ctx.font = lm.line2Font;
+      const line2Y = ly + lm.line1H + lm.line2H - 6;
+      // muted 文本色：若 CSS 变量可用则读取，否则使用兜底
+      const cssMuted = getComputedStyle(document.documentElement).getPropertyValue('--text-muted').trim();
+      ctx.fillStyle = cssMuted || '#6b7280';
+      ctx.fillText(it.line2, textX, line2Y);
+      itemH = lm.line1H + lm.line2H;
+    }
+
+    ly += itemH + lm.itemGap;
+  });
+
+  // 9) 触发下载
+  const a = document.createElement('a');
+  a.download = 'charts-all.png';
+  a.href = out.toDataURL('image/png');
+  a.click();
+}
+
+function __computeFsSpecTargetPx() {
+  const shell = document.getElementById('chart-settings') || (root && root.closest('.fc-chart-container'));
+  if (!shell) return 0;
+  const stack = shell.querySelector('.chart-stack');
+  if (!stack) return 0;
+
+  const st = getComputedStyle(stack);
+  const gap = parseFloat(st.rowGap || st.gap || '0') || 0;
+  const stackH = Math.max(0, Math.round(stack.getBoundingClientRect().height));
+
+  // 可用高度要扣掉一个列间隙（两行之间只会产生一个 gap）
+  const usable = Math.max(0, stackH - gap);
+
+  const cs = getComputedStyle(document.documentElement);
+  const mainFlex = parseFloat(cs.getPropertyValue('--fs-main-flex')) || 3;
+  const specFlex = parseFloat(cs.getPropertyValue('--fs-spec-flex')) || 2;
+
+  const total = Math.max(0.0001, mainFlex + specFlex);
+  const specPx = Math.round(usable * (specFlex / total));
+
+  // 合理下限，避免 0 导致动画不触发
+  return Math.max(1, specPx);
+}
+
+function __refreshFsSpecMaxHeightIfExpanded() {
+  if (!(isFs && spectrumEnabled && spectrumRoot)) return;
+  const px = __computeFsSpecTargetPx();
+  if (px > 0) {
+    spectrumRoot.style.setProperty('max-height', px + 'px');
+    spectrumRoot.style.setProperty('--fs-spec-h', px + 'px');
+  }
+}
+
+/* 追加：创建/获取 Loading 覆盖层 */
+function ensureSpectrumLoader() {
+  if (!spectrumRoot) return null;
+  let el = spectrumRoot.querySelector('.spectrum-loading');
+  if (!el) {
+    el = document.createElement('div');
+    el.className = 'spectrum-loading';
+    el.innerHTML = `
+      <div class="spinner" aria-hidden="true"></div>
+      <div class="text" id="spectrumLoadingText">加载中...</div>
+    `;
+    spectrumRoot.appendChild(el);
+  }
+  spectrumLoadingEl = el;
+  return el;
+}
+
+function setSpectrumLoading(on, text) {
+  const el = ensureSpectrumLoader();
+  if (!el) return;
+  const txt = el.querySelector('#spectrumLoadingText');
+  if (txt) {
+    if (typeof text === 'string' && text.length) txt.textContent = text;
+    txt.style.fontSize = '15px';
+  }
+  el.classList.toggle('is-active', !!on);
+}
+
+function syncSpectrumStateAcrossModes({ animate = false } = {}) {
+  ensureSpectrumHost();
+  const shell =
+    document.getElementById('chart-settings') ||
+    (root && root.closest('.fc-chart-container')) ||
+    document.documentElement;
+
+  if (!spectrumRoot) return;
+
+  if (spectrumEnabled) {
+    try { shell.setAttribute('data-chart-mode', 'spectrum'); } catch (_) {}
+
+    if (isFs) {
+      // 全屏：仍用 max-height + --fs-spec-h 表达展开高度
+      const targetPx = __computeFsSpecTargetPx();
+      spectrumRoot.style.removeProperty('height');
+      spectrumRoot.style.setProperty('flex', '0 0 auto', 'important');
+      spectrumRoot.style.setProperty('--fs-spec-h', targetPx + 'px');
+
+      if (animate) {
+        spectrumRoot.style.transition = 'max-height var(--transition-speed, .25s) ease';
+        const cur = Math.max(0, Math.round(spectrumRoot.getBoundingClientRect().height || 0));
+        spectrumRoot.style.setProperty('max-height', cur + 'px');
+        void spectrumRoot.offsetHeight;
+        spectrumRoot.style.setProperty('max-height', targetPx + 'px');
+      } else {
+        spectrumRoot.style.transition = 'none';
+        spectrumRoot.style.setProperty('max-height', targetPx + 'px');
+        void spectrumRoot.offsetHeight;
+        spectrumRoot.style.transition = '';
+      }
+    } else {
+      // 非全屏：不再写入 px；依靠 CSS 的 dvh 规则和 height 过渡
+      if (animate) {
+        spectrumRoot.classList.add('anim-scale');
+        requestAnimationFrame(() => {
+          try { spectrumRoot.classList.remove('anim-scale'); } catch(_) {}
+        });
+      }
+      spectrumRoot.style.removeProperty('max-height');
+      spectrumRoot.style.removeProperty('flex');
+    }
+  } else {
+    try { shell.removeAttribute('data-chart-mode'); } catch (_) {}
+
+    if (isFs) {
+      spectrumRoot.style.removeProperty('height');
+      if (animate) {
+        spectrumRoot.style.transition = 'max-height var(--transition-speed, .25s) ease';
+      } else {
+        spectrumRoot.style.transition = 'none';
+      }
+      spectrumRoot.style.setProperty('max-height', '0px');
+      if (!animate) spectrumRoot.style.transition = '';
+    } else {
+      // 非全屏：移除属性即回到 height:0（CSS 过渡生效）
+      spectrumRoot.style.removeProperty('max-height');
+      spectrumRoot.style.removeProperty('flex');
+      if (animate) {
+        spectrumRoot.classList.add('anim-scale');
+        requestAnimationFrame(() => {
+          try { spectrumRoot.classList.remove('anim-scale'); } catch(_) {}
+        });
+      }
+    }
+  }
+
+  // 关键补丁：模式切换后立刻刷新频谱配置（含 tooltip），避免沿用旧的 appendToBody/fixed
+  try {
+    if (spectrumEnabled && spectrumChart) {
+      buildAndSetSpectrumOption();  // 内部已根据 isFs 设置 appendToBody 和位置语义，并 replaceMerge tooltip
+    }
+  } catch(_) {}
+
+  try { chart && chart.resize(); } catch (_) {}
+  try { spectrumEnabled && spectrumChart && spectrumChart.resize(); } catch (_) {}
+}
+
+  function getExportBg() {
+    const bgBody = getComputedStyle(document.body).backgroundColor;
+    return bgBody && bgBody !== 'rgba(0, 0, 0, 0)' ? bgBody : '#ffffff';
+  }
+
+function __buildLegendItemsForExport() {
+  const sList = getSeriesArray();
+  const selMap = getLegendSelectionMap();
+  return sList.map(s => {
+    const name = s.name || `${s.brand||''} ${s.model||''} - ${s.condition||''}`;
+    const brand = s.brand || '';
+    const model = s.model || '';
+    const line1 = (brand || model) ? `${brand} ${model}`.trim() : name;
+    const line2 = s.condition || '';
+    const selected = selMap ? (selMap[name] !== false) : true;
+    return {
+      id: name,
+      color: s.color || '#888',
+      line1,
+      line2,
+      selected
+    };
+  });
+}
+
+function __measureLegendForExport(items, t) {
+  const padX = 10;
+  const dotW = 12;
+  const gapDotText = 8;
+  const minCol = 160, maxCol = 360;
+  const line1Font = `600 13px ${t.fontFamily}`;
+  const line2Font = `500 11px ${t.fontFamily}`;
+  const line1H = 22;
+  const line2H = 16;
+  const itemGap = 8;
+
+  let textMax = 0;
+  let totalH = 0;
+
+  items.forEach(it => {
+    const w1 = measureText(it.line1 || '', 13, 600, t.fontFamily).width;
+    let w2 = 0;
+    if (it.line2) {
+      w2 = measureText(it.line2, 11, 500, t.fontFamily).width;
+    }
+    textMax = Math.max(textMax, w1, w2);
+    const itemH = it.line2 ? (line1H + line2H) : line1H;
+    totalH += itemH + itemGap;
+  });
+
+  if (items.length > 0) totalH -= itemGap;
+
+  const colW = Math.min(maxCol, Math.max(minCol, Math.ceil(padX + dotW + gapDotText + textMax + padX)));
+  return { colW, totalH, line1H, line2H, itemGap, dotW, gapDotText, padX, line1Font, line2Font };
+}
+
+// 将频谱背景与主图一致（仅更新 backgroundColor，不动其它配置）
+function syncSpectrumBgWithMain(bgOverride){
+  try {
+    if (!spectrumEnabled || !spectrumChart) return;
+    const fallback = (lastOption && lastOption.backgroundColor) || (isFs ? getExportBg() : 'transparent');
+    const targetBg = (bgOverride !== undefined && bgOverride !== null) ? bgOverride : fallback;
+    spectrumChart.setOption({ backgroundColor: targetBg });
+  } catch(_) {}
+}
+
+// 新增：与 CSS dvh 规则一致的“非常规模式下频谱目标像素高”
+function __computeNfSpecTargetPx() {
+  const vv = (window.visualViewport && Math.round(window.visualViewport.height)) || 0;
+  const vh = vv > 0 ? vv : (window.innerHeight || document.documentElement.clientHeight || 800);
+  const narrow = layoutIsNarrow();
+  const frac = narrow ? 0.30 : 0.45;    // 窄屏 30dvh，桌面 45dvh
+  let px = Math.round(vh * frac);
+  // 与 CSS 约束对齐：上限 600；桌面最小 300
+  px = Math.min(600, px);
+  if (!narrow) px = Math.max(300, px);
+  return Math.max(1, px);
+}
+
+function updateRailParkedState(){
+  const shell =
+    document.getElementById('chart-settings') ||
+    (root && root.closest('.fc-chart-container')) ||
+    null;
+  if (!shell) return;
+
+  const integrated = isIntegratedLegendMode();
+  const narrow = layoutIsNarrow();
+  const empty  = !lastOption || lastOption.__empty;
+
+  // 集成模式强制不使用 rail-parked（legend 永远占位）
+  const shouldPark = !integrated && !!(showFitCurves && !empty && !narrow);
+  shell.classList.toggle('rail-parked', shouldPark);
+
+  try { updateLegendRailLayout(); } catch(_){}
+}
+
+function isIntegratedLegendMode() {
+  const narrow = layoutIsNarrow();
+  if (narrow) return true;
+  if (isFs && isMobile()) return true;
+  return false;
+}
+
+const TextMeasurer = (() => {
+  const ctx = document.createElement('canvas').getContext('2d');
+  const cache = new Map(); // key = font + '||' + text
+  function measure(font, text) {
+    const key = font + '||' + (text || '');
+    if (cache.has(key)) return cache.get(key);
+    ctx.font = font;
+    const m = ctx.measureText(text || '');
+    const sizeMatch = /(\d+(?:\.\d+)?)px/.exec(font);
+    const fallbackSize = sizeMatch ? parseFloat(sizeMatch[1]) : 14;
+    const ascent = (typeof m.actualBoundingBoxAscent === 'number') ? m.actualBoundingBoxAscent : fallbackSize * 0.8;
+    const descent = (typeof m.actualBoundingBoxDescent === 'number') ? m.actualBoundingBoxDescent : fallbackSize * 0.2;
+    const info = { width: m.width || 0, height: ascent + descent };
+    cache.set(key, info);
+    return info;
+  }
+  return { measure };
+})();
+
+/* =========================
+ * (8) 布局刷新调度器 LayoutScheduler
+ * ========================= */
+const layoutScheduler = (() => {
+  let rafId = null;
+  const dirty = new Set();
+  function mark(...keys) {
+    keys.forEach(k => dirty.add(k));
+    if (!rafId) rafId = requestAnimationFrame(flush);
+  }
+  function flush() {
+    rafId = null;
+    try {
+      if (dirty.has('legend')) { updateLegendRailLayout(); renderLegendRailItems(); }
+      if (dirty.has('fitUI'))  { placeFitUI(); }
+      if (dirty.has('pointer')){ repaintPointer(); }
+      if (dirty.has('spectrum')){ updateSpectrumLayout(); }
+      if (dirty.has('axisSwitch')) { updateAxisSwitchPosition({ force:true, animate:false }); }
+      if (dirty.has('dock')) { placeSpectrumDock(); }
+      if (dirty.has('railPark')) { updateRailParkedState(); }
+    } catch(_) {}
+    dirty.clear();
+  }
+  return { mark, flush };
+})();
+
+/* =========================
+ * (11) 抑制管理器 SuppressionManager
+ * ========================= */
+const suppress = (() => {
+  const map = new Map();
+  function run(key, ms) { map.set(key, performance.now() + Math.max(0, ms|0)); }
+  function active(key) { return performance.now() < (map.get(key) || 0); }
+  function clear(key) { map.delete(key); }
+  return { run, active, clear };
+})();
+
+/* =========================
+ * (10) 通用拖拽控制器 DragController
+ * ========================= */
+function createDragController(element, opts) {
+  const {
+    axis = 'both',             // 'x' | 'y' | 'both'
+    threshold = 4,             // 像素阈值，超过才判定为拖拽
+    onStart,                   // (e) -> boolean|void，返回 false 可取消本次拖拽
+    onMove,                    // ({dx, dy, e})
+    onEnd                      // () -> void
+  } = opts || {};
+  if (!element) return;
+
+  let activePointerId = null;
+  let startX = 0, startY = 0;
+  let moved = false;
+
+  function onPointerDown(e) {
+    if (e.button !== undefined && e.button !== 0) return;
+    if (activePointerId != null) return;
+    startX = e.clientX; startY = e.clientY;
+    activePointerId = e.pointerId ?? null;
+    moved = false;
+    const ok = (typeof onStart === 'function') ? onStart(e) : true;
+    if (ok === false) { activePointerId = null; return; }
+    try { if (activePointerId != null) element.setPointerCapture(activePointerId); } catch(_) {}
+    e.preventDefault?.();
+  }
+
+  function onPointerMove(e) {
+    if (activePointerId != null && (e.pointerId ?? null) !== activePointerId) return;
+    if (activePointerId == null) return;
+    let dx = e.clientX - startX;
+    let dy = e.clientY - startY;
+    if (!moved && Math.hypot(dx, dy) >= threshold) moved = true;
+    if (!moved) return;
+    if (axis === 'x') dy = 0;
+    if (axis === 'y') dx = 0;
+    if (typeof onMove === 'function') onMove({ dx, dy, e });
+  }
+
+  function onPointerUpOrCancel() {
+    if (activePointerId == null) return;
+    try { element.releasePointerCapture(activePointerId); } catch(_) {}
+    activePointerId = null;
+    moved = false;
+    if (typeof onEnd === 'function') onEnd();
+  }
+
+  element.addEventListener('pointerdown', onPointerDown);
+  window.addEventListener('pointermove', onPointerMove, { passive:true });
+  window.addEventListener('pointerup', onPointerUpOrCancel, { passive:true });
+  window.addEventListener('pointercancel', onPointerUpOrCancel);
+  window.addEventListener('blur', onPointerUpOrCancel);
+}
+
+/* =========================
+ * (12) Base tooltip 生成器（主图与频谱共用）
+ * ========================= */
+function buildTooltipBase(t, { appendToBody }) {
+  return {
+    appendToBody: !!appendToBody,          // 关键：补回该字段
+    backgroundColor: t.tooltipBg,
+    borderColor: t.tooltipBorder,
+    borderWidth: 1,
+    textStyle: { color: t.tooltipText },
+    extraCssText: `
+      position: ${appendToBody ? 'fixed' : 'absolute'};
+      backdrop-filter: blur(4px) saturate(120%);
+      -webkit-backdrop-filter: blur(4px) saturate(120%);
+      box-shadow: ${t.tooltipShadow};
+      z-index: 1000000;
+    `
+  };
+}
+
+/* =========================
+ * (9) 统一拟合数据计算（Legend 与气泡共享）
+ * ========================= */
+function computeFitRows(mode, x, seriesList, selectionMap) {
+  const items = [];
+  ensureFitModels(seriesList, mode);
+  seriesList.forEach(s => {
+    const name = s.name || `${s.brand||''} ${s.model||''} - ${s.condition||''}`;
+    const selected = (selectionMap ? (selectionMap[name] !== false) : true);
+    const model = fitModelsCache[mode].get(name);
+    const crossModel = (s && s.pchip)
+      ? (mode === 'rpm' ? s.pchip?.rpm_to_noise_db : s.pchip?.noise_to_rpm)
+      : null;
+
+    let y = NaN, crossVal = NaN;
+    if (model && model.x0 != null && model.x1 != null) {
+      const dom0 = Math.min(model.x0, model.x1);
+      const dom1 = Math.max(model.x0, model.x1);
+      if (x >= dom0 && x <= dom1) y = evalPchipJS(model, x);
+    }
+    if (crossModel && crossModel.x0 != null && crossModel.x1 != null) {
+      const c0 = Math.min(crossModel.x0, crossModel.x1);
+      const c1 = Math.max(crossModel.x0, crossModel.x1);
+      if (x >= c0 && x <= c1) crossVal = evalPchipJS(crossModel, x);
+    }
+
+    items.push({
+      name,
+      color: s.color,
+      brand: s.brand || '',
+      model: s.model || '',
+      condition: s.condition || '',
+      selected,
+      y,
+      cross: crossVal
+    });
+  });
+  return items;
+}
+
+function measureLegendNameMax(sList, { t, integrated, isNarrow }) {
+  const ctx = document.createElement('canvas').getContext('2d');
+  const line1Font = integrated ? `800 13px ${t.fontFamily}` : `600 13px ${t.fontFamily}`;
+  const line2Font = `500 11px ${t.fontFamily}`;
+  let maxPx = 0;
+  sList.forEach(s => {
+    const brand = s.brand || s.brand_name_zh || s.brand_name || '';
+    const model = s.model || s.model_name || '';
+    const cond  = s.condition_name_zh || s.condition || '';
+    const line1 = (brand || model) ? `${brand} ${model}` : (s.name || '');
+    ctx.font = line1Font;
+    const w1 = ctx.measureText(line1).width || 0;
+    let w2 = 0;
+    if (cond) {
+      ctx.font = line2Font;
+      // 集成 + 窄屏模式：条件是内联“ - cond”形式；需要加上分隔符宽度
+      const condText = (integrated && isNarrow) ? ` - ${cond}` : cond;
+      w2 = ctx.measureText(condText).width || 0;
+    }
+    maxPx = Math.max(maxPx, w1, w2);
+  });
+  return maxPx || 0;
+}
+
+/* 新增：统一计算 Legend Rail 宽度 */
+function computeLegendRailWidth({ sList, integrated, fitOn, t, baseW }) {
+  if (!Array.isArray(sList) || !sList.length) {
+    return integrated ? 180 : 160;
+  }
+  const isNarrow = layoutIsNarrow();
+  const maxNamePx = measureLegendNameMax(sList, { t, integrated, isNarrow });
+
+  // 公共常量
+  const dotW = 12;
+  const gapDotName = 8;
+  const wrapperPadLeft = 4;   // legend-integrated-wrapper 左内边距（或行内 padding 左侧部分）
+  const wrapperPadRight = 8;  // legend-integrated-wrapper 右内边距
+  const rowPadX = 4 + 4;      // 行内左右 padding 总和
+  const safetyName = 10;      // 额外安全空间，避免最后字符裁切
+  const containerSafety = 6;  // 容器级余量
+
+  if (integrated) {
+    if (!fitOn) {
+      // 非拟合集成模式：名称列唯一需要动态宽
+      const structural = dotW + gapDotName + wrapperPadLeft + wrapperPadRight + rowPadX;
+      const MIN_NAME = 100;
+      const nameNeed = Math.max(MIN_NAME, maxNamePx + safetyName);
+      let applied = structural + nameNeed + containerSafety;
+      const maxW = 460;
+      if (applied > maxW) applied = maxW;
+      if (applied > baseW - 24) applied = Math.max(structural + MIN_NAME, baseW - 24);
+      return Math.round(applied);
+    } else {
+      // 拟合集成模式：固定值列宽度 + 名称列宽度
+      const ctx = document.createElement('canvas').getContext('2d');
+      ctx.font = `500 11px ${t.fontFamily}`;
+      const chW = ctx.measureText('0').width || 7;
+      const valPx   = 7 * chW;
+      const pctPx   = 7 * chW;
+      const crossPx = 8 * chW;
+      const sepW    = 8;
+
+      // 尝试读取真实列 gap（默认 4）
+      let colGap = 4;
+      try {
+        const testRow = __legendScrollEl?.querySelector('.legend-fit-grid.is-fit-on .legend-row');
+        if (testRow) {
+          const cs = getComputedStyle(testRow);
+          colGap = parseFloat(cs.columnGap || cs.gap || '4') || 4;
+        }
+      } catch(_) {}
+
+      // 列之间的 gap：名称列前有 dot/gap 两个固定元素，后面有 4 个数值区 + 分隔符 + gaps
+      const gapsTotal = colGap * 6;
+      const fixedCols = valPx + pctPx + sepW + crossPx;
+
+      const structural = dotW + gapDotName + wrapperPadLeft + wrapperPadRight + rowPadX + fixedCols + gapsTotal;
+      const MIN_NAME = 110;
+      const nameNeed = Math.max(MIN_NAME, maxNamePx + safetyName);
+      let applied = structural + nameNeed + containerSafety;
+      const maxW = 560;
+      const minRail = structural + MIN_NAME + containerSafety;
+      if (applied < minRail) applied = minRail;
+      if (applied > maxW) applied = maxW;
+      if (applied > baseW - 24) applied = Math.min(maxW, Math.max(minRail, baseW - 24));
+      return Math.round(applied);
+    }
+  } else {
+    // 桌面（非集成）模式
+    const iconW = 12;
+    const gap = 8;
+    const pad = 12;                // 原来的 pad
+    const safetyDesktop = 10;      // 防裁切余量
+    const need = iconW + gap + maxNamePx + safetyName + pad + safetyDesktop;
+    const minW = 160, maxW = 320;
+    let applied = Math.max(minW, Math.min(maxW, Math.ceil(need)));
+    if (applied > baseW - 24) applied = Math.max(minW, baseW - 24);
+    return applied;
+  }
+}
+
+// 新增：数据层 Epoch（每次 render 自增，用于异步回写竞态保护）
+let __dataEpoch = 0;
+
+// 新增：渲染期的 CanonicalSeries 缓存（仅内部使用，不改变外部 payload）
+let canonicalSeries = [];
+let __canonicalEpoch = -1;
+
+function getSeriesArray() {
+  return Array.isArray(canonicalSeries) ? canonicalSeries : [];
+}
+
+/* ==== DerivedSnapshot 缓存 ==== */
+let snapshotCache = {
+  epoch: -1,
+  rpm: null,        // { series:[], xMin,xMax,yMax }
+  noise_db: null
+};
+function buildDerivedSnapshots(seriesCanonical){
+  // 仅在 epoch 变化或未建立时重建
+  if (__dataEpoch === snapshotCache.epoch) return;
+  snapshotCache.epoch = __dataEpoch;
+  snapshotCache.rpm = buildSeries(seriesCanonical, 'rpm');
+  snapshotCache.noise_db = buildSeries(seriesCanonical, 'noise_db');
+}
+function getSnapshotForMode(mode){
+  const m = (mode === 'noise' ? 'noise_db' : mode);
+  return snapshotCache[m] || null;
+}
+
+/* === 新增：SpectrumController 单例（集中管理频谱 UI/构建/状态） === */
+const SpectrumController = (() => {
+  // 外部可查询：当前 pending 的 key（model_id_condition_id）
+  let _pendingKeys = new Set();
+  let _missingKeys = new Set();
+
+  function setEnabled(enabled, opts = {}) {
+    // 与外置 Dock 交互保持一致：切换频谱展开/收起 + 同步按钮文案
+    const want = !!enabled;
+    if (want === spectrumEnabled) {
+      // 已是目标状态：做一次状态同步和必要的重建
+      try { syncSpectrumStateAcrossModes({ animate: !!opts.animate }); } catch(_) {}
+      try { if (want) requestAndRenderSpectrum(true); } catch(_) {}
+      try { syncSpectrumDockUi(); placeSpectrumDock(); } catch(_) {}
+      return spectrumEnabled;
+    }
+
+    spectrumEnabled = want;
+    try { syncSpectrumDockUi(); placeSpectrumDock(); } catch(_) {}
+
+    // 统一入口：仍复用现有的 toggleSpectrumUI（负责动画/高度/加载/渲染）
+    try { toggleSpectrumUI(spectrumEnabled); } catch(_) {}
+    return spectrumEnabled;
+  }
+
+  function onFullscreenChange(isFsNow) {
+    // 全屏状态切换后，频谱容器的高度/tooltip 附着策略需要立即刷新
+    try { syncSpectrumStateAcrossModes({ animate: false }); } catch(_) {}
+    try { if (spectrumEnabled) buildAndSetSpectrumOption(true); } catch(_) {}
+    try { syncSpectrumDockUi(); placeSpectrumDock(); } catch(_) {}
+  }
+
+  function onXQueryChange(_x) {
+    // 拟合指针或 X 输入发生变化 → 若频谱开启，触发一次重建（rAF 合并）
+    try {
+      if (spectrumEnabled && spectrumChart) {
+        // 复用现有的调度函数
+        scheduleSpectrumRebuild();
+      }
+    } catch(_) {}
+  }
+
+  function getPendingKeys() {
+    return Array.from(_pendingKeys);
+  }
+
+  function isEnabled() {
+    return !!spectrumEnabled;
+  }
+
+  // 内部钩子：由请求阶段回写 pending/missing，便于上层查看
+  function __setPendingKeys(keys) {
+    _pendingKeys = new Set(Array.isArray(keys) ? keys : (keys ? Array.from(keys) : []));
+  }
+  function __setMissingKeys(keys) {
+    _missingKeys = new Set(Array.isArray(keys) ? keys : (keys ? Array.from(keys) : []));
+  }
+
+  return {
+    setEnabled,
+    onFullscreenChange,
+    onXQueryChange,
+    getPendingKeys,
+    isEnabled,
+    __setPendingKeys,
+    __setMissingKeys
+  };
+})();
+
+// 新：单一 FitPanel 刷新（替代原 refreshFitBubble）
+function refreshFitPanel() {
+  const integrated = isIntegratedLegendMode();
+  const sList = getSeriesArray();
+  if (!showFitCurves || !lastPayload || !chart || (lastOption && lastOption.__empty)) {
+    // 关闭拟合：隐藏浮动气泡；集成模式撤掉 is-fit-on 标记与数值
+    if (integrated) {
+      const gridWrap = __legendScrollEl?.querySelector('.legend-fit-grid');
+      if (gridWrap) {
+        gridWrap.classList.remove('is-fit-on');
+        gridWrap.querySelectorAll('.col-val,.col-pct,.col-cross').forEach(el => { el.textContent = '—'; });
+      }
+    } else {
+      const bubble = getById('fitBubble');
+      if (bubble) bubble.style.visibility = 'hidden';
+    }
+    return;
+  }
+
+  const mode = currentXModeFromPayload(lastPayload);
+  const x = xQueryByMode[mode];
+  if (x == null) return;
+
+  const opt = chart.getOption() || {};
+  const selMap = (opt.legend && opt.legend[0] && opt.legend[0].selected) || {};
+  const items = computeFitRows(mode, x, sList, selMap);
+
+  // onToggleSeries（保持原图表与频谱联动）
+  const onToggleSeries = (name, shouldShow) => {
+    const actionType = shouldShow ? 'legendSelect' : 'legendUnSelect';
+    try { chart.dispatchAction({ type: actionType, name }); } catch(_){}
+    if (spectrumEnabled && spectrumChart) {
+      try { spectrumChart.dispatchAction({ type: actionType, name }); } catch(_){}
+    }
+    try { syncLegendRailFromChart(); } catch(_){}
+  };
+
+  const unit = (mode === 'rpm') ? 'RPM' : 'dB';
+  renderFitPanel({
+    mode: integrated ? 'integrated' : 'floating',
+    rows: items,
+    xValue: x,
+    unit,
+    onToggleSeries
+  });
+}
+
+// 新：单一 FitPanel 渲染器
+function renderFitPanel({ mode, rows, xValue, unit, onToggleSeries }) {
+  if (mode === 'integrated') {
+    if (!__legendScrollEl) return;
+
+    // 列宽变量
+    __legendScrollEl.style.setProperty('--fit-col-val-ch',   '7');
+    __legendScrollEl.style.setProperty('--fit-col-pct-ch',   '7');
+    __legendScrollEl.style.setProperty('--fit-col-cross-ch', '8');
+
+    // 计算排序与基准
+    const visible = rows.filter(r => r.selected);
+    const withVal = visible.filter(r => Number.isFinite(r.y)).sort((a,b)=> b.y - a.y);
+    const base = (withVal.length && withVal[0].y > 0) ? withVal[0].y : 0;
+    const pctVal = (v)=> (Number.isFinite(v) && base > 0) ? Math.round((v / base) * 100) : null;
+
+    const grid = __legendScrollEl.querySelector('.legend-fit-grid');
+    if (!grid) return;
+
+    const ordered = [
+      ...rows.filter(r => Number.isFinite(r.y)).sort((a,b)=> b.y - a.y),
+      ...rows.filter(r => !Number.isFinite(r.y))
+    ];
+
+    grid.innerHTML = ordered.map(it => {
+      const baseName = (it.brand || it.model) ? `${it.brand} ${it.model}`.trim() : it.name;
+      const hasY = Number.isFinite(it.y);
+      const vText = hasY ? `${Math.round(it.y)} CFM` : '—';
+      const pct = hasY ? pctVal(it.y) : null;
+      const pctText = (pct==null) ? '—' : `(${pct}%)`;
+      let crossText = '—';
+      if (Number.isFinite(it.cross)) {
+        crossText = (unit === 'dB') ? `${String(Math.round(it.cross)).padStart(4,'0')} RPM` : `${Number(it.cross).toFixed(1)} dB`;
+      }
+
+      // 仅在“全屏 + 集成 + 拟合开启”下换行显示工况（与非拟合时风格一致）
+      const wrapL2 = isFs && showFitCurves && !!it.condition;
+      const nameClass = wrapL2 ? 'name has-l2' : 'name';
+
+      return `
+        <div class="legend-row hoverable-row ${it.selected ? '' : 'is-off'}" data-name="${it.name}">
+          <span class="dot" style="background:${it.color}"></span>
+          <span class="${nameClass}" title="${baseName}${it.condition ? ' / ' + it.condition : ''}">
+            <span class="l1">${baseName}</span>${it.condition ? `<span class="l2">${it.condition}</span>` : ``}
+          </span>
+          <span class="col-val">${vText}</span>
+          <span class="col-pct">${pctText}</span>
+          <span class="col-sep">│</span>
+          <span class="col-cross">${crossText}</span>
+        </div>
+      `;
+    }).join('');
+
+    // 行交互：点击切换、悬浮高亮
+    grid.querySelectorAll('.legend-row[data-name]').forEach(node => {
+      const name = node.getAttribute('data-name') || '';
+      node.addEventListener('click', () => {
+        if (!name || !chart) return;
+        const sel = getLegendSelectionMap();
+        const visibleNow = sel ? (sel[name] !== false) : true;
+        node.classList.toggle('is-off', visibleNow);
+        onToggleSeries(name, !visibleNow);
+        refreshFitPanel(); // 同步数值
+      });
+      node.addEventListener('mouseenter', () => {
+        if (!name) return;
+        try { chart.dispatchAction({ type: 'highlight', seriesName: name }); } catch(_){}
+        if (spectrumEnabled && spectrumChart) { try { spectrumChart.dispatchAction({ type: 'highlight', seriesName: name }); } catch(_){}} 
+      }, { passive:true });
+      node.addEventListener('mouseleave', () => {
+        if (!name) return;
+        try { chart.dispatchAction({ type: 'downplay', seriesName: name }); } catch(_){}
+        if (spectrumEnabled && spectrumChart) { try { spectrumChart.dispatchAction({ type: 'downplay', seriesName: name }); } catch(_){}} 
+      }, { passive:true });
+    });
+
+    // 标题与 X 输入
+    const unitSpan = getById('fitXUnitLegend');
+    if (unitSpan) unitSpan.textContent = unit;
+    const inp = getById('fitXInputLegend');
+    if (inp) {
+      const modeKey = currentXModeFromPayload(lastPayload);
+      const val = Number(xQueryByMode[modeKey] ?? xValue);
+      const rounded = (modeKey === 'noise_db') ? Number(val.toFixed(1)) : Math.round(val);
+      inp.value = String(rounded);
+      const [vx0, vx1] = getVisibleXRange();
+      inp.setAttribute('min', String(Math.floor(vx0)));
+      inp.setAttribute('max', String(Math.ceil(vx1)));
+      inp.setAttribute('step', (modeKey === 'noise_db') ? '0.1' : '1');
+
+      // 统一与原行为一致
+      inp.oninput = () => {
+        const raw = Number(inp.value);
+        if (!Number.isFinite(raw)) return;
+        xQueryByMode[modeKey] = clampXDomain(raw);
+        clampXQueryIntoVisibleRange();
+        repaintPointer();
+        refreshFitPanel();
+        SpectrumController.onXQueryChange(xQueryByMode[modeKey]);
+      };
+      inp.onchange = () => {
+        repaintPointer();
+        refreshFitPanel();
+        SpectrumController.onXQueryChange(xQueryByMode[currentXModeFromPayload(lastPayload)]);
+      };
+    }
+
+    const gridWrap = __legendScrollEl.querySelector('.legend-fit-grid');
+    if (gridWrap) gridWrap.classList.add('is-fit-on');
+    return;
+  }
+
+  // 浮动气泡
+  const bubble = getById('fitBubble');
+  if (!bubble) return;
+
+  const rowsEl = bubble.querySelector('#fitBubbleRows');
+  bubble.style.setProperty('--fit-col-val-ch', '7');
+  bubble.style.setProperty('--fit-col-pct-ch', '7');
+  bubble.style.setProperty('--fit-col-cross-ch', '8');
+
+  const visible = rows.filter(r => r.selected);
+  const withVal = visible.filter(r => Number.isFinite(r.y)).sort((a,b)=> b.y - a.y);
+  const base = (withVal.length && withVal[0].y > 0) ? withVal[0].y : 0;
+  const pctVal = (v)=> (Number.isFinite(v) && base > 0) ? Math.round((v / base) * 100) : null;
+
+  const ordered = [
+    ...rows.filter(r => Number.isFinite(r.y)).sort((a,b)=> b.y - a.y),
+    ...rows.filter(r => !Number.isFinite(r.y))
+  ];
+
+  rowsEl.innerHTML = ordered.map(it => {
+    const hasY = Number.isFinite(it.y);
+    const valText = hasY ? `${Math.round(it.y)} CFM` : '—';
+    const pct = hasY ? pctVal(it.y) : null;
+    const pctText = (pct==null) ? '—' : `(${pct}%)`;
+    let crossText = '—';
+    if (Number.isFinite(it.cross)) {
+      crossText = (unit === 'dB')
+        ? `${String(Math.round(it.cross)).padStart(4,'0')} RPM`
+        : `${Number(it.cross).toFixed(1)} dB`;
+    }
+    const baseName = (it.brand || it.model) ? `${it.brand} ${it.model}`.trim() : it.name;
+    const condInline = it.condition
+      ? `<span class="sep"> - </span><span class="cond-inline" style="color:var(--text-);white-space:nowrap;">${it.condition}</span>`
+      : '';
+
+    return `
+      <div class="row ${it.selected ? '' : 'is-off'}" data-name="${it.name}">
+        <span class="dot" style="background:${it.color}"></span>
+        <span></span>
+        <span class="col-name">${baseName}${condInline}</span>
+        <span class="col-val">${valText}</span>
+        <span class="col-pct">${pctText}</span>
+        <span class="col-sep">│</span>
+        <span class="col-cross">${crossText}</span>
+      </div>
+    `;
+  }).join('');
+
+  rowsEl.querySelectorAll('.row[data-name]').forEach(node => {
+    const name = node.getAttribute('data-name') || '';
+    node.addEventListener('pointerdown', (e) => { e.stopPropagation(); }, { passive:true });
+    node.addEventListener('mouseenter', () => {
+      if (!name) return;
+      try { chart.dispatchAction({ type: 'highlight', seriesName: name }); } catch(_){}
+      if (spectrumEnabled && spectrumChart) {
+        try { spectrumChart.dispatchAction({ type: 'highlight', seriesName: name }); } catch(_){}
+      }
+    }, { passive:true });
+    node.addEventListener('mouseleave', () => {
+      if (!name) return;
+      try { chart.dispatchAction({ type: 'downplay', seriesName: name }); } catch(_){}
+      if (spectrumEnabled && spectrumChart) {
+        try { spectrumChart.dispatchAction({ type: 'downplay', seriesName: name }); } catch(_){}
+      }
+    }, { passive:true });
+    node.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!name) return;
+      const sel = getLegendSelectionMap();
+      const visibleNow = sel ? (sel[name] !== false) : true;
+      onToggleSeries(name, !visibleNow);
+      refreshFitPanel();
+    });
+  });
+
+  const unitSpan = bubble.querySelector('#fitXUnit');
+  if (unitSpan) unitSpan.textContent = unit;
+
+  const inp = bubble.querySelector('#fitXInput');
+  if (inp) {
+    const modeKey = currentXModeFromPayload(lastPayload);
+    const val = Number(xQueryByMode[modeKey] ?? xValue);
+    const rounded = (modeKey === 'noise_db') ? Number(val.toFixed(1)) : Math.round(val);
+    inp.value = String(rounded);
+
+    const [vx0, vx1] = getVisibleXRange();
+    inp.setAttribute('min', String(Math.floor(vx0)));
+    inp.setAttribute('max', String(Math.ceil(vx1)));
+    inp.setAttribute('step', (modeKey === 'noise_db') ? '0.1' : '1');
+  }
+
+  // 保持可见性由 toggleFitUI 控制
+}
+
+// 可选：暴露到全局，便于调试或其他模块监听
+try { window.SpectrumController = SpectrumController; } catch (_) {}
+
 
   // 挂到全局
   window.ChartRenderer = API;
+
 })();
