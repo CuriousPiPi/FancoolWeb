@@ -1232,7 +1232,6 @@ def build_model_from_calib_with_sweep_in_memory(root_dir: str,
     # 分箱（保持原逻辑）
     t1 = time.perf_counter()
     def do_binning(rpm_bin_val: float, R_track: np.ndarray, stable_mask_use: np.ndarray):
-        rpm_min_local = float(np.nanmin(R_track)); rpm_max_local = float(np.nanmax(R_track))
         edges = np.arange(rpm_min, rpm_max + rpm_bin_val, rpm_bin_val, dtype=float)
         if edges.size < 2:
             edges = np.array([rpm_min, rpm_max], float)
