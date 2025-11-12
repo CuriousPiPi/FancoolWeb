@@ -2697,10 +2697,6 @@ function injectUploadZipButton(){
         };
         let emptyRows = [...perfTable.querySelectorAll('tr')].filter(isRowEmpty);
 
-        const have = new Set([...perfTable.querySelectorAll('.perf-rpm')]
-          .map(inp=> parseInt((inp.value||'').trim(),10))
-          .filter(v=>!isNaN(v)&&v>0));
-
         for(const it of items){
           const rpm = parseInt(it.rpm,10); if(!rpm) continue;
           const ndb = (it.noise_db!=null)? String(it.noise_db) : '';
