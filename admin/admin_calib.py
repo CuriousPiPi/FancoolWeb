@@ -7,7 +7,6 @@ import shutil
 import zipfile
 import hashlib
 import tempfile
-import subprocess
 import sys
 from typing import Dict, Any, List, Tuple
 from datetime import datetime
