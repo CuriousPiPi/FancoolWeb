@@ -1559,4 +1559,4 @@ def api_spectrum_models():
 # =========================================
 if __name__ == '__main__':
     app.logger.setLevel(logging.INFO)
-    app.run(host='0.0.0.0', port=5001, debug=True, use_reloader=False)
+    app.run(host='0.0.0.0', port=5001, debug=False, use_reloader=False)

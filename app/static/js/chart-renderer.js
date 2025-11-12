@@ -1791,27 +1791,30 @@ function ensureFitModels(sList, xMode){
   });
 }
 
+const __pchipModelCache = new WeakMap();
+function __getPchipCache(model) {
+  let cache = __pchipModelCache.get(model);
+  if (!cache) {
+    cache = new Map();
+    __pchipModelCache.set(model, cache);
+  }
+  return cache;
+}
+
 function evalPchipJS(model, x){
   if (!model || !Array.isArray(model.x) || !Array.isArray(model.y) || !Array.isArray(model.m)) return NaN;
-  // 初始化模型级缓存
-  if (!model.__cache){
-    Object.defineProperty(model, '__cache', {
-      value: new Map(),
-      enumerable: false,
-      configurable: false,
-      writable: false
-    });
-  }
+
+  // 基于 x 的三位小数离散化做缓存键
   const rounded = Math.round(x * 1000) / 1000;
-  const key = rounded;
-  if (model.__cache.has(key)) return model.__cache.get(key);
+  const cache = __getPchipCache(model);
+  if (cache.has(rounded)) return cache.get(rounded);
 
   const xs = model.x, ys = model.y, ms = model.m;
   const n = xs.length;
   if (n === 0) return NaN;
   if (n === 1){
     const v0 = ys[0];
-    model.__cache.set(key, v0);
+    cache.set(rounded, v0);
     return v0;
   }
 
@@ -1819,6 +1822,7 @@ function evalPchipJS(model, x){
   if (xv <= xs[0]) xv = xs[0];
   if (xv >= xs[n - 1]) xv = xs[n - 1];
 
+  // 二分查找区间 i 使得 xs[i] <= xv <= xs[i+1]
   let lo = 0, hi = n - 2, i = 0;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
@@ -1833,18 +1837,20 @@ function evalPchipJS(model, x){
   const y0 = ys[i], y1 = ys[i + 1];
   const m0 = ms[i] * h, m1 = ms[i + 1] * h;
 
+  // Hermite 基函数
   const h00 = (2 * t*t*t - 3 * t*t + 1);
   const h10 = (t*t*t - 2 * t*t + t);
   const h01 = (-2 * t*t*t + 3 * t*t);
   const h11 = (t*t*t - t*t);
+
   const val = h00 * y0 + h10 * m0 + h01 * y1 + h11 * m1;
 
-  // 写入缓存（LRU 简易：超限随机删除首项）
-  if (model.__cache.size >= 256){
-    const it = model.__cache.keys().next();
-    if (it && !it.done) model.__cache.delete(it.value);
+  // 简易 LRU：超限随机删除首项
+  if (cache.size >= 256){
+    const it = cache.keys().next();
+    if (it && !it.done) cache.delete(it.value);
   }
-  model.__cache.set(key, val);
+  cache.set(rounded, val);
   return val;
 }
 
