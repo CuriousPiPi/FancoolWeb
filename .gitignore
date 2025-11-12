@@ -12,3 +12,4 @@ app/curves/__pycache__/spectrum_cache.cpython-312.pyc
 admin/__pycache__/admin_calib.cpython-312.pyc
 admin/__pycache__/admin_calib.cpython-312.pyc
 admin/__pycache__/admin_calib.cpython-312.pyc
+app/audio_calib/__pycache__/pipeline.cpython-312.pyc
