@@ -213,7 +213,6 @@ def synthesize_stationary_audio_from_model(model: Dict[str, Any],
             Es_total_A[i] = (P0**2) * (10.0 ** (float(v) / 10.0))
 
     # 2) 如需将谐波做成“线谱”，则把谐波能量分配到频带，随后从噪声目标中扣除
-    E_harm_A_band = np.zeros_like(Es_total_A)
     harmonic_lines: List[Tuple[float, float]] = []
     if tones:
         E_harm_A_band, harmonic_lines = _distribute_harmonics_energy_A(model, rpm, centers, npo)
