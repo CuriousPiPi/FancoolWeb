@@ -935,7 +935,6 @@ function measureText(text, size, weight, family){
 
   const X_PLACEHOLDER_NEG = -1;
   const X_MIN_CLAMP = 0;
-  function isFiniteNumber(v){ const n = Number(v); return Number.isFinite(n); }
 
 function buildSeries(rawSeries, xMode) {
   let maxAir = 0;
