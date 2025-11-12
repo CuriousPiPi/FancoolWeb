@@ -8,7 +8,7 @@
 .fc-right-card {
   display: flex;
   flex-direction: column;
-  height: 600px;
+  height: clamp(480px, 62vh, 600px);
   min-height: 0;
   min-width: 0;
 

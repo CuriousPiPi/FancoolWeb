@@ -524,14 +524,48 @@ window.applySidebarColors = function() {
 function isValidNum(v) {
   return typeof v === 'number' && Number.isFinite(v);
 }
+function filterChartDataForAxis(chartData) {
+  const axis = chartData.x_axis_type === 'noise' ? 'noise_db' : chartData.x_axis_type;
+  const cleaned = { ...chartData, series: [] };
+  chartData.series.forEach((s) => {
+    const rpmArr   = Array.isArray(s.rpm) ? s.rpm : [];
+    const noiseArr = Array.isArray(s.noise_db) ? s.noise_db : [];
+    const flowArr  = Array.isArray(s.airflow) ? s.airflow : [];
+    const xArr = axis === 'noise_db' ? noiseArr : rpmArr;
+    const rpmNew = [];
+    const noiseNew = [];
+    const flowNew = [];
+    for (let i = 0; i < xArr.length; i++) {
+      const x = xArr[i];
+      const y = flowArr[i];
+      if (isValidNum(x) && isValidNum(y)) {
+        rpmNew.push(isValidNum(rpmArr[i]) ? rpmArr[i] : null);
+        noiseNew.push(isValidNum(noiseArr[i]) ? noiseArr[i] : null);
+        flowNew.push(y);
+      }
+    }
+    const hasAxisPoints = axis === 'noise_db'
+      ? noiseNew.some(isValidNum)
+      : rpmNew.some(isValidNum);
+    if (flowNew.length > 0 && hasAxisPoints) {
+      cleaned.series.push({
+        ...s,
+        rpm: rpmNew,
+        noise_db: noiseNew,
+        airflow: flowNew
+      });
+    }
+  });
+  return cleaned;
+}
 
 function postChartData(chartData){
   lastChartData = chartData;
 
-  // 保留后端原始 data.* 三数组，不做轴向裁剪
   const prepared = withFrontColors(chartData);
+  const filtered = filterChartDataForAxis(prepared);
   const payload = {
-    chartData: prepared,         // 直接传 canonical
+    chartData: filtered,
     theme: currentThemeStr(),
     chartBg: getChartBg()
   };
@@ -539,6 +573,7 @@ function postChartData(chartData){
     payload.shareMeta = pendingShareMeta;
     pendingShareMeta = null;
   }
+
   if (window.ChartRenderer && typeof ChartRenderer.render === 'function') {
     ChartRenderer.render(payload);
   }
@@ -566,7 +601,6 @@ function needFullLikeKeyFetch() {
   }
   return false;
 }
-
 function fetchAllLikeKeys(){
   if (fetchAllLikeKeys._pending) return;
   fetchAllLikeKeys._pending = true;
@@ -592,56 +626,43 @@ function fetchAllLikeKeys(){
     .catch(()=>{})
     .finally(()=>{ fetchAllLikeKeys._pending = false; });
 }
-
+// 修改处：最近点赞列表，工况后追加风阻信息
 function rebuildRecentLikes(list){
   const wrap = recentLikesListEl;
   if (!wrap) return;
   wrap.innerHTML = '';
-
-  if (!Array.isArray(list) || list.length === 0){
+  if (!list || list.length===0){
     wrap.innerHTML = '<p class="text-gray-500 text-center py-6">暂无最近点赞</p>';
     requestAnimationFrame(prepareRecentLikesMarquee);
     return;
   }
-
-  // 分组：按 品牌+型号 聚合，同组里的不同工况作为 scenarios
   const groups = new Map();
-  list.forEach(it => {
-    const brand = it.brand_name_zh || it.brand || '';
-    const model = it.model_name || it.model || '';
-    const key = `${brand}||${model}`;
-
-    if (!groups.has(key)) {
-      groups.set(key, {
-        brand,
-        model,
-        // 兼容若干后端字段命名
-        maxSpeed: it.max_speed || it.max_rpm || it.rpm_max || '',
-        size: it.size || it.frame_size || it.diameter || '',
-        thickness: it.thickness || it.frame_thickness || '',
-        scenarios: []
-      });
-    }
+  list.forEach(item=>{
+    const brand = item.brand_name_zh || item.brand;
+    const model = item.model_name || item.model;
+    const size = item.size ?? item.model_size ?? '';
+    const thickness = item.thickness ?? item.model_thickness ?? '';
+    const maxSpeed = item.max_speed ?? item.maxSpeed ?? '';
+    const condition = item.condition_name_zh || item.condition || '';
+    const rt = item.resistance_type_zh || item.rt || '';
+    const rl = item.resistance_location_zh || item.rl || '';
+    const mid = item.model_id ?? item.modelId ?? item.mid ?? '';
+    const cid = item.condition_id ?? item.conditionId ?? item.cid ?? '';
+    if (!brand || !model || !condition) return;
+    const key = `${brand}||${model}||${size}||${thickness}||${maxSpeed}`;
+    if (!groups.has(key)) groups.set(key, { brand, model, size, thickness, maxSpeed, scenarios:[] });
     const g = groups.get(key);
-    g.scenarios.push({
-      mid: it.model_id,
-      cid: it.condition_id,
-      condition: it.condition_name_zh || it.condition || '',
-      // 供 formatScenario 使用的原始字段
-      rt: it.resistance_type_zh || it.rt || '',
-      rl: it.resistance_location_zh || it.rl || ''
-    });
+    if (!g.scenarios.some(s=>s.condition===condition && s.rt===rt && s.rl===rl)) {
+      g.scenarios.push({ condition, rt, rl, mid, cid });
+    }
   });
 
-  // 渲染
-  const frag = document.createDocumentFragment();
-  groups.forEach(g => {
+  groups.forEach(g=>{
     const metaParts = [];
     if (g.maxSpeed) metaParts.push(`${escapeHtml(g.maxSpeed)} RPM`);
     if (g.size && g.thickness) metaParts.push(`${escapeHtml(g.size)}x${escapeHtml(g.thickness)}`);
     const metaRight = metaParts.join(' · ');
-
-    const scenariosHtml = g.scenarios.map(s => {
+    const scenariosHtml = g.scenarios.map(s=>{
       const extra = (typeof formatScenario === 'function') ? formatScenario(s.rt, s.rl) : '';
       const label = extra ? `${s.condition} - ${extra}` : s.condition;
       const scenText = escapeHtml(label);
@@ -649,7 +670,7 @@ function rebuildRecentLikes(list){
         <div class="flex items-center justify-between scenario-row">
           <div class="scenario-text text-sm text-gray-700">${scenText}</div>
           <div class="actions">
-            <button type="button" class="like-button recent-like-button"
+            <button class="like-button recent-like-button"
                     data-tooltip="取消点赞"
                     data-model-id="${escapeHtml(s.mid||'')}"
                     data-condition-id="${escapeHtml(s.cid||'')}">
@@ -659,9 +680,8 @@ function rebuildRecentLikes(list){
           </div>
         </div>`;
     }).join('');
-
     const groupDiv = document.createElement('div');
-    groupDiv.className = 'recent-like-group p-3 border border-gray-200 rounded-md';
+    groupDiv.className='recent-like-group p-3 border border-gray-200 rounded-md';
     groupDiv.innerHTML = `
       <div class="fc-group-header">
         <div class="fc-title-wrap flex items-center min-w-0">
@@ -670,17 +690,12 @@ function rebuildRecentLikes(list){
         <div class="fc-meta-right text-sm text-gray-600">${metaRight}</div>
       </div>
       <div class="group-scenarios mt-2 space-y-1">${scenariosHtml}</div>`;
-    frag.appendChild(groupDiv);
+    wrap.appendChild(groupDiv);
   });
 
-  wrap.appendChild(frag);
   syncQuickActionButtons();
-  requestAnimationFrame(() => {
-    applyRecentLikesTitleMask();
-    prepareRecentLikesMarquee();
-  });
+  requestAnimationFrame(prepareRecentLikesMarquee);
 }
-
 async function ensureLikeStatusBatch(pairs){
   if (!Array.isArray(pairs) || !pairs.length) return;
   if (needFullLikeKeyFetch()) {
@@ -924,9 +939,9 @@ function setTheme(t) {
         // 动画结束后清理临时变量，并清空渐变，确保下次进入 dark 一定会生成新渐变
         setTimeout(() => {
           if (myId !== THEME_OP_ID) return; // 防止竞态
-            root.style.removeProperty('--grad-opacity');
-            root.style.removeProperty('--bg-primary');
-            root.style.removeProperty('--dark-rand-gradient'); // 关键：清掉以便下次重新生成
+          root.style.removeProperty('--grad-opacity');
+          root.style.removeProperty('--bg-primary');
+          root.style.removeProperty('--dark-rand-gradient'); // 关键：清掉以便下次重新生成
         }, 520); // 略大于 .5s 过渡
       });
     });
@@ -935,9 +950,9 @@ function setTheme(t) {
   // 同步图标
   if (themeIcon) themeIcon.className = t === 'dark' ? 'fa-solid fa-sun' : 'fa-solid fa-moon';
 
-  // 统一保存（仅本地，不再通知服务端）
+  // 统一保存 + 上报（本地 + 后端）
   if (window.ThemePref && typeof window.ThemePref.save === 'function') {
-    window.ThemePref.save(t, { notifyServer: false });
+    window.ThemePref.save(t, { notifyServer: true });
   }
 
   // 等两帧再刷新图表/布局（保留原逻辑）
@@ -1006,7 +1021,7 @@ function rebuildSelectedIndex(){
 rebuildSelectedIndex();
 rebuildSelectedPairIndex();
 
-// 替换 buildQuickBtnHTML：统一为 type="button"
+// CHANGED: 快捷按钮 HTML 生成，始终输出“加号”图标，旋转由 CSS 决定
 function buildQuickBtnHTML(addType, brand, model, modelId, conditionId, condition, logSource){
   const mapKey = `${escapeHtml(brand)}||${escapeHtml(model)}||${escapeHtml(condition||'')}`;
   const hasIds = (modelId != null && conditionId != null && String(modelId) !== '' && String(conditionId) !== '');
@@ -1016,6 +1031,7 @@ function buildQuickBtnHTML(addType, brand, model, modelId, conditionId, conditio
 
   const mode = isDup ? 'remove' : 'add';
   const tipText = isDup ? '从图表移除' : '添加到图表';
+  // 始终用加号，视觉“X”通过旋转得到（见 CSS）
   const icon = '<i class="fa-solid fa-plus"></i>';
   const defaultSourceMap = { likes:'liked', rating:'top_rating', ranking:'top_query', search:'search' };
   const sourceAttr = logSource || defaultSourceMap[addType] || 'unknown';
@@ -1028,7 +1044,7 @@ function buildQuickBtnHTML(addType, brand, model, modelId, conditionId, conditio
   else cls='js-likes-add';
 
   return `
-    <button type="button" class="fc-btn-icon-add ${cls} fc-tooltip-target"
+    <button class="fc-btn-icon-add ${cls} fc-tooltip-target"
             data-tooltip="${tipText}"
             data-mode="${mode}"
             data-add-type="${addType}"
@@ -1114,7 +1130,7 @@ const selectedCountEl = $('#selectedCount');
 const clearAllContainer = $('#clearAllContainer');
 const clearAllBtn = $('#clearAllBtn');
 
-// 替换 rebuildSelectedFans：两个按钮都加 type="button"
+// CHANGED: 已选列表仅显示 condition，并以 brand||model||condition 建键
 function rebuildSelectedFans(fans){
   if (!Array.isArray(fans)) fans = LocalState.getSelected();
   selectedListEl.innerHTML='';
@@ -1150,10 +1166,10 @@ function rebuildSelectedFans(fans){
         </div>
       </div>
       <div class="flex items-center flex-shrink-0">
-        <button type="button" class="like-button mr-3" data-fan-key="${f.key}" data-model-id="${f.model_id}" data-condition-id="${f.condition_id}">
+        <button class="like-button mr-3" data-fan-key="${f.key}" data-model-id="${f.model_id}" data-condition-id="${f.condition_id}">
           <i class="fa-solid fa-thumbs-up ${isLiked?'text-red-500':'text-gray-400'}"></i>
         </button>
-        <button type="button" class="fc-icon-remove text-lg js-remove-fan" data-fan-key="${f.key}" data-tooltip="移除">
+        <button class="fc-icon-remove text-lg js-remove-fan" data-fan-key="${f.key}" data-tooltip="移除">
           <i class="fa-solid fa-xmark"></i>
         </button>
       </div>`;
@@ -1486,21 +1502,19 @@ if (quickRemove){
     return;
   }
 
-  // 替换清空确认的按钮模板：加 type="button"
   if (e.target.id === 'clearAllBtn'){
     const state = e.target.getAttribute('data-state') || 'normal';
     if (state === 'normal'){
       clearAllBtn.setAttribute('data-state','confirming');
       clearAllBtn.innerHTML = `
         <div class="fc-clear-confirm">
-          <button type="button" id="confirmClearAll" class="bg-red-600 text-white hover:bg-red-700">确认</button>
-          <button type="button" id="cancelClearAll" class="bg-gray-400 text-white hover:bg-gray-500">取消</button>
+          <button id="confirmClearAll" class="bg-red-600 text-white hover:bg-red-700">确认</button>
+          <button id="cancelClearAll" class="bg-gray-400 text-white hover:bg-gray-500">取消</button>
         </div>`;
       scheduleAdjust();
     }
     return;
   }
-
   if (e.target.id === 'cancelClearAll'){
     clearAllBtn.setAttribute('data-state','normal');
     clearAllBtn.textContent='移除所有';
@@ -1648,22 +1662,23 @@ function scheduleAdjust(){
    ========================================================= */
 (function mountChartRendererEarly(){
   function doMount(){
-    const el = document.getElementById('chartRoot');
+    const el = document.getElementById('chartHost');
     if (el && window.ChartRenderer && typeof ChartRenderer.mount === 'function') {
       ChartRenderer.mount(el);
 
+      // NEW: 监听 X 轴切换，写回 LocalState，并按新轴刷新曲线
       if (typeof ChartRenderer.setOnXAxisChange === 'function') {
         ChartRenderer.setOnXAxisChange((next) => {
+          // 规范化
           const nx = (next === 'noise') ? 'noise_db' : next;
           try { localStorage.setItem('x_axis_type', nx); } catch(_) {}
           frontXAxisType = nx;
+          // 同步给应用状态（影响 /api/curves 的 x_axis_type）
           if (typeof LocalState?.setXAxisType === 'function') {
             try { LocalState.setXAxisType(nx); } catch(_) {}
           }
-          // 不重新请求，只重新渲染（使用旧的 canonicalSeries）
-          if (lastChartData) {
-            postChartData(lastChartData);  // 因为我们不再过滤，这相当于立即切轴
-          }
+          // 重新取数并渲染（避免沿用旧轴裁剪过的数据）
+          refreshChartFromLocal(false);
         });
       }
     }
@@ -2324,16 +2339,4 @@ function generateDarkGradient() {
   // 留下一个可供导出/其它用途的基色（可选，不参与底色）
   const baseIsFirst = l1 <= l2;
   root.style.setProperty('--dark-rand-base', baseIsFirst ? stop1 : stop2);
-}
-
-// ADD: 页面级滚动保护工具（兼容任意滚动容器）
-function __preservePageScrollDuring(fn){
-  const se = document.scrollingElement || document.documentElement || document.body;
-  const sx = (typeof se.scrollLeft === 'number') ? se.scrollLeft : window.scrollX || 0;
-  const sy = (typeof se.scrollTop  === 'number') ? se.scrollTop  : window.scrollY || 0;
-  try { fn(); } catch(_) {}
-  requestAnimationFrame(() => {
-    try { se.scrollLeft = sx; se.scrollTop = sy; } catch(_){}
-    try { window.scrollTo(sx, sy); } catch(_){}
-  });
 }

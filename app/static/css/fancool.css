@@ -1,6 +1,7 @@
 /* 1. 基础与变量 */
 html { font-size:16px; }
 html, body { height:100%; overflow-x:hidden; }
+
 :root {
   /* 语义色 */
   --fc-color-primary:#2563eb;
@@ -42,7 +43,7 @@ html, body { height:100%; overflow-x:hidden; }
   --dark-rand-base:#111827;
 
   --transition-speed:.25s;
-  --transition-speed-bg:.25s;
+  --transition-speed-bg:.5s;
 
   --toast-bg:#ffffff;
   --toast-border:#e5e7eb;
@@ -83,17 +84,11 @@ html, body { height:100%; overflow-x:hidden; }
   --tooltip-text:#1f2937;
   --tooltip-border:rgba(0,0,0,.18);
   --tooltip-shadow:0 8px 24px rgba(0,0,0,.18);
-
-  --scrollbar-track: var(--bg-secondary);
-  --scrollbar-thumb: var(--border-color);
-  --scrollbar-thumb-hover: var(--text-secondary);
-  --scrollbar-thumb-active: var(--text-primary);
-  --scrollbar-corner: var(--bg-secondary);
 }
 
 [data-theme="dark"] {
   --bg-primary:#111827;
-  --bg-secondary:#202b39a7;
+  --bg-secondary:#1f2937c3;
   --text-primary:#f3f4f6;
   --text-secondary:#d1d5db;
   --border-color:#374151;
@@ -107,21 +102,6 @@ html, body { height:100%; overflow-x:hidden; }
   --tooltip-text:#f3f4f6;
   --tooltip-border:rgba(255,255,255,.14);
   --tooltip-shadow:0 8px 28px rgba(0,0,0,.45);
-
-  --scrollbar-track: rgba(255,255,255,0.08);
-  --scrollbar-thumb: var(--border-color);
-  --scrollbar-thumb-hover: var(--text-secondary);
-  --scrollbar-thumb-active: var(--text-primary);
-  --scrollbar-corner: var(--bg-primary);
-}
-
-html {
-  /* Firefox 使用的主色（thumb）与背景（track） */
-  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
-  /* 可选：让 Firefox 使用细滚动条 */
-  scrollbar-width: thin;
-  /* 让浏览器在可行时自动对内置控件使用适配配色 */
-  color-scheme: light dark;
 }
 
 a, p, button {
@@ -983,6 +963,15 @@ input.fc-field[type=number] { -moz-appearance:textfield; appearance: textfield;}
 #searchSuggestions > div:hover { background:rgba(59,130,246,.08); }
 [data-theme="dark"] #searchSuggestions > div:hover { background:#2a3545; }
 
+/* 图表容器 */
+.fc-chart-container {
+  position:relative!important;
+  min-height:0!important;
+  height:clamp(480px,62vh,720px)!important;
+  background:var(--bg-secondary)!important;
+}
+#chartRoot, #chartHost { height:100%!important; }
+
 /* Info 按钮 */
 .fc-info-btn {
   width:24px; height:24px;
@@ -1388,29 +1377,4 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
   background: var(--bg-primary) !important;
   border-color: var(--border-color) !important;
   color: var(--text-primary) !important;
-}
-
-/* 追加：移动端（≤600px）整体收紧边距/内边距，提升可视内容占比 */
-@media (max-width: 600px) {
-  /* 全局内容 gutter 更窄 */
-  :root {
-    --content-left-gutter: 12px;
-    --content-right-gutter: 12px;
-    --content-bottom-gap: 8px;
-    --bottom-title-gap: 6px;
-  }
-
-  /* 顶层容器左右/上下 padding 收紧（不改模板类） */
-  .container.mx-auto {
-    padding-left: 8px !important;
-    padding-right: 8px !important;
-    padding-top: 12px !important;
-    padding-bottom: 8px !important;
-  }
-
-  /* 通用卡片（左/右主卡）内边距从 24px 降到 12px */
-  .p-6 { padding: 12px !important; }
-
-  /* 图表容器（覆盖模板里的 p-4）进一步收紧 */
-  .fc-chart-container { padding: 8px !important; }
 }
