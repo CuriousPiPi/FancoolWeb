@@ -39,12 +39,6 @@ try:
         _design_cpb_filterbank_iir,
         _design_cpb_filterbank_fir,
         run_calibration_and_model,
-        pchip_eval,  # from app.curves.pchip_cache.eval_pchip
-    )
-except Exception as e:
-    print("ERROR: 无法导入 pipeline.py，请将 synth.py 放在与 pipeline.py 同一目录。")
-    raise
-
 from scipy import signal
 # ---------- 小工具 ----------
 
