@@ -1,6 +1,6 @@
 (function(){
   // 对外 API
-  const API = { mount, render, resize, setOnXAxisChange };
+  const API = { mount, render, resize, setOnXAxisChange, __ensureDock: () => ensureSpectrumDock() };
 
   // 内部状态
   let root = null;
@@ -35,8 +35,29 @@
   const LEGEND_OFFSET = 50;     // Legend 顶部下移像素
   let spectrumDockEl = null;
 
+function __forceSpectrumDockFromUrl(){
+  try {
+    const usp = new URLSearchParams(window.location.search);
+    return usp.get('force_spectrum_dock') === '1';
+  } catch(_) { return false; }
+}
+function isSpectrumDockAllowed(){
+  // URL 强制优先
+  if (__forceSpectrumDockFromUrl()) return true;
+  // 前端配置（可能尚未加载，未加载时视为 false）
+  return !!(window.APP_CONFIG && window.APP_CONFIG.spectrumDockEnabled);
+}
 
 function ensureSpectrumDock() {
+  // 若不允许显示，且之前已经有按钮 → 移除并返回
+  if (!isSpectrumDockAllowed()) {
+    if (spectrumDockEl && spectrumDockEl.parentElement) {
+      try { spectrumDockEl.remove(); } catch(_) {}
+      spectrumDockEl = null;
+    }
+    return null;
+  }
+
   if (spectrumDockEl && spectrumDockEl.isConnected) return spectrumDockEl;
 
   const btn = document.createElement('button');
@@ -54,7 +75,6 @@ function ensureSpectrumDock() {
 
   btn.addEventListener('click', (e) => {
     e.preventDefault();
-    // 统一交给 SpectrumController（含动画/高度/构建/Loading）
     SpectrumController.setEnabled(!SpectrumController.isEnabled(), { animate: true });
   });
 
@@ -72,6 +92,10 @@ function ensureSpectrumDock() {
 
 function syncSpectrumDockUi() {
   if (!spectrumDockEl) return;
+  if (!isSpectrumDockAllowed()) {
+    spectrumDockEl.style.visibility = 'hidden';
+    return;
+  }
   const open = !!spectrumEnabled;
   spectrumDockEl.classList.toggle('is-open', open);
   const label = spectrumDockEl.querySelector('.label');
@@ -80,13 +104,14 @@ function syncSpectrumDockUi() {
 }
 
 function placeSpectrumDock() {
+  if (!isSpectrumDockAllowed()) return;
   const el = ensureSpectrumDock();
+  if (!el) return;
   const shell =
     document.getElementById('chart-settings') ||
     (root && root.closest('.fc-chart-container')) ||
     null;
-
-  if (!el || !shell) { if (el) el.style.visibility = 'hidden'; return; }
+  if (!shell) { el.style.visibility = 'hidden'; return; }
   if (el.parentElement !== shell) {
     try { shell.appendChild(el); } catch(_) {}
   }
@@ -2486,6 +2511,8 @@ function buildAndSetSpectrumOption(fullRefresh = false, themeOverride) {
       name: l.name,
       type: 'line',
       showSymbol: false,
+      symbol: 'circle',
+      symbolSize: 4,
       smooth: false,
       connectNulls: false,
       data: l.data,

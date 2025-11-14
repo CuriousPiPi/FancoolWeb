@@ -103,7 +103,7 @@ TOP_QUERIES_LIMIT = 100
 RECENT_LIKES_LIMIT = 100
 CLICK_COOLDOWN_SECONDS = 0.5
 RECENT_UPDATES_LIMIT = 100
-
+SPECTRUM_DOCK_ENABLED = os.getenv('SPECTRUM_DOCK_ENABLED', '') == '1'
 query_count_cache = 0
 
 # UID cookie config
@@ -1354,7 +1354,8 @@ def api_theme():
 def api_config():
     cfg = {
         'click_cooldown_ms': CLICK_COOLDOWN_SECONDS * 1000,
-        'recent_likes_limit': RECENT_LIKES_LIMIT
+        'recent_likes_limit': RECENT_LIKES_LIMIT,
+        'spectrum_dock_enabled': SPECTRUM_DOCK_ENABLED
     }
     return resp_ok(cfg)
 

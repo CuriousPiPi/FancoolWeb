@@ -1,4 +1,4 @@
-window.APP_CONFIG = window.APP_CONFIG || { clickCooldownMs: 2000, maxItems: 0 };
+window.APP_CONFIG = window.APP_CONFIG || { clickCooldownMs: 2000, maxItems: 0, spectrumDockEnabled: false };
 /* ==== 命名空间根 ==== */
 window.__APP = window.__APP || {};
 
@@ -23,6 +23,14 @@ const LIKE_FULL_FETCH_THRESHOLD = 20;
   }
 })();
 
+function __forceSpectrumDockFromUrl(){
+  try {
+    const usp = new URLSearchParams(window.location.search);
+    return usp.get('force_spectrum_dock') === '1';
+  } catch(_) { return false; }
+}
+
+
 (async function fetchAppConfig(){
   try {
     const r = await fetch('/api/config');
@@ -32,6 +40,15 @@ const LIKE_FULL_FETCH_THRESHOLD = 20;
       const cfg = resp.data || {};
       window.APP_CONFIG.clickCooldownMs = cfg.click_cooldown_ms ?? window.APP_CONFIG.clickCooldownMs;
       window.APP_CONFIG.recentLikesLimit = cfg.recent_likes_limit ?? 50;
+      // 新增：后端返回的默认启用状态
+      window.APP_CONFIG.spectrumDockEnabled = !!cfg.spectrum_dock_enabled;
+      // 加载完成后：若允许或有 URL 强制 → 尝试创建/显示按钮
+      if (window.ChartRenderer && typeof window.ChartRenderer.__ensureDock === 'function') {
+        // 若后端禁用但 URL 强制，则仍显示
+        if (window.APP_CONFIG.spectrumDockEnabled || __forceSpectrumDockFromUrl()) {
+          window.ChartRenderer.__ensureDock();
+        }
+      }
     }
   } catch(_){}
 })();
