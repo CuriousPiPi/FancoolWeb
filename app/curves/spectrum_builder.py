@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Dict, Any, Optional, Tuple, List
 from concurrent.futures import ThreadPoolExecutor, Future
 
-# 修复：portalocker 可选依赖 + 标志
+# portalocker 可选依赖 + 标志
 try:
     import portalocker  # type: ignore
     _HAS_PORTALOCKER = True
