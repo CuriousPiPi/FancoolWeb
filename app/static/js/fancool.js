@@ -2354,3 +2354,289 @@ function __preservePageScrollDuring(fn){
     try { window.scrollTo(sx, sy); } catch(_){}
   });
 }
+
+// ==== 公告栏初始化逻辑 ====
+(function initAnnouncementBar(){
+  const ROTATE_INTERVAL_MS = 10000; // 每 10 秒切换
+  const FETCH_REFRESH_MS   = 60000; // 可选：每 60 秒刷新可用公告
+  const bar      = document.getElementById('announcementBar');
+  const textSpan = document.getElementById('fcAnnounceText');
+  const closeBtn = document.getElementById('fcAnnounceClose');
+
+  if (!bar || !textSpan || !closeBtn) return;
+
+  const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  let marqueeActive = false;
+  let marqueeRaf = null;
+  let marqueeStartTs = 0;
+  let scrollDistance = 0;
+  let scrollDuration = 0;
+  let closedSession = false;
+
+  // 轮播
+  let announcements = [];
+  let rotateTimer = null;
+  let currentIndex = 0;
+
+  // 在 .fc-announce-inner 内构造一个滚动容器，把原来的 #fcAnnounceText 移进去
+  const inner = bar.querySelector('.fc-announce-inner');
+  let roller = document.createElement('div');
+  roller.className = 'fc-announce-roller';
+  // 将文本 span 挪入 roller（位于 gradient 之前）
+  inner.insertBefore(roller, inner.querySelector('.fc-announce-gradient'));
+  roller.appendChild(textSpan);
+
+  let closedId = null;
+  try { closedId = sessionStorage.getItem('announce_closed_id'); } catch(_) {}
+
+  function applyOffset(){
+    const h = bar.getBoundingClientRect().height;
+    document.documentElement.style.setProperty('--announce-offset', h + 'px');
+  }
+
+  function stopMarquee(){
+    marqueeActive = false;
+    if (marqueeRaf) cancelAnimationFrame(marqueeRaf);
+    marqueeRaf = null;
+    textSpan.style.transform = 'translateX(0)';
+    textSpan.classList.remove('is-marquee');
+  }
+
+  function frameMarquee(ts){
+    if (!marqueeActive) return;
+    if (!marqueeStartTs) marqueeStartTs = ts;
+    const progress = (ts - marqueeStartTs) / scrollDuration;
+    const pct = progress % 1;
+    const x = -scrollDistance * pct;
+    textSpan.style.transform = `translateX(${x}px)`;
+    marqueeRaf = requestAnimationFrame(frameMarquee);
+  }
+
+  function startMarqueeIfNeeded(){
+    stopMarquee();
+    const innerW = textSpan.scrollWidth;
+    const boxW = textSpan.parentElement.clientWidth; // roller 的宽度
+    if (innerW <= boxW + 4) return;
+    textSpan.classList.add('is-marquee');
+    scrollDistance = innerW - boxW;
+    const rawDuration = scrollDistance / 80 * 1000;
+    scrollDuration = Math.min(30000, Math.max(6000, rawDuration));
+    marqueeActive = true;
+    marqueeStartTs = 0;
+    marqueeRaf = requestAnimationFrame(frameMarquee);
+  }
+
+  function slideToText(newText){
+    if (reduceMotion) {
+      textSpan.textContent = newText;
+      applyOffset();
+      startMarqueeIfNeeded();
+      return;
+    }
+
+    // 1) 清理可能残留的旧 next 节点（防止之前动画未完成）
+    Array.from(roller.children).forEach((node, idx) => {
+      if (node !== textSpan && node.classList.contains('fc-announce-text')) {
+        node.remove();
+      }
+    });
+
+    // 2) 构造下一条
+    const next = document.createElement('span');
+    next.className = 'fc-announce-text';
+    next.textContent = newText;
+    roller.appendChild(next);
+
+    // 3) 测量高度并锁定
+    const hCurrent = textSpan.offsetHeight || textSpan.getBoundingClientRect().height || 0;
+    const hNext    = next.offsetHeight    || next.getBoundingClientRect().height    || 0;
+    const hLock    = Math.max(hCurrent, hNext);
+    roller.style.height = hLock + 'px';
+
+    // 停止横向跑马灯，避免 transform 冲突
+    stopMarquee();
+
+    // 确保初始 transform 状态生效（强制 reflow）
+    roller.style.transform = 'translateY(0)';
+    // 强制读取一次尺寸触发 reflow
+    void roller.offsetWidth;
+
+    // 4) 开始动画
+    roller.classList.add('is-sliding');
+    // 用 requestAnimationFrame 确保类已应用
+    requestAnimationFrame(() => {
+      roller.style.transform = `translateY(-${hCurrent}px)`;
+    });
+
+    // 5) 计算时长 + 兜底定时器
+    let durationMs = 380; // 默认值与 CSS 变量保持一致
+    try {
+      const cs = getComputedStyle(roller);
+      // transition-duration 可能是 '0.38s' 或 '0.38s, 0.38s'
+      const td = cs.transitionDuration.split(',')[0].trim();
+      if (td.endsWith('ms')) {
+        durationMs = parseFloat(td);
+      } else if (td.endsWith('s')) {
+        durationMs = parseFloat(td) * 1000;
+      }
+      if (!Number.isFinite(durationMs) || durationMs <= 0) durationMs = 380;
+    } catch(_) {}
+
+    let ended = false;
+    const fallbackTimer = setTimeout(() => {
+      if (!ended) {
+        onEnd();
+      }
+    }, durationMs + 60); // 略加缓冲
+
+    function onEnd(){
+      if (ended) return;
+      ended = true;
+      clearTimeout(fallbackTimer);
+      roller.removeEventListener('transitionend', onEnd);
+
+      roller.classList.remove('is-sliding');
+      // 更新文字：保留原 textSpan，移除 next
+      textSpan.textContent = newText;
+      next.remove();
+
+      // 清理内联样式（不要保留 transition: none）
+      roller.style.removeProperty('transition');
+      roller.style.transform = 'translateY(0)';
+      roller.style.height = '';
+
+      applyOffset();
+      startMarqueeIfNeeded();
+    }
+
+    roller.addEventListener('transitionend', (e)=>{
+      // 只在 transform 过渡结束时响应
+      if (e.propertyName === 'transform') onEnd();
+    });
+  }
+
+  function showAnnouncement(idx, animate=true){
+    if (!announcements.length) return;
+    idx = idx % announcements.length;
+    currentIndex = idx;
+    const item = announcements[idx];
+    if (!item) return;
+
+    // 使用上滑过渡
+    if (animate) {
+      slideToText(item.content_text);
+    } else {
+      textSpan.textContent = item.content_text;
+      applyOffset();
+      startMarqueeIfNeeded();
+    }
+
+    bar.setAttribute('data-id', item.id);
+  }
+
+  function startRotation(){
+    clearInterval(rotateTimer);
+    if (announcements.length <= 1) return;
+    rotateTimer = setInterval(()=>{
+      if (closedSession) { clearInterval(rotateTimer); return; }
+      showAnnouncement(currentIndex + 1, true);
+    }, ROTATE_INTERVAL_MS);
+  }
+
+  function teardown(){
+    clearInterval(rotateTimer);
+    rotateTimer = null;
+    stopMarquee();
+    document.documentElement.style.setProperty('--announce-offset','0px');
+  }
+
+  // 关闭：本会话隐藏全部公告
+  closeBtn.addEventListener('click', ()=>{
+    bar.classList.add('hidden');
+    closedSession = true;
+    teardown();
+    try {
+      const id = bar.getAttribute('data-id');
+      if (id) sessionStorage.setItem('announce_closed_id', id);
+    } catch(_){}
+  });
+
+  async function fetchAnnouncements(){
+    try {
+      const r = await fetch('/api/announcement');
+      const j = await r.json();
+      const resp = normalizeApiResponse(j);
+      if (!resp.ok) return;
+      const data = resp.data || {};
+      let items = Array.isArray(data.items) ? data.items.slice() : [];
+
+      // 若已关闭当前 id，这里可以按需“全局关闭”或“过滤该条继续轮播”。
+      // 当前逻辑：若服务器第一条是已关闭的，直接不显示（可自行改为过滤）。
+      if (closedId && items.some(i => String(i.id) === String(closedId))) {
+        return;
+      }
+
+      announcements = items;
+      if (!announcements.length) return;
+
+      bar.classList.remove('hidden');
+      showAnnouncement(0, false);
+      startRotation();
+    } catch(_){}
+  }
+
+  // 初次加载 + 周期刷新
+  fetchAnnouncements();
+  setInterval(()=> {
+    if (closedSession) return;
+    fetchAnnouncements();
+  }, FETCH_REFRESH_MS);
+
+  // 窗口变化：重置高度与跑马灯
+  window.addEventListener('resize', ()=>{
+    if (bar.classList.contains('hidden')) return;
+    applyOffset();
+    stopMarquee();
+    startMarqueeIfNeeded();
+  });
+
+  // 触控/拖动横向阅读（保留你原有的跑马灯拖动交互）
+  let dragState = null;
+  function onPointerDown(e){
+    if (!textSpan.classList.contains('is-marquee')) return;
+    stopMarquee();
+    const pt = e.touches ? e.touches[0] : e;
+    dragState = {
+      startX: pt.clientX,
+      baseX: 0,
+      currentX: 0,
+      minX: -(textSpan.scrollWidth - textSpan.parentElement.clientWidth),
+      maxX: 0
+    };
+    textSpan.classList.add('dragging');
+    e.preventDefault();
+  }
+  function onPointerMove(e){
+    if (!dragState) return;
+    const pt = e.touches ? e.touches[0] : e;
+    const dx = pt.clientX - dragState.startX;
+    let next = dragState.baseX + dx;
+    if (next < dragState.minX) next = dragState.minX;
+    if (next > dragState.maxX) next = dragState.maxX;
+    dragState.currentX = next;
+    textSpan.style.transform = `translateX(${next}px)`;
+    e.preventDefault();
+  }
+  function onPointerUp(){
+    if (!dragState) return;
+    dragState = null;
+    textSpan.classList.remove('dragging');
+  }
+  textSpan.addEventListener('touchstart', onPointerDown, { passive:false });
+  textSpan.addEventListener('touchmove', onPointerMove, { passive:false });
+  textSpan.addEventListener('touchend', onPointerUp, { passive:true });
+  textSpan.addEventListener('mousedown', onPointerDown);
+  window.addEventListener('mousemove', onPointerMove);
+  window.addEventListener('mouseup', onPointerUp);
+})();

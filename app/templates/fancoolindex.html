@@ -27,6 +27,13 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='css/right-card.css', v=7) }}">
 </head>
 <body class="bg-gray-50 min-h-screen">
+  <div id="announcementBar" class="fc-announce hidden">
+    <div class="fc-announce-inner">
+      <span id="fcAnnounceText" class="fc-announce-text"></span>
+      <span class="fc-announce-gradient"></span>
+    </div>
+    <button id="fcAnnounceClose" class="fc-announce-close" type="button">&times;</button>
+  </div>
   <div id="toastContainer"></div>
 
   <!-- 左上角浮动侧栏按钮 -->
@@ -104,13 +111,13 @@
 
   <!-- 主内容 -->
   <main id="main-content">
-    <div class="container mx-auto px-4 pt-8 pb-4">
+    <div class="container mx-auto px-4 pt-4 pb-4">
       <header class="text-center mb-8">
         <h1 class="text-3xl font-bold text-blue-600 mb-2">风扇库</h1>
         <p class="text-gray-600">一个风扇性能可视化对比网站，选择参数并添加到图表。</p>
       </header>
 
-      <div style="position: fixed; top: 20px; right: 100px; z-index: 1000;">
+      <div class="fc-info-btn-wrap">
         <a href="/source-info" data-track-id="link_source_info"
            class="fc-info-btn bg-white text-gray-700 hover:text-blue-600 p-2 rounded-full shadow-md border border-gray-200 flex items-center justify-center"
            title="数据来源与说明">
