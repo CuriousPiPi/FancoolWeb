@@ -880,23 +880,23 @@ function render(payload){
   primeRootRect();
   maybeStartRootPosWatch(600);
 
-    try {
-      const onFinished = () => {
-        try { chart.off('finished', onFinished); } catch(_){}
-        repaintPointer();
-        updateSpectrumLayout();
-        if (spectrumEnabled && !__skipSpectrumOnce) {
-          requestAndRenderSpectrum(true);
-        }
-        setTimeout(() => { __skipSpectrumOnce = false; }, 450);
-        try { syncLegendRailFromChart(); } catch(_){}
-      };
-      chart.on('finished', onFinished);
-    } catch(_){}
+  try {
+    const onFinished = () => {
+      try { chart.off('finished', onFinished); } catch(_){}
+      repaintPointer();
+      updateSpectrumLayout();
+      if (spectrumEnabled && !__skipSpectrumOnce) {
+        requestAndRenderSpectrum(true);
+      }
+      setTimeout(() => { __skipSpectrumOnce = false; }, 450);
+      try { syncLegendRailFromChart(); } catch(_){}
+    };
+    chart.on('finished', onFinished);
+  } catch(_){}
 
-      requestAnimationFrame(repaintPointer);
-      if (showFitCurves) refreshFitPanel();
-    }
+  requestAnimationFrame(repaintPointer);
+  if (showFitCurves) refreshFitPanel();
+}
 
   function resize(){ if (chart) chart.resize(); }
 
