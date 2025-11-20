@@ -7,6 +7,7 @@ curves.spectrum_builder
 from __future__ import annotations
 import os
 import json
+import math
 import hashlib
 import threading
 import time
@@ -402,7 +403,7 @@ def _collect_perf_rows(pairs: List[Tuple[int, int]]) -> Dict[str, dict]:
             rp = float(rpm) if rpm is not None else None
         except Exception:
             continue
-        if af is None or not (af == af):  # 过滤 NaN airflow
+        if af is None or math.isnan(af):  # 过滤 NaN airflow
             continue
         if (rp is None) and (nz is None):
             continue
