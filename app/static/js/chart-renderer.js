@@ -1031,7 +1031,7 @@ function buildSeries(rawSeries, xMode) {
 }
 
 function buildOption(payload) {
-  const { chartData, theme } = payload || {};
+  const { theme } = payload || {};
   const t = tokens(theme||'light');
   const sList = getSeriesArray();
   const xMode = currentXModeFromPayload(payload);
