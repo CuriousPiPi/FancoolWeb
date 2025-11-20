@@ -64,6 +64,7 @@ def _init_worker_lowprio(low_priority: bool = True, blas_threads: int = 1):
                 try:
                     os.nice(10)  # 提高 nice 值 => 降低优先级
                 except Exception:
+                    # Ignore errors if unable to set process priority (non-critical)
                     pass
             else:
                 try:
