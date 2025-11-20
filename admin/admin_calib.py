@@ -93,6 +93,7 @@ class _CpuMonitor:
         try:
             procs += self._proc.children(recursive=True)
         except Exception:
+            # Ignore errors when fetching child processes; may not have permission or process may have exited
             pass
         out = []
         for p in procs:
