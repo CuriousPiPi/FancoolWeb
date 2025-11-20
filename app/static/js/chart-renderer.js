@@ -855,7 +855,7 @@ function render(payload){
   chart.resize();
 
   lastOption = option;
-  syncSpectrumBgWithMain(option && option.backgroundColor);
+  syncSpectrumBgWithMain(option.backgroundColor);
 
   requestAnimationFrame(() => updateAxisSwitchPosition({ force:true, animate:false }));
   if (option.__empty) {
