@@ -7,7 +7,7 @@ import hmac
 import hashlib
 import math
 import signal
-from curves import pchip_cache
+from .curves import pchip_cache
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Any
 
@@ -16,9 +16,9 @@ from sqlalchemy import create_engine, text
 from user_agents import parse as parse_ua
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from curves.pchip_cache import get_or_build_unified_perf_model, eval_pchip
-from curves import spectrum_cache
-from curves.spectrum_builder import load_default_params, compute_param_hash, schedule_rebuild, build_performance_pchips
+from .curves.pchip_cache import get_or_build_unified_perf_model, eval_pchip
+from .curves import spectrum_cache
+from .curves.spectrum_builder import load_default_params, compute_param_hash, schedule_rebuild, build_performance_pchips
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 
 CODE_VERSION = os.getenv('CODE_VERSION', '')
@@ -115,6 +115,7 @@ UID_COOKIE_SECURE = os.getenv('UID_COOKIE_SECURE', '0') == '1'
 UID_COOKIE_HTTPONLY = os.getenv('UID_COOKIE_HTTPONLY', '0') == '1'
 UID_COOKIE_REFRESH_INTERVAL = int(os.getenv('UID_COOKIE_REFRESH_INTERVAL_SECONDS', str(60 * 60 * 24 * 7)))
 UID_COOKIE_REFRESH_TS_NAME = os.getenv('UID_COOKIE_REFRESH_TS_NAME', 'fc_uid_refreshed_at')
+UID_COOKIE_DOMAIN = os.getenv('UID_COOKIE_DOMAIN', '.fancool.cc')
 
 # =========================================
 # Middleware / Headers
@@ -230,7 +231,8 @@ def ensure_uid_cookie(resp):
             samesite=UID_COOKIE_SAMESITE,
             secure=UID_COOKIE_SECURE,
             httponly=UID_COOKIE_HTTPONLY,
-            path='/'
+            path='/',
+            domain=UID_COOKIE_DOMAIN
         )
         if getattr(g, '_set_uid_refresh_now', False):
             resp.set_cookie(
@@ -239,7 +241,8 @@ def ensure_uid_cookie(resp):
                 samesite=UID_COOKIE_SAMESITE,
                 secure=UID_COOKIE_SECURE,
                 httponly=UID_COOKIE_HTTPONLY,
-                path='/'
+                path='/',
+                domain=UID_COOKIE_DOMAIN
             )
         return resp
 
@@ -259,7 +262,8 @@ def ensure_uid_cookie(resp):
                 samesite=UID_COOKIE_SAMESITE,
                 secure=UID_COOKIE_SECURE,
                 httponly=UID_COOKIE_HTTPONLY,
-                path='/'
+                path='/',
+                domain=UID_COOKIE_DOMAIN
             )
         elif getattr(g, '_active_uid', None):
             resp.set_cookie(
@@ -268,7 +272,8 @@ def ensure_uid_cookie(resp):
                 samesite=UID_COOKIE_SAMESITE,
                 secure=UID_COOKIE_SECURE,
                 httponly=UID_COOKIE_HTTPONLY,
-                path='/'
+                path='/',
+                domain=UID_COOKIE_DOMAIN
             )
         resp.set_cookie(
             UID_COOKIE_REFRESH_TS_NAME, str(now),
@@ -276,7 +281,8 @@ def ensure_uid_cookie(resp):
             samesite=UID_COOKIE_SAMESITE,
             secure=UID_COOKIE_SECURE,
             httponly=UID_COOKIE_HTTPONLY,
-            path='/'
+            path='/',
+            domain=UID_COOKIE_DOMAIN
         )
     return resp
 

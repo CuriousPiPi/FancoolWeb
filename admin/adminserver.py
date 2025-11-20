@@ -7,8 +7,8 @@ from flask import Flask, request, jsonify, make_response, session, render_templa
 from sqlalchemy import create_engine, text
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash
-from admin_data import data_mgmt_bp
-from admin_calib import calib_admin_bp
+from .admin_data import data_mgmt_bp
+from .admin_calib import calib_admin_bp
 
 # =========================
 # Config
@@ -62,6 +62,7 @@ UID_COOKIE_SECURE = os.getenv('UID_COOKIE_SECURE', '0') == '1'
 UID_COOKIE_HTTPONLY = os.getenv('UID_COOKIE_HTTPONLY', '0') == '1'
 UID_COOKIE_REFRESH_INTERVAL = int(os.getenv('UID_COOKIE_REFRESH_INTERVAL_SECONDS', str(60 * 60 * 24 * 7)))
 UID_COOKIE_REFRESH_TS_NAME = os.getenv('UID_COOKIE_REFRESH_TS_NAME', 'fc_uid_refreshed_at')
+UID_COOKIE_DOMAIN = os.getenv('UID_COOKIE_DOMAIN', '.fancool.cc')
 
 # 独立数据库账号（最小权限），仅需读写 admin 相关表
 ADMIN_DB_DSN = os.getenv(
@@ -160,11 +161,11 @@ def ensure_uid_cookie(resp):
     if token_to_set:
         resp.set_cookie(UID_COOKIE_NAME, token_to_set, max_age=UID_COOKIE_MAX_AGE,
                         samesite=UID_COOKIE_SAMESITE, secure=UID_COOKIE_SECURE,
-                        httponly=UID_COOKIE_HTTPONLY, path='/')
+                        httponly=UID_COOKIE_HTTPONLY, path='/', domain=UID_COOKIE_DOMAIN)
         if getattr(g, '_set_uid_refresh_now', False):
             resp.set_cookie(UID_COOKIE_REFRESH_TS_NAME, str(now), max_age=UID_COOKIE_MAX_AGE,
                             samesite=UID_COOKIE_SAMESITE, secure=UID_COOKIE_SECURE,
-                            httponly=UID_COOKIE_HTTPONLY, path='/')
+                            httponly=UID_COOKIE_HTTPONLY, path='/', domain=UID_COOKIE_DOMAIN)
         return resp
 
     last_ts_raw = request.cookies.get(UID_COOKIE_REFRESH_TS_NAME)
@@ -176,14 +177,14 @@ def ensure_uid_cookie(resp):
         if uid:
             resp.set_cookie(UID_COOKIE_NAME, token, max_age=UID_COOKIE_MAX_AGE,
                             samesite=UID_COOKIE_SAMESITE, secure=UID_COOKIE_SECURE,
-                            httponly=UID_COOKIE_HTTPONLY, path='/')
+                            httponly=UID_COOKIE_HTTPONLY, path='/', domain=UID_COOKIE_DOMAIN)
         elif getattr(g, '_active_uid', None):
             resp.set_cookie(UID_COOKIE_NAME, _sign_uid(g._active_uid), max_age=UID_COOKIE_MAX_AGE,
                             samesite=UID_COOKIE_SAMESITE, secure=UID_COOKIE_SECURE,
-                            httponly=UID_COOKIE_HTTPONLY, path='/')
+                            httponly=UID_COOKIE_HTTPONLY, path='/', domain=UID_COOKIE_DOMAIN)
         resp.set_cookie(UID_COOKIE_REFRESH_TS_NAME, str(now), max_age=UID_COOKIE_MAX_AGE,
                         samesite=UID_COOKIE_SAMESITE, secure=UID_COOKIE_SECURE,
-                        httponly=UID_COOKIE_HTTPONLY, path='/')
+                        httponly=UID_COOKIE_HTTPONLY, path='/', domain=UID_COOKIE_DOMAIN)
     return resp
 
 @app.get('/admin')
@@ -488,4 +489,4 @@ def api_health():
 if __name__ == '__main__':
     # 仅用于开发调试；生产请用 gunicorn + Nginx，并将 ADMIN_SESSION_COOKIE_* 设置为安全值
     port = int(os.getenv('ADMIN_PORT', '6001'))
-    app.run(host='0.0.0.0', port=port, debug=True, use_reloader=False)
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
