@@ -905,12 +905,10 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
         E_raw_stack = np.stack(E_raw_list_pa2, axis=0)
         E_sub_stack = np.stack(E_sub_list_pa2, axis=0)
         if perfile_median:
-            E_anchor_raw_pa2 = np.median(E_raw_stack, axis=0)
             E_anchor_pa2 = np.median(E_sub_stack, axis=0)
             la_raw_rpm = float(np.median(np.array(la_raw_files, float)))
             la_sub_rpm = float(np.median(np.array(la_sub_files, float)))
         else:
-            E_anchor_raw_pa2 = np.mean(E_raw_stack, axis=0)
             E_anchor_pa2 = np.mean(E_sub_stack, axis=0)
             la_raw_rpm = float(np.mean(np.array(la_raw_files, float)))
             la_sub_rpm = float(np.mean(np.array(la_sub_files, float)))
