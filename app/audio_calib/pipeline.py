@@ -75,6 +75,7 @@ def _init_worker_lowprio(low_priority: bool = True, blas_threads: int = 1):
                     except Exception:
                         p.nice(psutil.IDLE_PRIORITY_CLASS)  # type: ignore
                 except Exception:
+                    # Ignore errors if setting process priority fails (e.g., insufficient permissions or unsupported platform)
                     pass
     except Exception:
         # Ignore all exceptions here: failure to set process priority is non-fatal and can be safely ignored.
