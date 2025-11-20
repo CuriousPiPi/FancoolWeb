@@ -2179,8 +2179,8 @@ function updateSpectrumLayout() {
   if (!spectrumRoot || !spectrumInner) return;
 
   if (isFs) {
-    if (spectrumRoot) spectrumRoot.style.height = '';
-    if (spectrumInner) spectrumInner.style.height = '';
+    spectrumRoot.style.height = '';
+    spectrumInner.style.height = '';
   }
   // NEW: 任何模式下都尽量触发频谱 resize，使其跟随容器宽度
   if (spectrumChart) { try { spectrumChart.resize(); } catch(_) {} }
