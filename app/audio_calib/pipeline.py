@@ -77,6 +77,7 @@ def _init_worker_lowprio(low_priority: bool = True, blas_threads: int = 1):
                 except Exception:
                     pass
     except Exception:
+        # Ignore all exceptions here: failure to set process priority is non-fatal and can be safely ignored.
         pass
 
     # 限制 BLAS/OMP 线程数，避免 “进程数 × 线程数” 过度叠加
