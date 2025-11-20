@@ -1068,6 +1068,7 @@ def build_model_from_calib_with_sweep_in_memory(root_dir: str,
         try:
             os.nice(5)
         except Exception:
+            # Lowering process priority failed (e.g., insufficient permissions); safe to ignore and continue with default priority.
             pass
     # Windows 可选：若用户强需求，可外部整体下调运行服务的进程优先级
 
