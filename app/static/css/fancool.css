@@ -1414,3 +1414,103 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
   /* 图表容器（覆盖模板里的 p-4）进一步收紧 */
   .fc-chart-container { padding: 8px !important; }
 }
+
+/* ==== 公告栏样式与位移变量 ==== */
+:root {
+  --announce-offset: 0px; /* 公告栏高度（显示时写入） */
+}
+
+body {
+  padding-top: var(--announce-offset); /* 推动整体内容下移 */
+}
+
+/* 顶部固定元素改为跟随公告偏移 */
+#sidebar-toggle { top: calc(10px + var(--announce-offset)); }
+.fc-theme-toggle { top: calc(10px + var(--announce-offset)); }
+
+/* 右上 info 按钮包裹容器 */
+.fc-info-btn-wrap {
+  position: fixed;
+  top: calc(20px + var(--announce-offset));
+  right: 100px;
+  z-index: 1000;
+}
+
+/* 公告栏 */
+.fc-announce {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  padding-left: 10px;
+  padding-right: 5px;
+  z-index: 200;
+  background: var(--bg-secondary);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--border-color);
+  font-size: 15px;
+  line-height: 1.4;
+  display: flex;
+  align-items: center;
+  box-shadow: 0 2px 6px var(--shadow-color);
+}
+.fc-announce.hidden { display: none; }
+
+.fc-announce-inner {
+  position: relative;
+  flex: 1;
+  overflow: hidden;
+  text-align: center; 
+}
+
+.fc-announce-roller {
+  position: relative;
+  will-change: transform;
+}
+
+/* 每条公告文本占一行，便于垂直堆叠滑动 */
+.fc-announce-roller > .fc-announce-text {
+  display: block;
+  margin: 0;
+  padding: 0;
+}
+
+/* 切换时添加该类，控制过渡曲线与时长（可调） */
+.fc-announce-roller.is-sliding {
+  transition: transform var(--announce-slide-duration, .38s) cubic-bezier(.22,.7,.26,1);
+}
+
+/* 系统开启"减少动态效果"时关闭切换过渡 */
+@media (prefers-reduced-motion: reduce) {
+  .fc-announce-roller.is-sliding { transition: none !important; }
+}
+
+.fc-announce-text {
+  display: inline-block;
+  white-space: nowrap;
+  will-change: transform;
+  transition: transform .35s ease;
+  /* 初始不滚动 */
+}
+
+.fc-announce-close {
+  background: transparent;
+  border: none;
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 4px 6px;
+  color: var(--text-secondary);
+  transition: color .2s;
+}
+.fc-announce-close:hover {
+  color: var(--text-primary);
+}
+
+/* 悬停跑马灯时添加类 */
+.fc-announce-text.is-marquee {
+  transition: none; /* 改用动画帧驱动 */
+}
+
+/* 触摸拖动（添加时可有反馈，非必需） */
+.fc-announce-text.dragging {
+  cursor: grabbing;
+}

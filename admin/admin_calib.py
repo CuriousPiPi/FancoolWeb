@@ -11,6 +11,12 @@ import sys
 from typing import Dict, Any, List, Tuple
 from datetime import datetime
 import time
+<<<<<<< HEAD
+=======
+import psutil
+import threading
+from dataclasses import dataclass, asdict
+>>>>>>> copilot/sub-pr-46
 
 from flask import Blueprint, request, current_app, jsonify, make_response, session
 from sqlalchemy import text
@@ -59,6 +65,118 @@ CODE_VERSION = os.getenv('CODE_VERSION', '')
 
 _R_RPM = re.compile(r'^(?:[Rr])?(\d+(?:\.\d+)?)$')
 
+<<<<<<< HEAD
+=======
+@dataclass
+class _CpuStats:
+    wall_seconds: float
+    cpu_core_seconds: float
+    mean_total_percent: float
+    peak_total_percent: float
+    peak_concurrent_cores: float
+    peak_threads: int
+    samples: int
+    details: dict
+
+class _CpuMonitor:
+    def __init__(self, interval=0.2):
+        self.interval = float(interval)
+        self._proc = psutil.Process()
+        self._stop = threading.Event()
+        self._thread = None
+        self._t0 = 0.0
+        self._t1 = 0.0
+        self._samples = 0
+        self._sum_area = 0.0       # 积分：total_percent/100 * dt -> 核秒
+        self._sum_percent_dt = 0.0 # 用于计算平均 total_percent
+        self._sum_dt = 0.0
+        self._peak_percent = 0.0
+        self._peak_threads = 0
+
+    def _all(self):
+        procs = [self._proc]
+        try:
+            procs += self._proc.children(recursive=True)
+        except Exception:
+            pass
+        out = []
+        for p in procs:
+            try:
+                if p.is_running() and p.status() != psutil.STATUS_ZOMBIE:
+                    out.append(p)
+            except Exception:
+                continue
+        return out
+
+    def _prime(self):
+        for p in self._all():
+            try:
+                p.cpu_percent(None)
+            except Exception:
+                pass
+
+    def _loop(self):
+        self._t0 = time.perf_counter()
+        self._prime()
+        last = time.perf_counter()
+        while not self._stop.is_set():
+            now = time.perf_counter()
+            dt = now - last
+            if dt <= 0:
+                dt = self.interval
+            last = now
+            total_percent = 0.0
+            threads_total = 0
+            for p in self._all():
+                try:
+                    total_percent += p.cpu_percent(None)
+                    threads_total += p.num_threads()
+                except Exception:
+                    continue
+            self._samples += 1
+            self._sum_area += (total_percent / 100.0) * dt
+            self._sum_percent_dt += total_percent * dt
+            self._sum_dt += dt
+            if total_percent > self._peak_percent:
+                self._peak_percent = total_percent
+            if threads_total > self._peak_threads:
+                self._peak_threads = threads_total
+            time.sleep(self.interval)
+        self._t1 = time.perf_counter()
+
+    def start(self):
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._loop, name="CpuMon", daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._thread:
+            self._thread.join()
+        wall = (self._t1 or time.perf_counter()) - self._t0
+        mean_percent = (self._sum_percent_dt / self._sum_dt) if self._sum_dt > 0 else 0.0
+        stats = _CpuStats(
+            wall_seconds = wall,
+            cpu_core_seconds = self._sum_area,
+            mean_total_percent = mean_percent,
+            peak_total_percent = self._peak_percent,
+            peak_concurrent_cores = self._peak_percent / 100.0,
+            peak_threads = self._peak_threads,
+            samples = self._samples,
+            details = {
+                "cpu_count_logical": psutil.cpu_count(logical=True),
+                "cpu_count_physical": psutil.cpu_count(logical=False),
+                "env_threads": {
+                    "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"),
+                    "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS"),
+                    "OPENBLAS_NUM_THREADS": os.environ.get("OPENBLAS_NUM_THREADS"),
+                    "NUMEXPR_NUM_THREADS": os.environ.get("NUMEXPR_NUM_THREADS")
+                }
+            }
+        )
+        return stats
+    
+>>>>>>> copilot/sub-pr-46
 def _parse_rpm_loose(part: str) -> float | None:
     m = _R_RPM.match(part)
     if m:
@@ -223,7 +341,30 @@ def _run_inproc_and_collect(work_dir: str, params: Dict[str, Any], model_id: int
     if CURVES_DIR not in sys.path:
         sys.path.append(CURVES_DIR)
     from audio_calib.pipeline import run_calibration_and_model as _rcm
+<<<<<<< HEAD
     model, rows = _rcm(work_dir, params, out_dir=None, model_id=model_id, condition_id=condition_id)
+=======
+
+    # 启动 CPU 监控
+    mon = _CpuMonitor(interval=0.2)
+    mon.start()
+    try:
+        model, rows = _rcm(work_dir, params, out_dir=None, model_id=model_id, condition_id=condition_id)
+    finally:
+        cpu_stats = mon.stop()
+
+    # 注入 CPU 统计（整体）
+    try:
+        calib = model.get("calibration") or {}
+        timings = calib.get("timings") or {}
+        timings["cpu_stats_overall"] = asdict(cpu_stats)
+        # 若已有分阶段，可保持原样；这里只做 overall 注入
+        calib["timings"] = timings
+        model["calibration"] = calib
+    except Exception:
+        pass
+
+>>>>>>> copilot/sub-pr-46
     return model, rows
 
 @calib_admin_bp.post('/admin/api/calib/upload_zip')

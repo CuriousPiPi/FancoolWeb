@@ -89,7 +89,10 @@
     ov.style.flexDirection='column';
     ov.style.alignItems='center';
     ov.style.justifyContent='center';
+<<<<<<< HEAD
     // 与面板背景一致：使用继承或自定义变量，必要时可改为 'white' 或 'transparent'
+=======
+>>>>>>> copilot/sub-pr-46
     ov.style.background='inherit';
     ov.style.fontSize='14px';
     ov.style.color='#acacacff';
@@ -121,22 +124,31 @@
   }
 
   const styleTag = document.createElement('style');
+<<<<<<< HEAD
   styleTag.textContent = `
     @keyframes calibSpin { from{ transform:rotate(0deg);} to{ transform:rotate(360deg);} }
   `;
+=======
+  styleTag.textContent = `@keyframes calibSpin { from{ transform:rotate(0deg);} to{ transform:rotate(360deg);} }`;
+>>>>>>> copilot/sub-pr-46
   document.head.appendChild(styleTag);
 
   CalibPreview.show = async function({ mount, batchId }){
     const container = (typeof mount==='string')? document.querySelector(mount) : mount;
     if(!container) throw new Error('mount container not found');
     if(!batchId) throw new Error('batchId required');
+<<<<<<< HEAD
   
+=======
+
+>>>>>>> copilot/sub-pr-46
     container.innerHTML = `
       <div class="panel" style="margin-top:10px; position:relative;">
         <h4 style="margin:0 0 8px;">频谱预览</h4>
         <div id="calibChart" style="width:100%; height:340px; position:relative;"></div>
         <div style="display:flex; gap:10px; align-items:center; margin-top:8px; flex-wrap:wrap;">
           <label for="calibRpmInput">RPM</label>
+<<<<<<< HEAD
           <input id="calibRpmInput" type="number" step="1" style="width:120px;" />
           <input id="calibRpmRange" type="range" style="flex:1 1 auto; min-width:220px;" />
           <div id="laCompositeBox" style="display:flex; gap:18px; flex-wrap:wrap; font-size:13px;">
@@ -146,29 +158,58 @@
         </div>
       </div>
   
+=======
+            <input id="calibRpmInput" type="number" step="1" style="width:120px;" />
+            <input id="calibRpmRange" type="range" style="flex:1 1 auto; min-width:220px;" />
+            <div id="laCompositeBox" style="display:flex; gap:18px; flex-wrap:wrap; font-size:13px;">
+              <span>合成LAeq: <b id="laCompositeVal">-</b> dB</span>
+              <span>校正Δ: <b id="deltaVal">-</b> dB</span>
+            </div>
+        </div>
+      </div>
+
+>>>>>>> copilot/sub-pr-46
       <div class="panel" style="margin-top:12px;">
         <h4 style="margin:0 0 8px;">分箱覆盖</h4>
         <div id="countsChart" style="width:100%; height:100px; position:relative;"></div>
       </div>
+<<<<<<< HEAD
   
+=======
+
+>>>>>>> copilot/sub-pr-46
       <div class="panel" style="margin-top:12px;">
         <h4 style="margin:0 0 8px;">耗时统计</h4>
         <div id="timingGrid" style="display:grid; grid-template-columns: 1fr 1fr; gap:6px 16px;"></div>
       </div>
+<<<<<<< HEAD
   
+=======
+
+>>>>>>> copilot/sub-pr-46
       <div class="panel" style="margin-top:12px;">
         <h4 style="margin:0 0 8px;">模型基础参数</h4>
         <div id="calibInfoGrid" style="display:grid; grid-template-columns: 1fr 1fr; gap:6px 16px;"></div>
       </div>
     `;
+<<<<<<< HEAD
   
+=======
+
+>>>>>>> copilot/sub-pr-46
     const chartDom = document.getElementById('calibChart');
     const overlayStart = performance.now();
     const overlay = createLoadingOverlay(chartDom);
     let overlayTimer = setInterval(()=>updateOverlayTime(overlay, overlayStart), 300);
+<<<<<<< HEAD
   
     let model;
     let requestSec = null; // 前端测的请求耗时（秒，含后端处理 + 网络）
+=======
+
+    let model;
+    let requestSec = null;
+>>>>>>> copilot/sub-pr-46
     try {
       const t0 = performance.now();
       const res = await fetch(`/admin/api/calib/preview?batch_id=${encodeURIComponent(batchId)}`);
@@ -180,31 +221,52 @@
       clearInterval(overlayTimer);
       if(overlay){
         overlay.innerHTML = `<div style="text-align:center; color:#b91c1c;">
+<<<<<<< HEAD
           <strong>加载失败：</strong>${(err && err.message) || err}<br/>
           请稍后重试或检查后端日志。
+=======
+          <strong>加载失败：</strong>${(err && err.message) || err}<br/>请稍后重试或检查后端日志。
+>>>>>>> copilot/sub-pr-46
         </div>`;
       }
       return;
     }
+<<<<<<< HEAD
   
     await loadECharts();
   
+=======
+
+    await loadECharts();
+
+>>>>>>> copilot/sub-pr-46
     const centers = model.centers_hz || [];
     const finalBands = Array.isArray(model.band_models_pchip) ? model.band_models_pchip : [];
     const calib = model.calibration || {};
     const rpmMin = model.rpm_min ?? (calib?.calib_model?.x0 ?? 1500);
     const rpmMax = model.rpm_max ?? (calib?.calib_model?.x1 ?? 4500);
     const npo = calib.n_per_oct || 12;
+<<<<<<< HEAD
     const {f2} = bandEdgesFromCenters(centers, npo);
   
     const ec = echarts.init(document.getElementById('calibChart'), null, { renderer:'canvas', devicePixelRatio: window.devicePixelRatio||1 });
     const ecCounts = echarts.init(document.getElementById('countsChart'), null, { renderer:'canvas', devicePixelRatio: window.devicePixelRatio||1 });
   
+=======
+
+    const ec = echarts.init(document.getElementById('calibChart'), null, { renderer:'canvas', devicePixelRatio: window.devicePixelRatio||1 });
+    const ecCounts = echarts.init(document.getElementById('countsChart'), null, { renderer:'canvas', devicePixelRatio: window.devicePixelRatio||1 });
+
+>>>>>>> copilot/sub-pr-46
     const rpmInput = document.getElementById('calibRpmInput');
     const rpmRange = document.getElementById('calibRpmRange');
     rpmInput.min = Math.floor(rpmMin); rpmInput.max = Math.ceil(rpmMax); rpmInput.step='1';
     rpmRange.min = rpmInput.min; rpmRange.max = rpmInput.max; rpmRange.step='1';
+<<<<<<< HEAD
   
+=======
+
+>>>>>>> copilot/sub-pr-46
     function renderInfoGrid(frontRenderSec){
       const infoEl = document.getElementById('calibInfoGrid');
       if(!infoEl) return;
@@ -214,7 +276,11 @@
       const binStr = (model.rpm_bin!=null)
         ? `${model.rpm_bin}${aw.applied ? ' (auto_widen)' : ''}`
         : 'n/a';
+<<<<<<< HEAD
     
+=======
+
+>>>>>>> copilot/sub-pr-46
       let countsSummary='n/a';
       if(Array.isArray(model.counts_per_bin) && model.counts_per_bin.length){
         const arr = model.counts_per_bin.map(Number).filter(Number.isFinite);
@@ -225,14 +291,22 @@
           countsSummary=`tot=${sum}, med=${mid}, min=${s2[0]}, max=${s2[s2.length-1]}`;
         }
       }
+<<<<<<< HEAD
     
+=======
+
+>>>>>>> copilot/sub-pr-46
       let bladeVal = 'n/a';
       if(Number.isFinite(calib.fan_blades) && calib.fan_blades>0){
         bladeVal = String(calib.fan_blades);
       }else if (calib.harmonics && Number.isFinite(calib.harmonics.n_blade) && calib.harmonics.n_blade>0){
         bladeVal = String(calib.harmonics.n_blade);
       }
+<<<<<<< HEAD
     
+=======
+
+>>>>>>> copilot/sub-pr-46
       const rows = [
         ['模型类型', `${modelType} (${version})`],
         ['频带数', String(centers.length)],
@@ -253,7 +327,11 @@
         </div>`
       ).join('');
     }
+<<<<<<< HEAD
   
+=======
+
+>>>>>>> copilot/sub-pr-46
     (function renderCounts(){
       const xs = (model.rpm_grid_centers || []).map(Number);
       const ys = (model.counts_per_bin || []).map(Number);
@@ -287,7 +365,11 @@
         }
       }, true);
     })();
+<<<<<<< HEAD
   
+=======
+
+>>>>>>> copilot/sub-pr-46
     function renderTimings(){
       const el = document.getElementById('timingGrid');
       if(!el) return;
@@ -295,10 +377,36 @@
       const cal = t.calibration_phase || {};
       const sw  = t.sweep_phase || {};
       const fmt = (v)=> (typeof v==='number' && isFinite(v)) ? `${v.toFixed(2)} s` : '-';
+<<<<<<< HEAD
     
       const rows = [
         ['总体(后端汇总)', (typeof t.overall_sec==='number') ? `${t.overall_sec.toFixed(2)} s` : '-'],
       
+=======
+
+      // CPU 统计（后端注入）
+      const cpuOverall = t.cpu_stats_overall || null;
+      const cpuCal = t.cpu_stats_calibration || null;
+      const cpuSweep = t.cpu_stats_sweep || null;
+      function fmtCpu(obj){
+        if(!obj) return { coreSec:'-', peak:'-', mean:'-' };
+        const coreSec = (typeof obj.cpu_core_seconds==='number') ? obj.cpu_core_seconds.toFixed(2)+' core-s' : '-';
+        const peak = (typeof obj.peak_concurrent_cores==='number') ? obj.peak_concurrent_cores.toFixed(2)+' cores' : '-';
+        const mean = (typeof obj.mean_total_percent==='number') ? obj.mean_total_percent.toFixed(1)+'%' : '-';
+        return { coreSec, peak, mean };
+      }
+      const o = fmtCpu(cpuOverall);
+      const c = fmtCpu(cpuCal);
+      const s = fmtCpu(cpuSweep);
+
+      const rows = [
+        ['总体(后端汇总)', (typeof t.overall_sec==='number') ? `${t.overall_sec.toFixed(2)} s` : '-'],
+
+        ['— CPU 总核秒(整体)', o.coreSec],
+        ['— CPU 峰值并发核心(整体)', o.peak],
+        ['— CPU 平均总占用(整体)', o.mean],
+
+>>>>>>> copilot/sub-pr-46
         ['— 校准阶段：env绝对刻度', fmt(cal.env_abs_scale_sec)],
         ['— 校准阶段：env帧滤波', fmt(cal.env_frames_sec)],
         ['— 校准阶段：env聚合/基线', fmt(cal.env_agg_sec)],
@@ -306,7 +414,11 @@
         ['— 校准阶段：短录音帧滤波', fmt(cal.short_frames_sec)],
         ['— 校准阶段：短录音聚合', fmt(cal.short_agg_sec)],
         ['— 校准阶段：文件数/帧数/频带', `${cal.files_env||0}+${cal.files_short||0} 文件 / ${(cal.env_frames_total||0)+(cal.short_frames_total||0)} 帧 / ${cal.bands||'-'} 带`],
+<<<<<<< HEAD
       
+=======
+
+>>>>>>> copilot/sub-pr-46
         ['— sweep：读原始音频', fmt(sw.read_raw_sec)],
         ['— sweep：整段LAeq', fmt(sw.full_la_sec)],
         ['— sweep：读裁剪音频', fmt(sw.read_proc_sec)],
@@ -318,9 +430,19 @@
         ['— sweep：谐波建模', fmt(sw.harmonics_sec)],
         ['— sweep：Δ烘焙', fmt(sw.delta_bake_sec)],
         ['— sweep：帧/频带', `${sw.frames||0} 帧 / ${sw.bands||0} 带`],
+<<<<<<< HEAD
         ['— sweep：阶段小计', fmt(sw.total_sec)]
       ];
     
+=======
+        ['— sweep：阶段小计', fmt(sw.total_sec)],
+
+        // 可选：分阶段 CPU
+        ...(cpuCal ? [['— 校准阶段 CPU 核秒', c.coreSec], ['— 校准阶段峰值核心', c.peak]] : []),
+        ...(cpuSweep ? [['— sweep阶段 CPU 核秒', s.coreSec], ['— sweep阶段峰值核心', s.peak]] : [])
+      ];
+
+>>>>>>> copilot/sub-pr-46
       el.innerHTML = rows.map(([k,v]) =>
         `<div style="display:flex; justify-content:space-between; align-items:center; padding:2px 0;">
           <span style="opacity:.7;">${k}</span>
@@ -328,7 +450,11 @@
         </div>`
       ).join('');
     }
+<<<<<<< HEAD
   
+=======
+
+>>>>>>> copilot/sub-pr-46
     function renderSpectrum(rpm){
       const spec = spectrumFromBandModels(finalBands, centers, rpm);
       const harm = calib.harmonics || {};
@@ -352,22 +478,36 @@
           if(!Number.isFinite(Lh)) continue;
           const Eh = Math.pow(10, Lh/10);
           const fLine = h*bpf;
+<<<<<<< HEAD
           for(const [k,w] of distributeLineToBands(fLine, centers, f1, f2, sigmaB, topk)){
             Es[k] += Eh*w;
           }
+=======
+            for(const [k,w] of distributeLineToBands(fLine, centers, f1, f2, sigmaB, topk)){
+              Es[k] += Eh*w;
+            }
+>>>>>>> copilot/sub-pr-46
         }
       }
       const E_sum = Es.reduce((a,b)=>a+b,0);
       const laSynth = (E_sum>0) ? 10*Math.log10(E_sum) : NaN;
       document.getElementById('laCompositeVal').textContent = Number.isFinite(laSynth) ? laSynth.toFixed(2) : '-';
+<<<<<<< HEAD
     
+=======
+
+>>>>>>> copilot/sub-pr-46
       let deltaDb = null;
       if(calib.laeq_correction_db_pchip){
         const d = evalPchip(calib.laeq_correction_db_pchip, Number(rpm));
         if(Number.isFinite(d)) deltaDb = d;
       }
       document.getElementById('deltaVal').textContent = (deltaDb!=null) ? (deltaDb>=0?`+${deltaDb.toFixed(2)}`:deltaDb.toFixed(2)) : '-';
+<<<<<<< HEAD
     
+=======
+
+>>>>>>> copilot/sub-pr-46
       const specClosed = centers.map((c,i)=> [c, Es[i]>0 ? 10*Math.log10(Es[i]) : null]);
       const ys = specClosed.map(p=>p[1]).filter(v=>v!=null && Number.isFinite(v));
       let yMin=-10,yMax=10;
@@ -412,15 +552,23 @@
       }, true);
       ec.resize();
     }
+<<<<<<< HEAD
   
+=======
+
+>>>>>>> copilot/sub-pr-46
     function setRPM(v){
       const rpm = Math.max(rpmMin, Math.min(rpmMax, Number(v)||rpmMin));
       rpmInput.value = String(Math.round(rpm));
       rpmRange.value = String(Math.round(rpm));
       renderSpectrum(rpm);
     }
+<<<<<<< HEAD
   
     // 初次渲染计时（前端）
+=======
+
+>>>>>>> copilot/sub-pr-46
     const renderStart = performance.now();
     if(!centers.length || finalBands.length===0){
       clearInterval(overlayTimer);
@@ -433,17 +581,29 @@
       renderTimings();
       return;
     }
+<<<<<<< HEAD
   
+=======
+
+>>>>>>> copilot/sub-pr-46
     setRPM(Math.round((rpmMin+rpmMax)/2));
     const frontRenderSec = (performance.now() - renderStart)/1000;
     renderInfoGrid(frontRenderSec);
     renderTimings();
+<<<<<<< HEAD
   
+=======
+
+>>>>>>> copilot/sub-pr-46
     clearInterval(overlayTimer);
     if(overlay && overlay.parentNode){
       overlay.parentNode.removeChild(overlay);
     }
+<<<<<<< HEAD
   
+=======
+
+>>>>>>> copilot/sub-pr-46
     (function attachAutoResize(){
       const kick = () => {
         const ec1 = echarts.getInstanceByDom(document.getElementById('calibChart')); ec1 && ec1.resize();
@@ -458,7 +618,11 @@
         const ro2 = new ResizeObserver(kick); ro2.observe(document.getElementById('countsChart'));
       } catch(e){}
     })();
+<<<<<<< HEAD
   
+=======
+
+>>>>>>> copilot/sub-pr-46
     rpmInput.addEventListener('input', ()=> setRPM(rpmInput.value));
     rpmInput.addEventListener('change', ()=> setRPM(rpmInput.value));
     rpmRange.addEventListener('input', ()=> setRPM(rpmRange.value));

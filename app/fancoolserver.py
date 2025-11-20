@@ -103,8 +103,9 @@ TOP_QUERIES_LIMIT = 100
 RECENT_LIKES_LIMIT = 100
 CLICK_COOLDOWN_SECONDS = 0.5
 RECENT_UPDATES_LIMIT = 100
-
+SPECTRUM_DOCK_ENABLED = os.getenv('SPECTRUM_DOCK_ENABLED', '') == '1'
 query_count_cache = 0
+announcement_cache: List[dict] | None = None  
 
 # UID cookie config
 UID_COOKIE_NAME = os.getenv('UID_COOKIE_NAME', 'fc_uid')
@@ -1354,7 +1355,8 @@ def api_theme():
 def api_config():
     cfg = {
         'click_cooldown_ms': CLICK_COOLDOWN_SECONDS * 1000,
-        'recent_likes_limit': RECENT_LIKES_LIMIT
+        'recent_likes_limit': RECENT_LIKES_LIMIT,
+        'spectrum_dock_enabled': SPECTRUM_DOCK_ENABLED
     }
     return resp_ok(cfg)
 
@@ -1552,7 +1554,44 @@ def api_spectrum_models():
         app.logger.exception(e)
         return resp_err('INTERNAL_ERROR', f'频谱模型接口异常: {e}', 500)
 
-    
+def refresh_announcement_cache():
+    """
+    每 60 秒轮询一次公告表，缓存当前可展示的前若干条公告（按优先级、创建时间排序）。
+    列表用于前端每 10 秒轮播一条。
+    结构：announcement_cache = [ {id, content_text}, ... ] 或 []
+    """
+    global announcement_cache
+    while True:
+        try:
+            rows = fetch_all("""
+              SELECT id, content_text
+              FROM announcements
+              WHERE is_valid=1
+                AND starts_at <= NOW()
+                AND NOW() < IFNULL(ends_at, '9999-12-31')
+              ORDER BY priority DESC, created_at DESC, id ASC
+              LIMIT 20
+            """)
+            announcement_cache = rows or []
+        except Exception as e:
+            app.logger.warning("更新公告缓存失败: %s", e)
+        time.sleep(60)
+
+threading.Thread(target=refresh_announcement_cache, daemon=True).start()
+
+@app.get('/api/announcement')
+def api_announcement():
+    """
+    返回：
+      items: 所有可轮播的公告列表（可能为空）
+      item: 兼容字段（列表第一条或 None）
+    前端若 items 长度 > 1 即启动 10 秒轮换。
+    """
+    items = announcement_cache or []
+    primary = items[0] if items else None
+    return resp_ok({'items': items, 'item': primary})
+
+# 其余路由与逻辑保持不变（下面继续原文件内容）
 # =========================================
 # Entrypoint
 # =========================================

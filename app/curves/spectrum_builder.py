@@ -15,7 +15,11 @@ from datetime import datetime
 from typing import Dict, Any, Optional, Tuple, List
 from concurrent.futures import ThreadPoolExecutor, Future
 
+<<<<<<< HEAD
 # 修复：portalocker 可选依赖 + 标志
+=======
+# portalocker 可选依赖 + 标志
+>>>>>>> copilot/sub-pr-46
 try:
     import portalocker  # type: ignore
     _HAS_PORTALOCKER = True

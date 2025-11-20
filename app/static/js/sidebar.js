@@ -91,7 +91,7 @@
     btn.setAttribute('aria-expanded', String(!collapsed));
   }
 
-  // Overlay (mobile) 初始化
+  //   (mobile) 初始化
   (function initSidebarOverlayModeOnce() {
     const vw = window.innerWidth;
     if (vw >= 600) return;
