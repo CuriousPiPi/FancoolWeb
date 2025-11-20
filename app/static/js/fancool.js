@@ -2601,7 +2601,7 @@ function __preservePageScrollDuring(fn){
     startMarqueeIfNeeded();
   });
 
-  // 触控/拖动横向阅读（保留你原有的跑马灯拖动交互）
+  // 触控/拖动横向阅读
   let dragState = null;
   function onPointerDown(e){
     if (!textSpan.classList.contains('is-marquee')) return;
