@@ -1309,7 +1309,7 @@ function bindXAxisSwitch(){
 
   try {
     xAxisSwitchTrack.setAttribute('role', 'switch');
-    xAxisSwitchTrack.setAttribute('aria-checked', String((currentXModeFromPayload(lastPayload) || 'rpm') !== 'rpm'));
+    xAxisSwitchTrack.setAttribute('aria-checked', String(currentXModeFromPayload(lastPayload) !== 'rpm'));
   } catch(_) {}
 
   function measure() {
