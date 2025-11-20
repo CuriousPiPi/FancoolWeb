@@ -880,23 +880,23 @@ function render(payload){
   primeRootRect();
   maybeStartRootPosWatch(600);
 
-    try {
-      const onFinished = () => {
-        try { chart.off('finished', onFinished); } catch(_){}
-        repaintPointer();
-        updateSpectrumLayout();
-        if (spectrumEnabled && !__skipSpectrumOnce) {
-          requestAndRenderSpectrum(true);
-        }
-        setTimeout(() => { __skipSpectrumOnce = false; }, 450);
-        try { syncLegendRailFromChart(); } catch(_){}
-      };
-      chart.on('finished', onFinished);
-    } catch(_){}
+  try {
+    const onFinished = () => {
+      try { chart.off('finished', onFinished); } catch(_){}
+      repaintPointer();
+      updateSpectrumLayout();
+      if (spectrumEnabled && !__skipSpectrumOnce) {
+        requestAndRenderSpectrum(true);
+      }
+      setTimeout(() => { __skipSpectrumOnce = false; }, 450);
+      try { syncLegendRailFromChart(); } catch(_){}
+    };
+    chart.on('finished', onFinished);
+  } catch(_){}
 
-      requestAnimationFrame(repaintPointer);
-      if (showFitCurves) refreshFitPanel();
-    }
+  requestAnimationFrame(repaintPointer);
+  if (showFitCurves) refreshFitPanel();
+}
 
   function resize(){ if (chart) chart.resize(); }
 
@@ -1031,7 +1031,7 @@ function buildSeries(rawSeries, xMode) {
 }
 
 function buildOption(payload) {
-  const { chartData, theme } = payload || {};
+  const { theme } = payload || {};
   const t = tokens(theme||'light');
   const sList = getSeriesArray();
   const xMode = currentXModeFromPayload(payload);
@@ -1309,7 +1309,7 @@ function bindXAxisSwitch(){
 
   try {
     xAxisSwitchTrack.setAttribute('role', 'switch');
-    xAxisSwitchTrack.setAttribute('aria-checked', String((currentXModeFromPayload(lastPayload) || 'rpm') !== 'rpm'));
+    xAxisSwitchTrack.setAttribute('aria-checked', String(currentXModeFromPayload(lastPayload) !== 'rpm'));
   } catch(_) {}
 
   function measure() {
@@ -2179,8 +2179,8 @@ function updateSpectrumLayout() {
   if (!spectrumRoot || !spectrumInner) return;
 
   if (isFs) {
-    if (spectrumRoot) spectrumRoot.style.height = '';
-    if (spectrumInner) spectrumInner.style.height = '';
+    spectrumRoot.style.height = '';
+    spectrumInner.style.height = '';
   }
   // NEW: 任何模式下都尽量触发频谱 resize，使其跟随容器宽度
   if (spectrumChart) { try { spectrumChart.resize(); } catch(_) {} }

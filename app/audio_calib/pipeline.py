@@ -39,11 +39,7 @@ def _fb_kwargs(params: Dict[str, Any]) -> Dict[str, Any]:
 
     order = as_int(params.get('bands_filter_order', 6), 6)
     use_fir = as_bool(params.get('use_fir_cpb', False), False)
-<<<<<<< HEAD
-    base_taps = as_int(params.get('fir_base_taps', 256), 256)
-=======
     base_taps = as_int(params.get('fir_base_taps', 512), 512)
->>>>>>> copilot/sub-pr-46
 
     if order < 2: order = 2
     if base_taps < 64: base_taps = 64
@@ -54,8 +50,6 @@ def _fb_kwargs(params: Dict[str, Any]) -> Dict[str, Any]:
         'fir_base_taps': base_taps
     }
 
-<<<<<<< HEAD
-=======
 # 多线程支持
 def _init_worker_lowprio(low_priority: bool = True, blas_threads: int = 1):
     """
@@ -70,6 +64,7 @@ def _init_worker_lowprio(low_priority: bool = True, blas_threads: int = 1):
                 try:
                     os.nice(10)  # 提高 nice 值 => 降低优先级
                 except Exception:
+                    # Ignore errors if unable to set process priority (non-critical)
                     pass
             else:
                 try:
@@ -81,8 +76,10 @@ def _init_worker_lowprio(low_priority: bool = True, blas_threads: int = 1):
                     except Exception:
                         p.nice(psutil.IDLE_PRIORITY_CLASS)  # type: ignore
                 except Exception:
+                    # Ignore errors if setting process priority fails (e.g., insufficient permissions or unsupported platform)
                     pass
     except Exception:
+        # Ignore all exceptions here: failure to set process priority is non-fatal and can be safely ignored.
         pass
 
     # 限制 BLAS/OMP 线程数，避免 “进程数 × 线程数” 过度叠加
@@ -191,7 +188,6 @@ def _short_file_worker(ap: str,
         "short_frames_used": int(E_A_use.shape[1]) if E_A_use.size else 0
     }
 
->>>>>>> copilot/sub-pr-46
 # ---------------- 滤波器组缓存 ----------------
 @lru_cache(maxsize=64)
 def _cached_iir_bank(fs: int, n_per_oct: int, centers_key: Tuple[float, ...], order: int) -> Tuple[Optional[np.ndarray], ...]:
@@ -669,27 +665,26 @@ def _build_pchip_anchor(xs_in: List[float], ys_in: List[float], *, nonneg: bool 
 
 # ---------------- 流水线：标定（env + 短录音） ----------------
 def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-<<<<<<< HEAD
-    import time
-=======
     """
     并行优化：
     - env 与 sweep 的滤波调用传入 fft_workers（开启 FFT 多线程）
     - 短录音（各转速挡位目录下的多文件）按“文件”为粒度使用进程池并行，子进程降低优先级且限制 BLAS 线程为 1
+    - collect_raw_anchor(bool): 是否收集并聚合原始（未扣环境）频带能量，用于后续诊断/扩展。
+      默认为 False：不做原始频带栈聚合，只保留环境扣除后的结果。
+      为 True 时：保留原始频带能量的均值或中位数（按 perfile_median）供后续可能使用。
     """
     import time, os
-    # 可配置并发与优先级
     cpu_cnt = os.cpu_count() or 1
     num_workers = int(params.get('num_workers', cpu_cnt) or cpu_cnt)
     num_workers = max(1, num_workers)
     low_priority = bool(params.get('low_priority', True))
+    perfile_median = bool(params.get('perfile_median', False))
+    collect_raw_anchor = bool(params.get('collect_raw_anchor', False))  # 新增开关
 
-    # BLAS 线程控制（可选）
     try:
         from threadpoolctl import threadpool_limits  # type: ignore
         _threadpool_limits_ctx = threadpool_limits
     except Exception:
-        # 兜底的空上下文
         class _NullCtx:
             def __init__(self, *_a, **_k): pass
             def __enter__(self): return self
@@ -697,18 +692,13 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
         def _threadpool_limits_ctx(_n: int):  # type: ignore
             return _NullCtx()
 
->>>>>>> copilot/sub-pr-46
     t0_all = time.perf_counter()
     timings = {
         "env_abs_scale_sec": 0.0,
         "env_frames_sec": 0.0,
         "env_agg_sec": 0.0,
         "short_full_sec": 0.0,
-<<<<<<< HEAD
-        "short_frames_sec": 0.0,   # B 后将基本为 0（不再二次滤波），保留字段以兼容外部统计
-=======
         "short_frames_sec": 0.0,   # 保留字段
->>>>>>> copilot/sub-pr-46
         "short_agg_sec": 0.0,
         "files_env": 0,
         "files_short": 0,
@@ -722,14 +712,13 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     fmin = float(params.get('fmin_hz', 20.0))
     fmax = float(params.get('fmax_hz', 20000.0))
     frame_sec = float(params.get('frame_sec', 1.0))
-    hop_sec = float(params.get('hop_sec', 0.5*frame_sec))
-    hop_ratio = 1.0 - max(0.0, min(hop_sec/frame_sec if frame_sec>0 else 0.0, 1.0))
+    hop_sec = float(params.get('hop_sec', 0.5 * frame_sec))
+    hop_ratio = 1.0 - max(0.0, min(hop_sec / frame_sec if frame_sec > 0 else 0.0, 1.0))
     band_grid = str(params.get('band_grid', 'iec-decimal'))
 
-    # AWA 校正后再截去首尾（用于短录音的“帧丢弃”）
     trim_head_sec = float(params.get('trim_head_sec', 0.75))
     trim_tail_sec = float(params.get('trim_tail_sec', 0.75))
-    highpass_hz   = float(params.get('highpass_hz', 20.0))
+    highpass_hz = float(params.get('highpass_hz', 20.0))
 
     env_qf = float(params.get('env_agg_per_frame', 40.0))
     env_qb = float(params.get('env_agg_per_band', 20.0))
@@ -739,15 +728,10 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     meas_mad_on = bool(params.get('meas_mad_pre_band', True))
     mad_tau = float(params.get('mad_tau', 3.0))
     snr_ratio_min = float(params.get('snr_ratio_min', 1.0))
-    perfile_median = bool(params.get('perfile_median', False))
     env_band_percentile = float(params.get('env_band_percentile', 30.0))
 
-<<<<<<< HEAD
-=======
     fbkw = _fb_kwargs(params)
 
->>>>>>> copilot/sub-pr-46
-    # 本地：从“无裁剪、无高通”的 x_raw 派生“裁剪+高通”的处理段（A 用在 env 的帧级基线）
     def _derive_proc_from_raw(x_raw: np.ndarray, fs_in: int,
                               trim_head: float, trim_tail: float, hp_hz: float) -> Tuple[np.ndarray, int]:
         xw = np.asarray(x_raw, dtype=np.float64, order='C')
@@ -771,8 +755,7 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     centers = make_centers_iec61260(n_per_octave=n_per_oct, fmin=fmin, fmax=fmax)
     if centers.size == 0:
         raise RuntimeError("频带中心为空，请调整 fmin/fmax")
-    K = centers.size
-    timings["bands"] = int(K)
+    timings["bands"] = int(centers.size)
 
     env_awa_path = find_awa(env_dir)
     if not env_awa_path:
@@ -786,25 +769,12 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
         raise RuntimeError("env/ 无音频文件")
     timings["files_env"] = int(len(env_files))
 
-    # A：一次性读取 env 原始波形并缓存（无裁剪、无高通）
     env_raw_cache: List[Tuple[np.ndarray, int]] = []
     for p in env_files:
         x_raw, fs_raw = read_audio_mono(p, target_fs=fs, trim_head_sec=0.0, trim_tail_sec=0.0,
                                         highpass_hz=0.0, for_slm_like=True)
         env_raw_cache.append((x_raw, fs_raw))
 
-<<<<<<< HEAD
-    # A：用缓存的原始波形做“整段 full”以获取绝对口径
-    t1 = time.perf_counter()
-    E_env_A_full_list = []
-    for (x_raw, fs_raw) in env_raw_cache:
-        E_A_full, _ = bands_time_energy_A(
-            x_raw, fs_raw, centers, n_per_oct, frame_sec, hop_ratio,
-            grid=band_grid, **_fb_kwargs(params)
-        )
-        E_env_A_full_list.append(E_A_full)
-=======
-    # A：用缓存的原始波形做“整段 full”以获取绝对口径（开启 FFT 多线程）
     t1 = time.perf_counter()
     E_env_A_full_list = []
     with _threadpool_limits_ctx(max(1, num_workers)):
@@ -814,28 +784,12 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
                 grid=band_grid, fft_workers=max(1, num_workers), **fbkw
             )
             E_env_A_full_list.append(E_A_full)
->>>>>>> copilot/sub-pr-46
     timings["env_abs_scale_sec"] += (time.perf_counter() - t1)
 
-    E_env_A_mean = np.mean(np.hstack(E_env_A_full_list), axis=1) if E_env_A_full_list else np.zeros((K,))
-    sA_env = (P0 * 10.0**(LAeq_env_awa/20.0)) / math.sqrt(max(float(np.sum(E_env_A_mean)), 1e-30))
-    s2A_env = sA_env**2
+    E_env_A_mean = np.mean(np.hstack(E_env_A_full_list), axis=1) if E_env_A_full_list else np.zeros((centers.size,))
+    sA_env = (P0 * 10.0 ** (LAeq_env_awa / 20.0)) / math.sqrt(max(float(np.sum(E_env_A_mean)), 1e-30))
+    s2A_env = sA_env ** 2
 
-<<<<<<< HEAD
-    # A：帧级统计（仍按“裁剪+高通”路径，但不再二次读盘，直接用缓存波形派生）
-    t1 = time.perf_counter()
-    E_env_A_proc_list, Etot_env_list = [], []
-    for (x_raw, fs_raw) in env_raw_cache:
-        x_proc, fs_proc = _derive_proc_from_raw(x_raw, fs_raw, trim_head_sec, trim_tail_sec, highpass_hz)
-        E_A_p, Etot = bands_time_energy_A(
-            x_proc, fs_proc, centers, n_per_oct, frame_sec, hop_ratio,
-            grid=band_grid, **_fb_kwargs(params)
-        )
-        E_env_A_proc_list.append(E_A_p); Etot_env_list.append(Etot)
-        if E_A_p.size:
-            timings["env_frames_total"] += int(E_A_p.shape[1])
-=======
-    # A：帧级统计（仍按“裁剪+高通”路径，但不再二次读盘，直接用缓存波形派生）（开启 FFT 多线程）
     t1 = time.perf_counter()
     E_env_A_proc_list, Etot_env_list = [], []
     with _threadpool_limits_ctx(max(1, num_workers)):
@@ -845,23 +799,24 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
                 x_proc, fs_proc, centers, n_per_oct, frame_sec, hop_ratio,
                 grid=band_grid, fft_workers=max(1, num_workers), **fbkw
             )
-            E_env_A_proc_list.append(E_A_p); Etot_env_list.append(Etot)
+            E_env_A_proc_list.append(E_A_p)
+            Etot_env_list.append(Etot)
             if E_A_p.size:
                 timings["env_frames_total"] += int(E_A_p.shape[1])
->>>>>>> copilot/sub-pr-46
     timings["env_frames_sec"] += (time.perf_counter() - t1)
 
     t1 = time.perf_counter()
-    E_env_A_frames = np.hstack(E_env_A_proc_list) if E_env_A_proc_list else np.zeros((K,0))
+    E_env_A_frames = np.hstack(E_env_A_proc_list) if E_env_A_proc_list else np.zeros((centers.size, 0))
     Etot_env = np.concatenate(Etot_env_list) if Etot_env_list else np.zeros((0,))
-
     E_env_FS_A_rob = aggregate_two_stage_with_preband_mad(
-        E_env_A_frames, Etot_env, qf_percent=env_qf, qb_percent=env_qb, mad_tau=mad_tau, enable_mad_pre_band=env_mad_on
+        E_env_A_frames, Etot_env, qf_percent=env_qf, qb_percent=env_qb,
+        mad_tau=mad_tau, enable_mad_pre_band=env_mad_on
     )
     la_env_from_base = db10_from_energy(np.array([np.sum(s2A_env * E_env_FS_A_rob)])).item()
 
     E_env12_A_pa2_base = s2A_env * env_band_baseline_low_quantile(
-        E_env_A_frames, Etot_env, low_percent=env_band_percentile, mad_tau=mad_tau, enable_mad_pre_band=env_mad_on
+        E_env_A_frames, Etot_env, low_percent=env_band_percentile,
+        mad_tau=mad_tau, enable_mad_pre_band=env_mad_on
     )
     timings["env_agg_sec"] += (time.perf_counter() - t1)
 
@@ -870,7 +825,7 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     la_nodes_envsub: List[float] = []
     per_rpm_counts: Dict[float, int] = {}
     invalid_band_stats: Dict[float, int] = {}
-    anchor_items: List[Dict] = []
+    anchor_items: List[Dict[str, Any]] = []
 
     report_rows: List[Dict[str, object]] = []
     report_rows.append({
@@ -884,12 +839,7 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
         "delta_post_env_db": ""
     })
 
-<<<<<<< HEAD
-    # B：短录音仅跑一遍 full 滤波，首尾“裁剪”改为按帧步长丢弃对应数量的帧，再做原聚合
-=======
-    # B：短录音按“文件”为粒度并行处理（进程池），汇总后再做 RPM 聚合
     from concurrent.futures import ProcessPoolExecutor, as_completed
->>>>>>> copilot/sub-pr-46
     for name in sorted(os.listdir(root)):
         d = os.path.join(root, name)
         if not os.path.isdir(d) or os.path.basename(d).lower() in ("env", "sweep"):
@@ -904,86 +854,12 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
         awa_path = find_awa(d)
         LAeq_dir = parse_awa_la(awa_path) if awa_path else float("nan")
 
-        E_raw_list_pa2: List[np.ndarray] = []
-        E_sub_list_pa2: List[np.ndarray] = []
+        # 条件收集原始频带能量
+        raw_list: List[np.ndarray] = [] if collect_raw_anchor else []  # 仍定义变量，方便以后扩展
+        sub_list: List[np.ndarray] = []
         la_raw_files: List[float] = []
         la_sub_files: List[float] = []
 
-<<<<<<< HEAD
-        for ap in files:
-            # 单次 IO：读“无裁剪、无高通”的原始波形（等同原 full 路径的输入）
-            t1 = time.perf_counter()
-            x_raw, fs_raw = read_audio_mono(ap, target_fs=fs, trim_head_sec=0.0, trim_tail_sec=0.0,
-                                            highpass_hz=0.0, for_slm_like=True)
-            # full（K×T_full），保持与原逻辑一致
-            E_A_full, Etot_full = bands_time_energy_A(
-                x_raw, fs_raw, centers, n_per_oct, frame_sec, hop_ratio,
-                grid=band_grid, **_fb_kwargs(params)
-            )
-            timings["short_full_sec"] += (time.perf_counter() - t1)
-
-            # 与目录 AWA 对齐的刻度
-            E_A_full_mean = np.mean(E_A_full, axis=1) if E_A_full.size else np.zeros((K,))
-            if np.isfinite(LAeq_dir):
-                sA_use = (P0 * 10.0**(LAeq_dir/20.0)) / math.sqrt(max(float(np.sum(E_A_full_mean)), 1e-30))
-            else:
-                sA_use = sA_env
-            s2A_use = sA_use**2
-
-            # B：用帧索引近似裁剪（不再二次滤波）
-            # 计算 full 的窗口与跳步
-            win = int(max(256, round(frame_sec * fs_raw)))
-            hop_samp = int(round(win * (1.0 - hop_ratio))) or win
-            T_full = int(E_A_full.shape[1]) if E_A_full.ndim == 2 else 0
-            head_frames = int(round(max(0.0, trim_head_sec) * fs_raw / max(1, hop_samp)))
-            tail_frames = int(round(max(0.0, trim_tail_sec) * fs_raw / max(1, hop_samp)))
-            i0 = min(T_full, head_frames)
-            i1 = max(i0, T_full - tail_frames)
-
-            if T_full > 0 and (i1 - i0) > 0:
-                E_A_use = E_A_full[:, i0:i1]
-                Etot_use = np.sum(E_A_use, axis=0)
-            else:
-                # 退化：直接用 full 全部帧
-                E_A_use = E_A_full
-                Etot_use = Etot_full
-
-            # 两阶段稳健聚合（保持原统计逻辑）
-            t1 = time.perf_counter()
-            E_A_rob = aggregate_two_stage_with_preband_mad(
-                E_A_use, Etot_use, qf_percent=meas_qf, qb_percent=meas_qb, mad_tau=mad_tau, enable_mad_pre_band=meas_mad_on
-            )
-            timings["short_agg_sec"] += (time.perf_counter() - t1)
-
-            # 能量域：应用刻度与环境扣除（环境基线沿用 env 结果）
-            E_meas12_A_pa2 = s2A_use * E_A_rob
-            E_env12_A_pa2 = E_env12_A_pa2_base * (s2A_use / s2A_env)
-            E_sub_pos = np.maximum(E_meas12_A_pa2 - E_env12_A_pa2, 0.0)
-
-            E_raw_list_pa2.append(E_meas12_A_pa2)
-            E_sub_list_pa2.append(E_sub_pos)
-
-            la_raw = db10_from_energy(np.array([np.sum(E_meas12_A_pa2)])).item()
-            la_sub = db10_from_energy(np.array([np.sum(E_sub_pos)])).item()
-            la_raw_files.append(la_raw)
-            la_sub_files.append(la_sub)
-
-            # 统计短录音“使用的帧数”（便于观察 B 的生效）
-            timings["short_frames_total"] += int(E_A_use.shape[1]) if E_A_use.size else 0
-
-            report_rows.append({
-                "scope": "file",
-                "rpm": ("" if rpm is None else int(round(rpm))),
-                "file": os.path.basename(ap),
-                "awa_la_db": LAeq_dir if np.isfinite(LAeq_dir) else "",
-                "proc_la_raw_db": la_raw,
-                "proc_la_post_env_db": la_sub,
-                "delta_raw_db": (la_raw - LAeq_dir) if np.isfinite(LAeq_dir) else "",
-                "delta_post_env_db": (la_sub - LAeq_dir) if np.isfinite(LAeq_dir) else ""
-            })
-
-        # RPM 聚合（保持不变）
-=======
         max_workers_dir = min(num_workers, max(1, len(files)))
         futures = []
         with ProcessPoolExecutor(max_workers=max_workers_dir,
@@ -1003,14 +879,18 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
             for fut in as_completed(futures):
                 res = fut.result()
                 E_meas = np.asarray(res["E_meas12_A_pa2"], float)
-                E_sub  = np.asarray(res["E_sub_pos"], float)
-                la_raw = float(res["la_raw"]); la_sub = float(res["la_sub"])
-                E_raw_list_pa2.append(E_meas)
-                E_sub_list_pa2.append(E_sub)
-                la_raw_files.append(la_raw); la_sub_files.append(la_sub)
+                E_sub = np.asarray(res["E_sub_pos"], float)
+                la_raw = float(res["la_raw"])
+                la_sub = float(res["la_sub"])
+
+                if collect_raw_anchor:
+                    raw_list.append(E_meas)
+                sub_list.append(E_sub)
+                la_raw_files.append(la_raw)
+                la_sub_files.append(la_sub)
 
                 timings["short_full_sec"] += float(res.get("short_full_sec", 0.0))
-                timings["short_agg_sec"]  += float(res.get("short_agg_sec", 0.0))
+                timings["short_agg_sec"] += float(res.get("short_agg_sec", 0.0))
                 timings["short_frames_total"] += int(res.get("short_frames_used", 0))
 
                 report_rows.append({
@@ -1024,27 +904,34 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
                     "delta_post_env_db": (la_sub - LAeq_dir) if np.isfinite(LAeq_dir) else ""
                 })
 
-        # RPM 聚合（保持原逻辑）
->>>>>>> copilot/sub-pr-46
-        E_raw_stack = np.stack(E_raw_list_pa2, axis=0)
-        E_sub_stack = np.stack(E_sub_list_pa2, axis=0)
+        # RPM 聚合（环境扣除后能量）
+        sub_stack = np.stack(sub_list, axis=0)
         if perfile_median:
-            E_anchor_raw_pa2 = np.median(E_raw_stack, axis=0)
-            E_anchor_pa2 = np.median(E_sub_stack, axis=0)
+            E_anchor_pa2 = np.median(sub_stack, axis=0)
             la_raw_rpm = float(np.median(np.array(la_raw_files, float)))
             la_sub_rpm = float(np.median(np.array(la_sub_files, float)))
         else:
-            E_anchor_raw_pa2 = np.mean(E_raw_stack, axis=0)
-            E_anchor_pa2 = np.mean(E_sub_stack, axis=0)
+            E_anchor_pa2 = np.mean(sub_stack, axis=0)
             la_raw_rpm = float(np.mean(np.array(la_raw_files, float)))
             la_sub_rpm = float(np.mean(np.array(la_sub_files, float)))
+
+        # 原始频带聚合（可选）
+        if collect_raw_anchor and raw_list:
+            raw_stack = np.stack(raw_list, axis=0)
+            if perfile_median:
+                E_anchor_raw_pa2 = np.median(raw_stack, axis=0)
+            else:
+                E_anchor_raw_pa2 = np.mean(raw_stack, axis=0)
+        else:
+            E_anchor_raw_pa2 = None  # 占位，不参与后续
 
         L_band_db = db10_from_energy(E_anchor_pa2)
         spectrum_db: List[Optional[float]] = []
         invalid_count = 0
         for v_E, v_dB in zip(E_anchor_pa2.tolist(), L_band_db.tolist()):
             if v_E <= 0.0 or (v_dB is None) or (isinstance(v_dB, float) and not np.isfinite(v_dB)):
-                spectrum_db.append(None); invalid_count += 1
+                spectrum_db.append(None)
+                invalid_count += 1
             else:
                 spectrum_db.append(float(v_dB))
 
@@ -1061,7 +948,8 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
             "label": name,
             "n_files": len(files),
             "source": "short_recordings_envsub_A",
-            "laeq_envsub_from_bands_db": db10_from_energy(np.array([np.sum(E_anchor_pa2)])).item()
+            "laeq_envsub_from_bands_db": db10_from_energy(np.array([np.sum(E_anchor_pa2)])).item(),
+            "raw_anchor_available": bool(E_anchor_raw_pa2 is not None)  # 标记可用性
         })
 
         report_rows.append({
@@ -1078,7 +966,7 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     if not rpm_nodes:
         raise RuntimeError("未找到任何 RPM 挡位数据")
 
-    pairs = sorted(zip(rpm_nodes, la_nodes_envsub, la_nodes_raw, anchor_items), key=lambda t:t[0])
+    pairs = sorted(zip(rpm_nodes, la_nodes_envsub, la_nodes_raw, anchor_items), key=lambda t: t[0])
     rpm_nodes = [p[0] for p in pairs]
     la_nodes_envsub = [p[1] for p in pairs]
     la_nodes_raw = [p[2] for p in pairs]
@@ -1103,7 +991,8 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
             "weighting": "A",
             "grid": band_grid,
             "env_band_energy_A": np.asarray(E_env12_A_pa2_base, float).tolist(),
-            "note": "spectrum_db 为能量域扣环境后的倍频程频带 dB（无效带为 null）；env 基线采用 MAD + 低分位（保守扣除）"
+            "note": "spectrum_db 为能量域扣环境后的倍频程频带 dB（无效带为 null）；env 基线采用 MAD + 低分位（保守扣除）",
+            "raw_anchor_available": any(it.get("raw_anchor_available") for it in anchor_items)
         },
         "stats": {
             "per_rpm_counts": {str(k): int(v) for k, v in per_rpm_counts.items()},
@@ -1123,7 +1012,8 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
             "trim_head_sec": trim_head_sec,
             "trim_tail_sec": trim_tail_sec,
             "highpass_hz": highpass_hz,
-            "band_grid": band_grid
+            "band_grid": band_grid,
+            "collect_raw_anchor": bool(collect_raw_anchor)  # 记录开关
         }
     }
 
@@ -1150,7 +1040,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
             'used_rpm_awa': None
         })
 
-    # 写入阶段耗时统计
     timings["total_sec"] = float(time.perf_counter() - t0_all)
     stats = calib.get("stats") or {}
     stats["timings"] = timings
@@ -1162,9 +1051,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
 def build_model_from_calib_with_sweep_in_memory(root_dir: str,
                                                 calib: Dict[str, Any],
                                                 params: Dict[str, Any]) -> Dict[str, Any]:
-<<<<<<< HEAD
-    import time
-=======
     """
     并行优化：
     - sweep 长录音单文件：在 bands_time_energy_A 中开启 FFT 多线程（fft_workers=num_workers）
@@ -1195,10 +1081,10 @@ def build_model_from_calib_with_sweep_in_memory(root_dir: str,
         try:
             os.nice(5)
         except Exception:
+            # Lowering process priority failed (e.g., insufficient permissions); safe to ignore and continue with default priority.
             pass
     # Windows 可选：若用户强需求，可外部整体下调运行服务的进程优先级
 
->>>>>>> copilot/sub-pr-46
     t_all = time.perf_counter()
     timing = {
         "read_raw_sec": 0.0,
@@ -1249,11 +1135,7 @@ def build_model_from_calib_with_sweep_in_memory(root_dir: str,
     sweep_bin_qf_percent = float(params.get('sweep_bin_qf_percent', 60.0))
     sweep_env_floor_dbA  = float(params.get('sweep_env_floor_dbA', -60.0))
 
-<<<<<<< HEAD
-    # closure_mode parameter parsed but not used
-=======
-    closure_mode = str(params.get('closure_mode', 'none')).strip().lower()
->>>>>>> copilot/sub-pr-46
+    # closure_mode parameter is not used
 
     harmonics_enable = bool(params.get('harmonics_enable', False))
 
@@ -1328,16 +1210,6 @@ def build_model_from_calib_with_sweep_in_memory(root_dir: str,
             xw = signal.sosfilt(sos, xw)
         return xw.astype(np.float64, copy=False), int(fs_in)
 
-<<<<<<< HEAD
-    # 逐帧滤波（仅一次）
-    t1 = time.perf_counter()
-    x_proc, fs1 = _derive_proc_from_raw(x_raw, fs0, trim_head_sec, trim_tail_sec, highpass_hz)
-    E_A_frames, _ = bands_time_energy_A(
-        x_proc, fs1, centers, n_per_oct, frame_sec, hop_ratio,
-        grid=band_grid, **_fb_kwargs(params)
-    )
-    timing["read_proc_sec"] += 0.0  # 内存派生很快，可忽略或单独计时；此处保持为 0
-=======
     # 逐帧滤波（仅一次；开启 FFT 多线程 + 限制 BLAS 线程数）
     t1 = time.perf_counter()
     x_proc, fs1 = _derive_proc_from_raw(x_raw, fs0, trim_head_sec, trim_tail_sec, highpass_hz)
@@ -1347,7 +1219,6 @@ def build_model_from_calib_with_sweep_in_memory(root_dir: str,
             grid=band_grid, fft_workers=max(1, num_workers), **_fb_kwargs(params)
         )
     timing["read_proc_sec"] += 0.0  # 内存派生很快
->>>>>>> copilot/sub-pr-46
     timing["frames_filter_sec"] += (time.perf_counter() - t1)
 
     K, T = E_A_frames.shape if E_A_frames.ndim == 2 else (centers.size, 0)
@@ -1619,11 +1490,7 @@ def build_model_from_calib_with_sweep_in_memory(root_dir: str,
                 # post：低频均值平滑（后续一并做，提高一致性）
                 L_nodes_post[k].append(L_nodes_pre[k][-1])
 
-<<<<<<< HEAD
-        # 低频跨带均值平滑
-=======
         # 低频跨带均值平滑（保持原逻辑）
->>>>>>> copilot/sub-pr-46
         if len(ctrs) > 0:
             mask_low_mean = (centers < lowfreq_mean_smooth_below_hz)
             max_span = max(0, int(lowfreq_mean_max_span_bands))
@@ -1697,19 +1564,12 @@ def build_model_from_calib_with_sweep_in_memory(root_dir: str,
         )
         timing["harmonics_sec"] += (time.perf_counter() - t1)
 
-<<<<<<< HEAD
-    # Δ_pchip 烘焙
-=======
     # Δ_pchip 烘焙（保持原逻辑）
->>>>>>> copilot/sub-pr-46
     t1 = time.perf_counter()
     corr_pchip: Optional[Dict[str, Any]] = None
     try:
         if calib_model and isinstance(calib_model, dict):
-<<<<<<< HEAD
-=======
             f1_edges, f2_edges = band_edges_from_centers(centers, n_per_oct, grid="iec-decimal")
->>>>>>> copilot/sub-pr-46
             delta_list: List[float] = []
             for r in ctrs:
                 E_sum = 0.0
@@ -1718,10 +1578,6 @@ def build_model_from_calib_with_sweep_in_memory(root_dir: str,
                         y_db = float(pchip_eval(mdl, float(r)))
                         E_sum += (P0**2) * (10.0 ** (y_db / 10.0))
                 if harmonics_enable and harmonics and harmonics.get("n_blade", 0) > 0:
-<<<<<<< HEAD
-                    f1e, f2e = f1_edges, f2_edges
-=======
->>>>>>> copilot/sub-pr-46
                     sigma_b = float((harmonics.get("kernel") or {}).get("sigma_bands", 0.25))
                     topk = int((harmonics.get("kernel") or {}).get("topk", 3))
                     bpf = harmonics["n_blade"] * (float(r) / 60.0)
@@ -1731,11 +1587,7 @@ def build_model_from_calib_with_sweep_in_memory(root_dir: str,
                         Lh = float(pchip_eval(mdlh, float(r)))
                         if not np.isfinite(Lh): continue
                         Eh = (P0**2) * (10.0 ** (Lh/10.0))
-<<<<<<< HEAD
-                        for k, w in _distribute_line_to_bands(h*bpf, centers, f1e, f2e, sigma_bands=sigma_b, topk=topk):
-=======
                         for k, w in _distribute_line_to_bands(h*bpf, centers, f1_edges, f2_edges, sigma_bands=sigma_b, topk=topk):
->>>>>>> copilot/sub-pr-46
                             E_sum += Eh * w
                 la_synth = 10.0 * math.log10(max(E_sum/(P0**2), 1e-30))
                 la_tgt = float(pchip_eval(calib_model, float(r)))
@@ -1826,11 +1678,7 @@ def build_model_from_calib_with_sweep_in_memory(root_dir: str,
         "band_models_pchip_la": band_models_baked_la,
         "band_models_pchip_hybrid": band_models_baked_hy,
         "band_models_pchip": band_models_baked_hy,
-<<<<<<< HEAD
-        "band_models_pchip_pre": band_models_pre_hy
-=======
         "band_models_pchip_pre": band_models_pre
->>>>>>> copilot/sub-pr-46
     }
 
     # 汇总阶段耗时（包含校准阶段来自 calib.stats.timings）
@@ -2095,9 +1943,6 @@ def bands_time_energy_A(x: np.ndarray,
                         *,
                         bands_filter_order: int = 4,
                         use_fir_cpb: bool = False,
-<<<<<<< HEAD
-                        fir_base_taps: int = 256) -> Tuple[np.ndarray, np.ndarray]:
-=======
                         fir_base_taps: int = 256,
                         fft_workers: int = 0) -> Tuple[np.ndarray, np.ndarray]:
     """
@@ -2108,7 +1953,6 @@ def bands_time_energy_A(x: np.ndarray,
     import contextlib
     from scipy import fft
 
->>>>>>> copilot/sub-pr-46
     centers = np.asarray(centers, float)
     K = int(centers.size)
     if K == 0 or x.size == 0 or fs <= 0 or frame_sec <= 0:
@@ -2138,23 +1982,6 @@ def bands_time_energy_A(x: np.ndarray,
     box = np.ones(win, dtype=float) / float(win)
 
     xf = x.astype(float, copy=False)
-<<<<<<< HEAD
-    for k in range(K):
-        filt = fb[k]
-        if filt is None:
-            continue
-        if is_fir:
-            # 用重叠-相加 FFT 卷积，长序列/长 taps 明显快于 lfilter
-            y = signal.oaconvolve(xf, np.asarray(filt, dtype=float), mode='same')
-        else:
-            y = signal.sosfilt(np.asarray(filt), xf)
-        y2 = y * y
-        # 对 y2 做滑动平均（能量窗），再等间隔抽样
-        avg = signal.oaconvolve(y2, box, mode='valid')  # 长度 N - win + 1
-        if avg.size <= 0 or T <= 0:
-            continue
-        E_A[k, :] = avg[starts] * float(W_A[k])
-=======
 
     ctx = fft.set_workers(int(fft_workers)) if (isinstance(fft_workers, int) and fft_workers > 1) else contextlib.nullcontext()
     with ctx:
@@ -2174,7 +2001,6 @@ def bands_time_energy_A(x: np.ndarray,
             if avg.size <= 0 or T <= 0:
                 continue
             E_A[k, :] = avg[starts] * float(W_A[k])
->>>>>>> copilot/sub-pr-46
 
     Etot_A = np.sum(E_A, axis=0) if T > 0 else np.zeros((0,), dtype=float)
     return E_A, Etot_A
