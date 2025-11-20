@@ -669,20 +669,22 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     并行优化：
     - env 与 sweep 的滤波调用传入 fft_workers（开启 FFT 多线程）
     - 短录音（各转速挡位目录下的多文件）按“文件”为粒度使用进程池并行，子进程降低优先级且限制 BLAS 线程为 1
+    - collect_raw_anchor(bool): 是否收集并聚合原始（未扣环境）频带能量，用于后续诊断/扩展。
+      默认为 False：不做原始频带栈聚合，只保留环境扣除后的结果。
+      为 True 时：保留原始频带能量的均值或中位数（按 perfile_median）供后续可能使用。
     """
     import time, os
-    # 可配置并发与优先级
     cpu_cnt = os.cpu_count() or 1
     num_workers = int(params.get('num_workers', cpu_cnt) or cpu_cnt)
     num_workers = max(1, num_workers)
     low_priority = bool(params.get('low_priority', True))
+    perfile_median = bool(params.get('perfile_median', False))
+    collect_raw_anchor = bool(params.get('collect_raw_anchor', False))  # 新增开关
 
-    # BLAS 线程控制（可选）
     try:
         from threadpoolctl import threadpool_limits  # type: ignore
         _threadpool_limits_ctx = threadpool_limits
     except Exception:
-        # 兜底的空上下文
         class _NullCtx:
             def __init__(self, *_a, **_k): pass
             def __enter__(self): return self
@@ -710,14 +712,13 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     fmin = float(params.get('fmin_hz', 20.0))
     fmax = float(params.get('fmax_hz', 20000.0))
     frame_sec = float(params.get('frame_sec', 1.0))
-    hop_sec = float(params.get('hop_sec', 0.5*frame_sec))
-    hop_ratio = 1.0 - max(0.0, min(hop_sec/frame_sec if frame_sec>0 else 0.0, 1.0))
+    hop_sec = float(params.get('hop_sec', 0.5 * frame_sec))
+    hop_ratio = 1.0 - max(0.0, min(hop_sec / frame_sec if frame_sec > 0 else 0.0, 1.0))
     band_grid = str(params.get('band_grid', 'iec-decimal'))
 
-    # AWA 校正后再截去首尾（用于短录音的“帧丢弃”）
     trim_head_sec = float(params.get('trim_head_sec', 0.75))
     trim_tail_sec = float(params.get('trim_tail_sec', 0.75))
-    highpass_hz   = float(params.get('highpass_hz', 20.0))
+    highpass_hz = float(params.get('highpass_hz', 20.0))
 
     env_qf = float(params.get('env_agg_per_frame', 40.0))
     env_qb = float(params.get('env_agg_per_band', 20.0))
@@ -727,12 +728,10 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     meas_mad_on = bool(params.get('meas_mad_pre_band', True))
     mad_tau = float(params.get('mad_tau', 3.0))
     snr_ratio_min = float(params.get('snr_ratio_min', 1.0))
-    perfile_median = bool(params.get('perfile_median', False))
     env_band_percentile = float(params.get('env_band_percentile', 30.0))
 
     fbkw = _fb_kwargs(params)
 
-    # 本地：从“无裁剪、无高通”的 x_raw 派生“裁剪+高通”的处理段（A 用在 env 的帧级基线）
     def _derive_proc_from_raw(x_raw: np.ndarray, fs_in: int,
                               trim_head: float, trim_tail: float, hp_hz: float) -> Tuple[np.ndarray, int]:
         xw = np.asarray(x_raw, dtype=np.float64, order='C')
@@ -756,8 +755,7 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     centers = make_centers_iec61260(n_per_octave=n_per_oct, fmin=fmin, fmax=fmax)
     if centers.size == 0:
         raise RuntimeError("频带中心为空，请调整 fmin/fmax")
-    K = centers.size
-    timings["bands"] = int(K)
+    timings["bands"] = int(centers.size)
 
     env_awa_path = find_awa(env_dir)
     if not env_awa_path:
@@ -771,14 +769,12 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
         raise RuntimeError("env/ 无音频文件")
     timings["files_env"] = int(len(env_files))
 
-    # A：一次性读取 env 原始波形并缓存（无裁剪、无高通）
     env_raw_cache: List[Tuple[np.ndarray, int]] = []
     for p in env_files:
         x_raw, fs_raw = read_audio_mono(p, target_fs=fs, trim_head_sec=0.0, trim_tail_sec=0.0,
                                         highpass_hz=0.0, for_slm_like=True)
         env_raw_cache.append((x_raw, fs_raw))
 
-    # A：用缓存的原始波形做“整段 full”以获取绝对口径（开启 FFT 多线程）
     t1 = time.perf_counter()
     E_env_A_full_list = []
     with _threadpool_limits_ctx(max(1, num_workers)):
@@ -790,11 +786,10 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
             E_env_A_full_list.append(E_A_full)
     timings["env_abs_scale_sec"] += (time.perf_counter() - t1)
 
-    E_env_A_mean = np.mean(np.hstack(E_env_A_full_list), axis=1) if E_env_A_full_list else np.zeros((K,))
-    sA_env = (P0 * 10.0**(LAeq_env_awa/20.0)) / math.sqrt(max(float(np.sum(E_env_A_mean)), 1e-30))
-    s2A_env = sA_env**2
+    E_env_A_mean = np.mean(np.hstack(E_env_A_full_list), axis=1) if E_env_A_full_list else np.zeros((centers.size,))
+    sA_env = (P0 * 10.0 ** (LAeq_env_awa / 20.0)) / math.sqrt(max(float(np.sum(E_env_A_mean)), 1e-30))
+    s2A_env = sA_env ** 2
 
-    # A：帧级统计（仍按“裁剪+高通”路径，但不再二次读盘，直接用缓存波形派生）（开启 FFT 多线程）
     t1 = time.perf_counter()
     E_env_A_proc_list, Etot_env_list = [], []
     with _threadpool_limits_ctx(max(1, num_workers)):
@@ -804,22 +799,24 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
                 x_proc, fs_proc, centers, n_per_oct, frame_sec, hop_ratio,
                 grid=band_grid, fft_workers=max(1, num_workers), **fbkw
             )
-            E_env_A_proc_list.append(E_A_p); Etot_env_list.append(Etot)
+            E_env_A_proc_list.append(E_A_p)
+            Etot_env_list.append(Etot)
             if E_A_p.size:
                 timings["env_frames_total"] += int(E_A_p.shape[1])
     timings["env_frames_sec"] += (time.perf_counter() - t1)
 
     t1 = time.perf_counter()
-    E_env_A_frames = np.hstack(E_env_A_proc_list) if E_env_A_proc_list else np.zeros((K,0))
+    E_env_A_frames = np.hstack(E_env_A_proc_list) if E_env_A_proc_list else np.zeros((centers.size, 0))
     Etot_env = np.concatenate(Etot_env_list) if Etot_env_list else np.zeros((0,))
-
     E_env_FS_A_rob = aggregate_two_stage_with_preband_mad(
-        E_env_A_frames, Etot_env, qf_percent=env_qf, qb_percent=env_qb, mad_tau=mad_tau, enable_mad_pre_band=env_mad_on
+        E_env_A_frames, Etot_env, qf_percent=env_qf, qb_percent=env_qb,
+        mad_tau=mad_tau, enable_mad_pre_band=env_mad_on
     )
     la_env_from_base = db10_from_energy(np.array([np.sum(s2A_env * E_env_FS_A_rob)])).item()
 
     E_env12_A_pa2_base = s2A_env * env_band_baseline_low_quantile(
-        E_env_A_frames, Etot_env, low_percent=env_band_percentile, mad_tau=mad_tau, enable_mad_pre_band=env_mad_on
+        E_env_A_frames, Etot_env, low_percent=env_band_percentile,
+        mad_tau=mad_tau, enable_mad_pre_band=env_mad_on
     )
     timings["env_agg_sec"] += (time.perf_counter() - t1)
 
@@ -828,7 +825,7 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     la_nodes_envsub: List[float] = []
     per_rpm_counts: Dict[float, int] = {}
     invalid_band_stats: Dict[float, int] = {}
-    anchor_items: List[Dict] = []
+    anchor_items: List[Dict[str, Any]] = []
 
     report_rows: List[Dict[str, object]] = []
     report_rows.append({
@@ -842,7 +839,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
         "delta_post_env_db": ""
     })
 
-    # B：短录音按“文件”为粒度并行处理（进程池），汇总后再做 RPM 聚合
     from concurrent.futures import ProcessPoolExecutor, as_completed
     for name in sorted(os.listdir(root)):
         d = os.path.join(root, name)
@@ -858,8 +854,9 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
         awa_path = find_awa(d)
         LAeq_dir = parse_awa_la(awa_path) if awa_path else float("nan")
 
-        E_raw_list_pa2: List[np.ndarray] = []
-        E_sub_list_pa2: List[np.ndarray] = []
+        # 条件收集原始频带能量
+        raw_list: List[np.ndarray] = [] if collect_raw_anchor else []  # 仍定义变量，方便以后扩展
+        sub_list: List[np.ndarray] = []
         la_raw_files: List[float] = []
         la_sub_files: List[float] = []
 
@@ -882,14 +879,18 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
             for fut in as_completed(futures):
                 res = fut.result()
                 E_meas = np.asarray(res["E_meas12_A_pa2"], float)
-                E_sub  = np.asarray(res["E_sub_pos"], float)
-                la_raw = float(res["la_raw"]); la_sub = float(res["la_sub"])
-                E_raw_list_pa2.append(E_meas)
-                E_sub_list_pa2.append(E_sub)
-                la_raw_files.append(la_raw); la_sub_files.append(la_sub)
+                E_sub = np.asarray(res["E_sub_pos"], float)
+                la_raw = float(res["la_raw"])
+                la_sub = float(res["la_sub"])
+
+                if collect_raw_anchor:
+                    raw_list.append(E_meas)
+                sub_list.append(E_sub)
+                la_raw_files.append(la_raw)
+                la_sub_files.append(la_sub)
 
                 timings["short_full_sec"] += float(res.get("short_full_sec", 0.0))
-                timings["short_agg_sec"]  += float(res.get("short_agg_sec", 0.0))
+                timings["short_agg_sec"] += float(res.get("short_agg_sec", 0.0))
                 timings["short_frames_total"] += int(res.get("short_frames_used", 0))
 
                 report_rows.append({
@@ -903,26 +904,34 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
                     "delta_post_env_db": (la_sub - LAeq_dir) if np.isfinite(LAeq_dir) else ""
                 })
 
-        # RPM 聚合（保持原逻辑）
-        E_raw_stack = np.stack(E_raw_list_pa2, axis=0)
-        E_sub_stack = np.stack(E_sub_list_pa2, axis=0)
+        # RPM 聚合（环境扣除后能量）
+        sub_stack = np.stack(sub_list, axis=0)
         if perfile_median:
-            E_anchor_raw_pa2 = np.median(E_raw_stack, axis=0)
-            E_anchor_pa2 = np.median(E_sub_stack, axis=0)
+            E_anchor_pa2 = np.median(sub_stack, axis=0)
             la_raw_rpm = float(np.median(np.array(la_raw_files, float)))
             la_sub_rpm = float(np.median(np.array(la_sub_files, float)))
         else:
-            E_anchor_raw_pa2 = np.mean(E_raw_stack, axis=0)
-            E_anchor_pa2 = np.mean(E_sub_stack, axis=0)
+            E_anchor_pa2 = np.mean(sub_stack, axis=0)
             la_raw_rpm = float(np.mean(np.array(la_raw_files, float)))
             la_sub_rpm = float(np.mean(np.array(la_sub_files, float)))
+
+        # 原始频带聚合（可选）
+        if collect_raw_anchor and raw_list:
+            raw_stack = np.stack(raw_list, axis=0)
+            if perfile_median:
+                E_anchor_raw_pa2 = np.median(raw_stack, axis=0)
+            else:
+                E_anchor_raw_pa2 = np.mean(raw_stack, axis=0)
+        else:
+            E_anchor_raw_pa2 = None  # 占位，不参与后续
 
         L_band_db = db10_from_energy(E_anchor_pa2)
         spectrum_db: List[Optional[float]] = []
         invalid_count = 0
         for v_E, v_dB in zip(E_anchor_pa2.tolist(), L_band_db.tolist()):
             if v_E <= 0.0 or (v_dB is None) or (isinstance(v_dB, float) and not np.isfinite(v_dB)):
-                spectrum_db.append(None); invalid_count += 1
+                spectrum_db.append(None)
+                invalid_count += 1
             else:
                 spectrum_db.append(float(v_dB))
 
@@ -939,7 +948,8 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
             "label": name,
             "n_files": len(files),
             "source": "short_recordings_envsub_A",
-            "laeq_envsub_from_bands_db": db10_from_energy(np.array([np.sum(E_anchor_pa2)])).item()
+            "laeq_envsub_from_bands_db": db10_from_energy(np.array([np.sum(E_anchor_pa2)])).item(),
+            "raw_anchor_available": bool(E_anchor_raw_pa2 is not None)  # 标记可用性
         })
 
         report_rows.append({
@@ -956,7 +966,7 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     if not rpm_nodes:
         raise RuntimeError("未找到任何 RPM 挡位数据")
 
-    pairs = sorted(zip(rpm_nodes, la_nodes_envsub, la_nodes_raw, anchor_items), key=lambda t:t[0])
+    pairs = sorted(zip(rpm_nodes, la_nodes_envsub, la_nodes_raw, anchor_items), key=lambda t: t[0])
     rpm_nodes = [p[0] for p in pairs]
     la_nodes_envsub = [p[1] for p in pairs]
     la_nodes_raw = [p[2] for p in pairs]
@@ -981,7 +991,8 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
             "weighting": "A",
             "grid": band_grid,
             "env_band_energy_A": np.asarray(E_env12_A_pa2_base, float).tolist(),
-            "note": "spectrum_db 为能量域扣环境后的倍频程频带 dB（无效带为 null）；env 基线采用 MAD + 低分位（保守扣除）"
+            "note": "spectrum_db 为能量域扣环境后的倍频程频带 dB（无效带为 null）；env 基线采用 MAD + 低分位（保守扣除）",
+            "raw_anchor_available": any(it.get("raw_anchor_available") for it in anchor_items)
         },
         "stats": {
             "per_rpm_counts": {str(k): int(v) for k, v in per_rpm_counts.items()},
@@ -1001,7 +1012,8 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
             "trim_head_sec": trim_head_sec,
             "trim_tail_sec": trim_tail_sec,
             "highpass_hz": highpass_hz,
-            "band_grid": band_grid
+            "band_grid": band_grid,
+            "collect_raw_anchor": bool(collect_raw_anchor)  # 记录开关
         }
     }
 
@@ -1028,7 +1040,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
             'used_rpm_awa': None
         })
 
-    # 写入阶段耗时统计
     timings["total_sec"] = float(time.perf_counter() - t0_all)
     stats = calib.get("stats") or {}
     stats["timings"] = timings
