@@ -868,10 +868,22 @@ def api_batch_search():
 
     date_from = (payload.get('date_from') or '').strip()
     date_to = (payload.get('date_to') or '').strip()
-    # 若前端未传，默认近7天
+
+    # 分别兜底：
+    # - date_from 为空时，用「当前时间 - 7 天」的 00:00:00
+    # - date_to 为空时，用「当前时间」的 23:59:59
     if not date_from or not date_to:
-        rows = _fetch_all("SELECT DATE_FORMAT(DATE_SUB(NOW(), INTERVAL 7 DAY), '%Y-%m-%d 00:00:00') AS df, DATE_FORMAT(NOW(), '%Y-%m-%d 23:59:59') AS dt")
-        date_from = rows[0]['df']; date_to = rows[0]['dt']
+        rows = _fetch_all("""
+            SELECT
+              DATE_FORMAT(DATE_SUB(NOW(), INTERVAL 7 DAY), '%Y-%m-%d 00:00:00') AS df,
+              DATE_FORMAT(NOW(), '%Y-%m-%d 23:59:59') AS dt
+        """)
+        default_from = rows[0]['df']
+        default_to = rows[0]['dt']
+        if not date_from:
+            date_from = default_from
+        if not date_to:
+            date_to = default_to
 
     try:
         page = int(payload.get('page') or 1)
@@ -916,9 +928,16 @@ def api_batch_search():
     # 拉取数据
     rows = _fetch_all(f"""
         SELECT
-          v.batch_id, v.model_id, v.condition_id, COALESCE(v.is_valid,0) AS is_valid,
-          v.brand_name_zh, v.model_name, v.condition_name_zh,
-          v.data_count, DATE_FORMAT(v.create_date, '%Y-%m-%d %H:%i') AS create_date
+          v.batch_id,
+          v.model_id,
+          v.condition_id,
+          COALESCE(v.is_valid,0) AS is_valid,
+          v.brand_name_zh,
+          v.model_name,
+          v.condition_name_zh,
+          v.data_count,
+          v.audio_batch_id,
+          DATE_FORMAT(v.create_date, '%Y-%m-%d %H:%i') AS create_date
         {base_from}
         {where_sql}
         ORDER BY v.create_date DESC
@@ -936,7 +955,8 @@ def api_batch_search():
             'model_name': r.get('model_name') or '',
             'condition_name': r.get('condition_name_zh') or '',
             'data_count': int(r.get('data_count') or 0),
-            'create_date': r.get('create_date')
+            'create_date': r.get('create_date'),
+            'audio_batch_id': r.get('audio_batch_id') or None,
         })
     return resp_ok({'items': items, 'page': page, 'page_size': size, 'total': total})
 

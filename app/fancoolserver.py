@@ -7,7 +7,8 @@ import hmac
 import hashlib
 import math
 import signal
-from .curves import pchip_cache
+import json
+from app.curves import pchip_cache
 from datetime import datetime, timedelta
 from typing import List, Dict, Tuple, Any
 
@@ -16,10 +17,10 @@ from sqlalchemy import create_engine, text
 from user_agents import parse as parse_ua
 from werkzeug.middleware.proxy_fix import ProxyFix
 
-from .curves.pchip_cache import get_or_build_unified_perf_model, eval_pchip
-from .curves import spectrum_cache
-from .curves.spectrum_builder import load_default_params, compute_param_hash, schedule_rebuild, build_performance_pchips
-from concurrent.futures import TimeoutError as FuturesTimeoutError
+from app.curves.pchip_cache import get_or_build_unified_perf_model, eval_pchip
+from app.curves import spectrum_cache
+from app.curves.spectrum_builder import build_performance_pchips
+from app.audio_calib import calib_worker as calibw
 
 CODE_VERSION = os.getenv('CODE_VERSION', '')
 
@@ -97,6 +98,7 @@ engine = create_engine(
     pool_recycle=1800,
     future=True
 )
+calibw.engine = engine
 
 SIZE_OPTIONS = ["不限", "120"] #, "140"]
 TOP_QUERIES_LIMIT = 100
@@ -1420,13 +1422,10 @@ def api_recent_updates():
 @app.post('/api/spectrum-models')
 def api_spectrum_models():
     """
-    修改要点：
-      - 对每个 (model_id, condition_id) 先校验磁盘缓存 meta 与当前 param_hash/code_version/audio_data_hash 是否一致；
-      - 若一致：返回瘦身后的 model（原行为）；
-      - 若不一致：检查 perf_audio_binding 是否存在绑定音频：
-          * 若无绑定：将该 pair 标记为 missing（客户端展示“该组数据暂无噪声频谱”）
-          * 若有绑定：触发异步重建 schedule_rebuild(...)；短等待 5 秒尝试获取结果，超时则把该 pair 标记为 rebuilding（客户端展示“频谱重建中，请稍后再试”）
-      - 不把 meta 返回给前端（按要求）。
+    用户频谱模型接口：只依赖 spectrum_cache + audio_calib_job，不直接跑 pipeline。
+      - 缓存命中且 meta 一致：返回瘦身 model；
+      - 无绑定：missing；
+      - 有绑定但无有效模型：创建/复用 calib_job 提交后台 worker，当前请求标记 rebuilding。
     """
     try:
         data = request.get_json(force=True, silent=True) or {}
@@ -1434,57 +1433,88 @@ def api_spectrum_models():
         uniq, seen = [], set()
         for p in raw_pairs:
             try:
-                mid = int(p.get('model_id')); cid = int(p.get('condition_id'))
+                mid = int(p.get('model_id'))
+                cid = int(p.get('condition_id'))
             except Exception:
                 continue
             t = (mid, cid)
-            if t in seen: continue
-            seen.add(t); uniq.append(t)
+            if t in seen:
+                continue
+            seen.add(t)
+            uniq.append(t)
         if not uniq:
             return resp_ok({'models': [], 'missing': [], 'rebuilding': []})
 
-        params = load_default_params()
-        param_hash = compute_param_hash(params)
+        # 读取当前默认参数 hash 和 CODE_VERSION
+        with engine.begin() as conn:
+            row = conn.execute(text("""
+                SELECT params_json
+                FROM audio_calibration_params
+                WHERE is_default = 1
+                ORDER BY updated_at DESC
+                LIMIT 1
+            """)).fetchone()
+        if not row:
+            return resp_err('NO_DEFAULT_PARAMS', '未配置默认标定参数', 500)
+
+        mp = row._mapping
+        params_json = mp.get('params_json')
+        if isinstance(params_json, str):
+            params_dict = json.loads(params_json)
+        else:
+            params_dict = params_json or {}
+
+        param_hash = hashlib.sha1(
+            json.dumps(params_dict, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        ).hexdigest()
         code_ver = CODE_VERSION or ''
 
         models, missing, rebuilding = [], [], []
-        eng = engine
 
         for mid, cid in uniq:
-            # 尝试读取现有缓存
+            # 1) 先尝试读取缓存
             j = spectrum_cache.load(mid, cid)
             cur_meta = (j.get('meta') if isinstance(j, dict) else {}) or {}
             cur_model_raw = (j.get('model') if isinstance(j, dict) else {}) or {}
             slog.info("[/api/spectrum-models] pair=(%s,%s) cache_exists=%s", mid, cid, bool(j))
 
-            # 查绑定
-            with eng.begin() as conn:
+            # 2) 查绑定（取最新一条），仅判断是否存在，以及拿 audio_batch_id
+            with engine.begin() as conn:
                 row = conn.execute(text("""
-                    SELECT audio_batch_id, audio_data_hash, perf_batch_id
-                    FROM perf_audio_binding
+                    SELECT audio_batch_id, perf_batch_id
+                    FROM audio_perf_binding
                     WHERE model_id=:m AND condition_id=:c
                     ORDER BY created_at DESC LIMIT 1
                 """), {'m': mid, 'c': cid}).fetchone()
                 binding = row._mapping if row else None
+
             if not binding:
                 slog.info("  no binding found → missing(no_audio_bound)")
             else:
-                slog.info("  binding found: audio_batch_id=%s perf_batch_id=%s", binding.get('audio_batch_id'), binding.get('perf_batch_id'))
+                slog.info(
+                    "  binding found: audio_batch_id=%s perf_batch_id=%s",
+                    binding.get('audio_batch_id'), binding.get('perf_batch_id')
+                )
 
-            # 一致性校验
+            # 3) 一致性校验：仅依赖 cache meta 的 param_hash / code_version / audio_data_hash 是否存在
             cached_ok = False
             if cur_meta:
                 meta_param = str(cur_meta.get('param_hash') or '')
                 meta_code = str(cur_meta.get('code_version') or '')
                 meta_audio = str(cur_meta.get('audio_data_hash') or '')
-                bind_audio = (binding.get('audio_data_hash') or '') if binding else ''
-                expected_audio_hash = bind_audio or meta_audio
-                cached_ok = (meta_param == param_hash and meta_code == code_ver and meta_audio == expected_audio_hash and bool(cur_model_raw))
-                slog.info("  check cache: meta_param=%s cur_param=%s meta_code=%s cur_code=%s meta_audio=%s expect_audio=%s -> ok=%s",
-                          meta_param, param_hash, meta_code, code_ver, meta_audio, expected_audio_hash, cached_ok)
+                cached_ok = (
+                    meta_param == param_hash and
+                    meta_code == code_ver and
+                    bool(meta_audio) and        # 有一个非空的 audio_data_hash
+                    bool(cur_model_raw)
+                )
+                slog.info(
+                    "  check cache: meta_param=%s cur_param=%s meta_code=%s cur_code=%s meta_audio=%s -> ok=%s",
+                    meta_param, param_hash, meta_code, code_ver, meta_audio, cached_ok
+                )
 
             if cached_ok:
-                # 瘦身输出
+                # 4) 缓存一致，返回瘦身后的模型
                 m = cur_model_raw
                 calib = m.get('calibration') or {}
                 calib_model = calib.get('calib_model') or {}
@@ -1501,58 +1531,34 @@ def api_spectrum_models():
                     },
                     'anchor_presence': m.get('anchor_presence') or {}
                 }
-                models.append({'key': f'{mid}_{cid}', 'model_id': mid, 'condition_id': cid, 'model': slim, 'type': j.get('type') or 'spectrum_v2'})
+                models.append({
+                    'key': f'{mid}_{cid}',
+                    'model_id': mid,
+                    'condition_id': cid,
+                    'model': slim,
+                    'type': j.get('type') or 'spectrum_v2'
+                })
                 continue
 
-            # 缓存不一致 → 重建或提示无绑定
+            # 5) 缓存不满足要求
             if not binding:
+                # 没有任何绑定，直接缺失
                 missing.append({'model_id': mid, 'condition_id': cid, 'reason': 'no_audio_bound'})
                 continue
 
-            audio_batch_id = binding.get('audio_batch_id')
-            with eng.begin() as conn:
-                ab_row = conn.execute(text("SELECT base_path FROM audio_batch WHERE batch_id=:ab LIMIT 1"), {'ab': audio_batch_id}).fetchone()
-                base_path = ab_row._mapping.get('base_path') if ab_row else None
-
-            if not base_path:
-                slog.warning("  binding exists but audio base_path missing (batch_id=%s)", audio_batch_id)
-                missing.append({'model_id': mid, 'condition_id': cid, 'reason': 'audio_missing_on_disk'})
+            audio_batch_id = binding.get('audio_batch_id') or ''
+            if not audio_batch_id:
+                missing.append({'model_id': mid, 'condition_id': cid, 'reason': 'no_audio_batch_id'})
                 continue
 
-            # 异步重建
-            slog.info("  scheduling rebuild mid=%s cid=%s batch=%s base_path=%s", mid, cid, audio_batch_id, base_path)
-            fut = schedule_rebuild(mid, cid, audio_batch_id, base_path, params, binding.get('perf_batch_id'))
-
-            # 快路径（最多 0.2 秒）：极少数很快完成的任务直接返回模型；否则立即标记 rebuilding
+            # 6) 创建 / 复用 job 并提交 worker
             try:
-                res = fut.result(timeout=0.2)
-                slog.info("  rebuild quick result: %s", res)
-                if res and res.get('ok'):
-                    j2 = spectrum_cache.load(mid, cid) or {}
-                    m = (j2.get('model') or {})
-                    calib = m.get('calibration') or {}
-                    calib_model = calib.get('calib_model') or {}
-                    slim = {
-                        'version': m.get('version'),
-                        'centers_hz': m.get('centers_hz') or m.get('freq_hz') or m.get('freq') or [],
-                        'band_models_pchip': m.get('band_models_pchip') or [],
-                        'rpm_min': m.get('rpm_min') or calib_model.get('x0'),
-                        'rpm_max': m.get('rpm_max') or calib_model.get('x1'),
-                        'calibration': {
-                            'rpm_peak': calib.get('rpm_peak'),
-                            'rpm_peak_tol': calib.get('rpm_peak_tol'),
-                            'session_delta_db': calib.get('session_delta_db'),
-                        },
-                        'anchor_presence': m.get('anchor_presence') or {}
-                    }
-                    models.append({'key': f'{mid}_{cid}', 'model_id': mid, 'condition_id': cid, 'model': slim, 'type': j2.get('type') or 'spectrum_v2'})
-                else:
-                    rebuilding.append({'model_id': mid, 'condition_id': cid})
-            except FuturesTimeoutError:
-                slog.info("  rebuild queued (no wait) → mark rebuilding")
-                rebuilding.append({'model_id': mid, 'condition_id': cid})
-            except Exception as ex:
-                slog.exception("  rebuild scheduling/result error: %s", ex)
+                job_row = calibw.ensure_calib_job(audio_batch_id, mid, cid)
+                job_id = int(job_row['job_id'])
+                calibw.submit_calib_job(app.logger, job_id)
+                rebuilding.append({'model_id': mid, 'condition_id': cid, 'job_id': job_id})
+            except Exception as e:
+                slog.exception("  ensure/submit calib job failed: %s", e)
                 rebuilding.append({'model_id': mid, 'condition_id': cid})
 
         return resp_ok({'models': models, 'missing': missing, 'rebuilding': rebuilding})
@@ -1597,7 +1603,126 @@ def api_announcement():
     primary = items[0] if items else None
     return resp_ok({'items': items, 'item': primary})
 
-# 其余路由与逻辑保持不变（下面继续原文件内容）
+@app.post('/api/calib/jobs')
+def api_calib_create_job_user():
+    """
+    用户侧创建/复用标定任务，并提交到本进程 worker 执行。
+    入参：audio_batch_id, model_id, condition_id
+    返回：audio_calib_job 的当前状态（含 summary）。
+    """
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+        audio_batch_id = (data.get('audio_batch_id') or '').strip()
+        try:
+            model_id = int(data.get('model_id') or 0)
+            condition_id = int(data.get('condition_id') or 0)
+        except Exception:
+            return resp_err('INVALID_INPUT', 'model_id / condition_id 非法')
+
+        if not audio_batch_id or model_id <= 0 or condition_id <= 0:
+            return resp_err('INVALID_INPUT', '缺少 audio_batch_id / model_id / condition_id')
+
+        try:
+            job_row = calibw.ensure_calib_job(audio_batch_id, model_id, condition_id)
+        except Exception as e:
+            app.logger.exception('ensure_calib_job failed: %s', e)
+            return resp_err('JOB_CREATE_FAIL', str(e), 500)
+
+        job_id = int(job_row['job_id'])
+        status = job_row.get('status')
+
+        if status in ('pending', 'running'):
+            calibw.submit_calib_job(app.logger, job_id)
+
+        with engine.begin() as conn:
+            row = conn.execute(text("""
+                SELECT *
+                FROM audio_calib_job
+                WHERE job_id = :jid
+                LIMIT 1
+            """), {'jid': job_id}).fetchone()
+        if not row:
+            return resp_err('NOT_FOUND', 'job 不存在', 404)
+
+        mp = row._mapping
+        summary = None
+        raw_summary = mp.get('summary_json')
+        if isinstance(raw_summary, str):
+            try:
+                summary = json.loads(raw_summary)
+            except Exception:
+                summary = None
+        elif isinstance(raw_summary, dict):
+            summary = raw_summary
+
+        return resp_ok({
+            'job_id': int(mp['job_id']),
+            'status': mp.get('status'),
+            'audio_batch_id': mp.get('audio_batch_id'),
+            'model_id': int(mp.get('model_id')),
+            'condition_id': int(mp.get('condition_id')),
+            'param_hash': mp.get('param_hash'),
+            'code_version': mp.get('code_version'),
+            'model_hash': mp.get('model_hash'),
+            'summary': summary,
+            'created_at': str(mp.get('created_at')) if mp.get('created_at') else None,
+            'queued_at': str(mp.get('queued_at')) if mp.get('queued_at') else None,
+            'started_at': str(mp.get('started_at')) if mp.get('started_at') else None,
+            'finished_at': str(mp.get('finished_at')) if mp.get('finished_at') else None,
+            'error_message': mp.get('error_message')
+        })
+    except Exception as e:
+        app.logger.exception('api_calib_create_job_user error: %s', e)
+        return resp_err('INTERNAL_ERROR', f'创建标定任务异常: {e}', 500)
+
+
+@app.get('/api/calib/jobs/<int:job_id>')
+def api_calib_get_job_user(job_id: int):
+    """
+    用户侧查询单个标定任务状态。
+    """
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(text("""
+                SELECT *
+                FROM audio_calib_job
+                WHERE job_id = :jid
+                LIMIT 1
+            """), {'jid': job_id}).fetchone()
+        if not row:
+            return resp_err('NOT_FOUND', 'job 不存在', 404)
+
+        mp = row._mapping
+        summary = None
+        raw_summary = mp.get('summary_json')
+        if isinstance(raw_summary, str):
+            try:
+                summary = json.loads(raw_summary)
+            except Exception:
+                summary = None
+        elif isinstance(raw_summary, dict):
+            summary = raw_summary
+
+        return resp_ok({
+            'job_id': int(mp['job_id']),
+            'status': mp.get('status'),
+            'audio_batch_id': mp.get('audio_batch_id'),
+            'model_id': int(mp.get('model_id')),
+            'condition_id': int(mp.get('condition_id')),
+            'param_hash': mp.get('param_hash'),
+            'code_version': mp.get('code_version'),
+            'model_hash': mp.get('model_hash'),
+            'summary': summary,
+            'created_at': str(mp.get('created_at')) if mp.get('created_at') else None,
+            'queued_at': str(mp.get('queued_at')) if mp.get('queued_at') else None,
+            'started_at': str(mp.get('started_at')) if mp.get('started_at') else None,
+            'finished_at': str(mp.get('finished_at')) if mp.get('finished_at') else None,
+            'error_message': mp.get('error_message')
+        })
+    except Exception as e:
+        app.logger.exception('api_calib_get_job_user error: %s', e)
+        return resp_err('INTERNAL_ERROR', f'查询标定任务异常: {e}', 500)
+
 # =========================================
 # Entrypoint
 # =========================================

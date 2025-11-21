@@ -14,6 +14,7 @@ import time
 import psutil
 import threading
 from dataclasses import dataclass, asdict
+from concurrent.futures import ThreadPoolExecutor, Future
 
 from flask import Blueprint, request, current_app, jsonify, make_response, session
 from sqlalchemy import text
@@ -61,117 +62,7 @@ AUDIO_ROOT = os.path.abspath(os.getenv('CALIB_AUDIO_BASE', os.path.join(APP_DIR,
 CODE_VERSION = os.getenv('CODE_VERSION', '')
 
 _R_RPM = re.compile(r'^(?:[Rr])?(\d+(?:\.\d+)?)$')
-
-@dataclass
-class _CpuStats:
-    wall_seconds: float
-    cpu_core_seconds: float
-    mean_total_percent: float
-    peak_total_percent: float
-    peak_concurrent_cores: float
-    peak_threads: int
-    samples: int
-    details: dict
-
-class _CpuMonitor:
-    def __init__(self, interval=0.2):
-        self.interval = float(interval)
-        self._proc = psutil.Process()
-        self._stop = threading.Event()
-        self._thread = None
-        self._t0 = 0.0
-        self._t1 = 0.0
-        self._samples = 0
-        self._sum_area = 0.0       # 积分：total_percent/100 * dt -> 核秒
-        self._sum_percent_dt = 0.0 # 用于计算平均 total_percent
-        self._sum_dt = 0.0
-        self._peak_percent = 0.0
-        self._peak_threads = 0
-
-    def _all(self):
-        procs = [self._proc]
-        try:
-            procs += self._proc.children(recursive=True)
-        except Exception:
-            # Ignore errors when fetching child processes; may not have permission or process may have exited
-            pass
-        out = []
-        for p in procs:
-            try:
-                if p.is_running() and p.status() != psutil.STATUS_ZOMBIE:
-                    out.append(p)
-            except Exception:
-                continue
-        return out
-
-    def _prime(self):
-        for p in self._all():
-            try:
-                p.cpu_percent(None)
-            except Exception:
-                pass
-
-    def _loop(self):
-        self._t0 = time.perf_counter()
-        self._prime()
-        last = time.perf_counter()
-        while not self._stop.is_set():
-            now = time.perf_counter()
-            dt = now - last
-            if dt <= 0:
-                dt = self.interval
-            last = now
-            total_percent = 0.0
-            threads_total = 0
-            for p in self._all():
-                try:
-                    total_percent += p.cpu_percent(None)
-                    threads_total += p.num_threads()
-                except Exception:
-                    continue
-            self._samples += 1
-            self._sum_area += (total_percent / 100.0) * dt
-            self._sum_percent_dt += total_percent * dt
-            self._sum_dt += dt
-            if total_percent > self._peak_percent:
-                self._peak_percent = total_percent
-            if threads_total > self._peak_threads:
-                self._peak_threads = threads_total
-            time.sleep(self.interval)
-        self._t1 = time.perf_counter()
-
-    def start(self):
-        self._stop.clear()
-        self._thread = threading.Thread(target=self._loop, name="CpuMon", daemon=True)
-        self._thread.start()
-
-    def stop(self):
-        self._stop.set()
-        if self._thread:
-            self._thread.join()
-        wall = (self._t1 or time.perf_counter()) - self._t0
-        mean_percent = (self._sum_percent_dt / self._sum_dt) if self._sum_dt > 0 else 0.0
-        stats = _CpuStats(
-            wall_seconds = wall,
-            cpu_core_seconds = self._sum_area,
-            mean_total_percent = mean_percent,
-            peak_total_percent = self._peak_percent,
-            peak_concurrent_cores = self._peak_percent / 100.0,
-            peak_threads = self._peak_threads,
-            samples = self._samples,
-            details = {
-                "cpu_count_logical": psutil.cpu_count(logical=True),
-                "cpu_count_physical": psutil.cpu_count(logical=False),
-                "env_threads": {
-                    "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS"),
-                    "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS"),
-                    "OPENBLAS_NUM_THREADS": os.environ.get("OPENBLAS_NUM_THREADS"),
-                    "NUMEXPR_NUM_THREADS": os.environ.get("NUMEXPR_NUM_THREADS")
-                }
-            }
-        )
-        return stats
-    
+  
 def _parse_rpm_loose(part: str) -> float | None:
     m = _R_RPM.match(part)
     if m:
@@ -185,16 +76,16 @@ def _parse_rpm_loose(part: str) -> float | None:
     except Exception:
         return None
 
-def _find_logical_root(base_path: str) -> str:
+def _find_logical_root(fs_path: str) -> str:
     try:
-        names = os.listdir(base_path)
+        names = os.listdir(fs_path)
     except Exception:
-        return base_path
-    dirs = [n for n in names if os.path.isdir(os.path.join(base_path, n))]
-    files = [n for n in names if os.path.isfile(os.path.join(base_path, n))]
+        return fs_path
+    dirs = [n for n in names if os.path.isdir(os.path.join(fs_path, n))]
+    files = [n for n in names if os.path.isfile(os.path.join(fs_path, n))]
     if not files and len(dirs) == 1:
-        return os.path.join(base_path, dirs[0])
-    return base_path
+        return os.path.join(fs_path, dirs[0])
+    return fs_path
 
 def _strict_pick_pair(dir_abs: str) -> Tuple[str, str]:
     try:
@@ -234,8 +125,8 @@ def _collect_env_and_rpms(root_dir: str) -> Tuple[str, List[Tuple[int, str]]]:
     rpm_dirs = sorted([(r, uniq[r]) for r in uniq.keys()], key=lambda t: t[0])
     return env_abs, rpm_dirs
 
-def _scan_strict_and_hash(base_path: str) -> Tuple[List[Dict[str, Any]], str]:
-    logical_root = _find_logical_root(base_path)
+def _scan_strict_and_hash(fs_path: str) -> Tuple[List[Dict[str, Any]], str]:
+    logical_root = _find_logical_root(fs_path)
     env_abs, rpm_dirs = _collect_env_and_rpms(logical_root)
 
     entries: List[Dict[str, Any]] = []
@@ -331,48 +222,128 @@ def _scan_extracted(root_dir: str) -> Tuple[List[Dict[str, Any]], str]:
     triples.sort()
     return files, _sha1_str('\n'.join(triples))
 
-def _run_inproc_and_collect(work_dir: str, params: Dict[str, Any], model_id: int, condition_id: int) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
-    CURVES_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '../app'))
-    if CURVES_DIR not in sys.path:
-        sys.path.append(CURVES_DIR)
-    from audio_calib.pipeline import run_calibration_and_model as _rcm
-
-    # 启动 CPU 监控
-    mon = _CpuMonitor(interval=0.2)
-    mon.start()
+def _cleanup_unbound_audio_internal():
+    """
+    后台内部清理逻辑：
+      - 枚举 AUDIO_ROOT 下 UUIDv4 目录；
+      - 找出未出现在 audio_perf_binding.audio_batch_id 中的目录；
+      - 对每个未绑定目录：
+          * 删除物理目录；
+          * 若 audio_batch 中存在同名记录，则将 fs_state='missing', fs_path 置空（或保留旧值）；
+      - 仅用于后端自调（如 upload_zip 成功后），不返回 HTTP 响应。
+    """
     try:
-        model, rows = _rcm(work_dir, params, out_dir=None, model_id=model_id, condition_id=condition_id)
-    finally:
-        cpu_stats = mon.stop()
-
-    # 注入 CPU 统计（整体）
-    try:
-        calib = model.get("calibration") or {}
-        timings = calib.get("timings") or {}
-        timings["cpu_stats_overall"] = asdict(cpu_stats)
-        # 若已有分阶段，可保持原样；这里只做 overall 注入
-        calib["timings"] = timings
-        model["calibration"] = calib
+        eng = _engine()
     except Exception:
-        pass
+        # 没有 ADMIN_ENGINE 就直接返回
+        return
 
-    return model, rows
+    try:
+        with eng.begin() as conn:
+            rows = conn.execute(text("""
+                SELECT DISTINCT audio_batch_id
+                FROM audio_perf_binding
+                WHERE audio_batch_id IS NOT NULL AND audio_batch_id <> ''
+            """)).fetchall()
+        bound_ids = {
+            (getattr(r, '_mapping', {}) or {}).get('audio_batch_id')
+            for r in rows
+            if (getattr(r, '_mapping', {}) or {}).get('audio_batch_id')
+        }
+    except Exception as e:
+        current_app.logger.exception('[calib] cleanup-unbound-audio: read bindings failed: %s', e)
+        return
 
+    def _is_uuid4(name: str) -> bool:
+        try:
+            u = uuid.UUID(name, version=4)
+            return str(u) == name
+        except Exception:
+            return False
+
+    deleted = 0
+    total_dirs = 0
+
+    try:
+        if not os.path.isdir(AUDIO_ROOT):
+            _log('cleanup-unbound-audio:skip', reason='no-audio-root')
+            return
+
+        for entry in os.listdir(AUDIO_ROOT):
+            abs_path = os.path.join(AUDIO_ROOT, entry)
+            if not os.path.isdir(abs_path):
+                continue
+            if not _is_uuid4(entry):
+                continue
+            total_dirs += 1
+            if entry in bound_ids:
+                continue
+
+            # 未绑定 -> 删除物理目录
+            try:
+                shutil.rmtree(abs_path, ignore_errors=True)
+            except Exception:
+                current_app.logger.exception('[calib] cleanup-unbound-audio: rmtree failed for %s', abs_path)
+                continue
+
+            deleted += 1
+
+            # 同步 audio_batch：标记为 missing 并清空 fs_path
+            try:
+                with eng.begin() as conn:
+                    conn.execute(
+                        text("""
+                            UPDATE audio_batch
+                            SET fs_state = 'missing',
+                                fs_path  = ''
+                            WHERE audio_batch_id = :abid
+                        """),
+                        {'abid': entry}
+                    )
+            except Exception:
+                current_app.logger.exception('[calib] cleanup-unbound-audio: mark missing failed for %s', entry)
+
+        _log('cleanup-unbound-audio:done', deleted=deleted, total=total_dirs, bound=len(bound_ids))
+    except Exception:
+        current_app.logger.exception('[calib] cleanup-unbound-audio:fs-scan-failed')
+        
 @calib_admin_bp.post('/admin/api/calib/upload_zip')
 def api_calib_upload_zip():
     """
-    关键变更：
-      - 保留 calib_run/report 以便预览与 rpm-noise 明细，但响应不再返回 model_hash；
-      - “重复音频”判断依旧通过 audio_batch.data_hash 复用；
-      - duplicated=1 分支下，bound_count 统计来自 perf_audio_binding（按 audio_batch_id）。
+    新版上传接口（upload-only）：
+      - 只负责：解压 + 扫描 + 写入 audio_batch/audio_file；
+      - 不再调用 pipeline，不创建 calib_job，不生成频谱；
+      - 若命中已有 data_hash，则复用原 audio_batch_id：
+          * 若 fs_state != 'present' 或目录不存在，则使用本次上传目录“逻辑复活”该批次；
+          * 若 fs_state = 'present' 且目录存在，则删除新解包目录，仅返回已有批次信息；
+      - 同时返回该 audio_batch_id 下已有的 audio_perf_binding 绑定，用于前端提示。
+    响应 data：
+      {
+        "audio_batch_id": "...",
+        "data_hash": "...",
+        "duplicated": 0 or 1,
+        "bindings": [
+          {
+            "model_id": 123,
+            "model_name": "XXX",
+            "condition_id": 456,
+            "condition_name_zh": "YYY",
+            "perf_batch_id": "perf-batch-uuid",
+            "created_at": "2025-01-01 12:34:56"
+          },
+          ...
+        ]
+      }
     """
     if not session.get('is_admin'):
         return resp_err('UNAUTHORIZED', '请先登录', 401)
 
-    model_id = request.form.get('model_id', '').strip()
-    condition_id = request.form.get('condition_id', '').strip()
+    # model_id / condition_id 目前只用于校验与日志，可按需改为可选
+    model_id_raw = (request.form.get('model_id') or '').strip()
+    condition_id_raw = (request.form.get('condition_id') or '').strip()
     try:
-        model_id = int(model_id); condition_id = int(condition_id)
+        model_id = int(model_id_raw)
+        condition_id = int(condition_id_raw)
     except Exception:
         return resp_err('INVALID_INPUT', 'model_id / condition_id 非法')
 
@@ -380,331 +351,217 @@ def api_calib_upload_zip():
     if not f:
         return resp_err('INVALID_INPUT', '缺少 zip 文件')
 
-    batch_id = _norm_uuid()
-    base_path = os.path.abspath(os.path.join(AUDIO_ROOT, batch_id))
-    _ensure_dir(base_path)
+    audio_batch_id = _norm_uuid()
+    fs_path = os.path.abspath(os.path.join(AUDIO_ROOT, audio_batch_id))
+    _ensure_dir(fs_path)
 
+    # 解压 zip 到 fs_path
+    zip_path = None
     try:
         with tempfile.NamedTemporaryFile(delete=False, suffix='.zip') as tf:
-            f.save(tf); zip_path = tf.name
+            f.save(tf)
+            zip_path = tf.name
         with zipfile.ZipFile(zip_path, 'r') as zf:
-            zf.extractall(base_path)
+            zf.extractall(fs_path)
     except Exception as e:
-        try: shutil.rmtree(base_path, ignore_errors=True)
-        except Exception: pass
-        return resp_err('UNZIP_FAIL', f'解包失败: {e}', 500)
-    finally:
         try:
-            if os.path.isfile(zip_path): os.remove(zip_path)
+            shutil.rmtree(fs_path, ignore_errors=True)
         except Exception:
             pass
+        return resp_err('UNZIP_FAIL', f'解包失败: {e}', 500)
+    finally:
+        if zip_path and os.path.isfile(zip_path):
+            try:
+                os.remove(zip_path)
+            except Exception:
+                pass
 
+    # 严格结构扫描 + data_hash
     try:
-        files, data_hash = _scan_strict_and_hash(base_path)
+        files, data_hash = _scan_strict_and_hash(fs_path)
     except ValueError as ve:
         try:
-            shutil.rmtree(base_path, ignore_errors=True)
+            shutil.rmtree(fs_path, ignore_errors=True)
         except Exception:
             pass
         return resp_err('INVALID_STRUCTURE', str(ve))
 
-    # 重复音频复用
-    try:
-        with _engine().begin() as conn:
-            existed = conn.execute(text("SELECT batch_id FROM audio_batch WHERE data_hash=:dh LIMIT 1"),
-                                   {'dh': data_hash}).fetchone()
-            if existed:
-                exist_abid = existed._mapping['batch_id']
-                # 取最近一条 calib_run 作为 rpm-noise 来源
-                r = conn.execute(text("""
-                    SELECT id
-                    FROM calib_run
-                    WHERE batch_id=:bid
-                    ORDER BY finished_at DESC
-                    LIMIT 1
-                """), {'bid': exist_abid}).fetchone()
-                rid = int(r._mapping['id']) if r else None
+    engine = _engine()
 
-                with _engine().begin() as conn2:
-                    # 新增：取出所有绑定过的 mid,cid，用于前端一致性校验
-                    bind_rows = conn2.execute(text("""
+    # 先尝试命中已有 data_hash
+    exist_abid = None
+    try:
+        with engine.begin() as conn:
+            row = conn.execute(
+                text("""
+                    SELECT audio_batch_id, fs_state, fs_path
+                    FROM audio_batch
+                    WHERE data_hash = :dh
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                """),
+                {'dh': data_hash}
+            ).fetchone()
+
+        if row:
+            exist_abid = row._mapping['audio_batch_id']
+            old_fs_state = (row._mapping.get('fs_state') or '').strip()
+            old_fs_path = (row._mapping.get('fs_path') or '').strip()
+
+            # 判断旧目录是否仍然存在
+            old_dir_exists = bool(old_fs_path and os.path.isdir(old_fs_path))
+
+            # 统一策略：
+            # - 若旧记录 fs_state != 'present' 或 目录已不存在：
+            #     使用本次上传目录“逻辑复活”：更新 fs_path、fs_state='present'
+            # - 若旧记录 fs_state='present' 且目录存在：
+            #     认为旧目录有效，保留旧目录；删除新 fs_path 目录
+            if old_fs_state != 'present' or not old_dir_exists:
+                # 逻辑复活：挂载到本次上传目录
+                with engine.begin() as conn:
+                    conn.execute(
+                        text("""
+                            UPDATE audio_batch
+                            SET fs_path   = :p,
+                                fs_state  = 'present',
+                                last_used_at = NOW()
+                            WHERE audio_batch_id = :abid
+                        """),
+                        {'p': fs_path, 'abid': exist_abid}
+                    )
+                # 此时保留新目录，不删除 fs_path
+            else:
+                # 保留旧目录，删除这次新解压出来的目录
+                try:
+                    shutil.rmtree(fs_path, ignore_errors=True)
+                except Exception:
+                    pass
+                # 为避免后续混淆，将 fs_path 变量重置为旧路径（虽然后续不再使用）
+                fs_path = old_fs_path
+
+            # 查询该 audio_batch 的绑定列表
+            bindings = []
+            with engine.begin() as conn:
+                bind_rows = conn.execute(
+                    text("""
                         SELECT 
                           b.model_id, m.model_name,
                           b.condition_id, c.condition_name_zh,
                           b.perf_batch_id, b.created_at
-                        FROM perf_audio_binding b
+                        FROM audio_perf_binding b
                         LEFT JOIN fan_model m ON m.model_id = b.model_id
                         LEFT JOIN working_condition c ON c.condition_id = b.condition_id
                         WHERE b.audio_batch_id = :ab
                         ORDER BY b.created_at DESC
-                    """), {'ab': exist_abid}).fetchall()
+                    """),
+                    {'ab': exist_abid}
+                ).fetchall()
 
-                    bindings = []
-                    for br in bind_rows or []:
-                        mp = getattr(br, '_mapping', {})
-                        bindings.append({
-                            'model_id': int(mp.get('model_id')),
-                            'model_name': mp.get('model_name') or None,
-                            'condition_id': int(mp.get('condition_id')),
-                            'condition_name_zh': mp.get('condition_name_zh') or None,
-                            'perf_batch_id': mp.get('perf_batch_id'),
-                            'created_at': str(mp.get('created_at')) if mp.get('created_at') else None
-                        })
+            for br in bind_rows or []:
+                mp = br._mapping
+                bindings.append({
+                    'model_id': int(mp['model_id']),
+                    'model_name': mp.get('model_name') or None,
+                    'condition_id': int(mp['condition_id']),
+                    'condition_name_zh': mp.get('condition_name_zh') or None,
+                    'perf_batch_id': mp.get('perf_batch_id'),
+                    'created_at': str(mp.get('created_at')) if mp.get('created_at') else None,
+                })
 
+            # 命中 data_hash：复用已有批次
+            resp = resp_ok({
+                'audio_batch_id': exist_abid,
+                'data_hash': data_hash,
+                'duplicated': 1,
+                'bindings': bindings,
+            }, message='音频已存在，复用已有批次')
 
-                    rpm_rows = []
-                    if rid:
-                        rpm_rows = conn2.execute(text("""
-                            SELECT rpm, la_post_env_db
-                            FROM calib_report_item
-                            WHERE run_id=:rid AND rpm IS NOT NULL AND rpm > 0 AND la_post_env_db IS NOT NULL
-                            ORDER BY rpm
-                        """), {'rid': rid}).fetchall()
-                rpm_noise = [{'rpm': int(rr._mapping['rpm']), 'noise_db': float(rr._mapping['la_post_env_db'])} for rr in rpm_rows or []]
-                rpms = [int(rr._mapping['rpm']) for rr in rpm_rows or []]
-                rpm_min = min(rpms) if rpms else None
-                rpm_max = max(rpms) if rpms else None
-
-                try: shutil.rmtree(base_path, ignore_errors=True)
-                except Exception as e:
-                    current_app.logger.warning(f"Failed to remove directory {base_path}: {e}")
-
-                # 并确保响应里返回 bindings 字段
-                return resp_ok({
-                    'duplicated': 1,
-                    'bound_count': int(len(bindings)),
-                    'bindings': bindings,
-                    'batch_id': exist_abid,
-                    'run_id': rid,
-                    'rpm_noise': rpm_noise,
-                    'rpm_min': rpm_min,
-                    'rpm_max': rpm_max
-                }, message='音频已存在，复用现有模型')
-    except Exception:
-        pass
-
-    # 首次上传音频：照常运行一次 pipeline，并写入 audio_batch / calib_run / report
-    params = sb_load_default_params()
-    param_hash = hashlib.sha1(json.dumps(params, sort_keys=True, separators=(',',':')).encode('utf-8')).hexdigest()
-
-    try:
-        preview_model_json, per_rpm_rows = _run_inproc_and_collect(base_path, params, model_id, condition_id)
-    except Exception as e_inproc:
-        with _engine().begin() as conn:
-            _insert_audio_batch(conn, batch_id=batch_id, model_id=model_id, condition_id=condition_id, base_path=base_path, data_hash=data_hash)
-        return resp_err('CALIB_FAIL', f'处理失败: {e_inproc}', 500)
-
-    with _engine().begin() as conn:
-        _insert_audio_batch(conn, batch_id=batch_id, model_id=model_id, condition_id=condition_id, base_path=base_path, data_hash=data_hash)
-        _insert_audio_files(conn, batch_id, files)
-        run_id = _insert_calib_run(conn, batch_id=batch_id, params_json=params, param_hash=param_hash, data_hash=data_hash, preview_model_json=None)
-        _insert_report_items(conn, run_id, per_rpm_rows)
-
-    rpms = [r['rpm'] for r in per_rpm_rows if isinstance(r.get('rpm'), int)]
-    rpm_min = min(rpms) if rpms else None; rpm_max = max(rpms) if rpms else None
-    rpm_noise = []
-    for r in per_rpm_rows:
-        if r.get('rpm') is None: continue
-        rpm_noise.append({
-            'rpm': int(r['rpm']),
-            'noise_db': round(float(r['la_post_env_db']), 1) if r.get('la_post_env_db') is not None else None
-        })
-    rpm_noise.sort(key=lambda x: x['rpm'])
-
-    return resp_ok({
-        'batch_id': batch_id,   # audio_batch_id
-        'run_id': run_id,
-        'rpm_noise': rpm_noise,
-        'rpm_min': rpm_min,
-        'rpm_max': rpm_max,
-        'preview_model': preview_model_json or {}
-    }, message='上传并处理完成')
-
-def _insert_audio_batch(conn, *, batch_id, model_id, condition_id, base_path, data_hash):
-    conn.execute(text("""
-        INSERT INTO audio_batch (batch_id, model_id, condition_id, base_path, data_hash, code_version, is_valid)
-        VALUES (:bid, :mid, :cid, :bp, :dh, :ver, 0)
-        ON DUPLICATE KEY UPDATE
-          model_id=VALUES(model_id), condition_id=VALUES(condition_id),
-          base_path=VALUES(base_path), data_hash=VALUES(data_hash),
-          code_version=VALUES(code_version), updated_at=NOW()
-    """), {'bid': batch_id, 'mid': model_id, 'cid': condition_id, 'bp': base_path, 'dh': data_hash, 'ver': CODE_VERSION or None})
-
-def _insert_audio_files(conn, batch_id: str, files: List[Dict[str, Any]]):
-    if not files: return
-    to_insert = [f for f in files if f.get('file_type') in ('audio', 'awa') and f.get('rpm') is not None]
-    for f in to_insert:
-        conn.execute(text("""
-            INSERT INTO audio_file (batch_id, rpm, file_type, rel_path, size_bytes, sha256)
-            VALUES (:bid,:rpm,:tp,:rp,:sz,:sh)
-        """), {'bid': batch_id, 'rpm': int(f['rpm']), 'tp': f['file_type'], 'rp': f['rel_path'], 'sz': int(f['size_bytes']), 'sh': f['sha256']})
-
-def _insert_calib_run(conn, *, batch_id: str, params_json: Dict[str, Any], param_hash: str, data_hash: str, preview_model_json: Dict[str, Any] | None) -> int:
-    model_hash = sb_calc_model_hash(data_hash, param_hash, CODE_VERSION or None)
-    conn.execute(text("""
-        INSERT INTO calib_run (batch_id, param_hash, params_json, data_hash, model_hash, code_version, status, preview_model_json, created_at, finished_at)
-        VALUES (:bid,:ph,:pj,:dh,:mh,:ver,'done',NULL, NOW(), NOW())
-        ON DUPLICATE KEY UPDATE
-          params_json=VALUES(params_json),
-          code_version=VALUES(code_version),
-          model_hash=VALUES(model_hash),
-          status='done',
-          preview_model_json=NULL,
-          finished_at=VALUES(finished_at)
-    """), {
-        'bid': batch_id,
-        'ph': param_hash,
-        'pj': json.dumps(params_json, ensure_ascii=False),
-        'dh': data_hash,
-        'mh': model_hash,
-        'ver': CODE_VERSION or None
-    })
-    rid = conn.execute(text("""
-        SELECT id FROM calib_run WHERE batch_id=:bid AND param_hash=:ph AND data_hash=:dh LIMIT 1
-    """), {'bid': batch_id, 'ph': param_hash, 'dh': data_hash}).scalar()
-    return int(rid or 0)
-
-def _insert_report_items(conn, run_id: int, per_rpm_rows: List[Dict[str, Any]]):
-    if not run_id: return
-    conn.execute(text("DELETE FROM calib_report_item WHERE run_id=:rid"), {'rid': run_id})
-    for r in per_rpm_rows:
-        conn.execute(text("""
-            INSERT INTO calib_report_item
-            (run_id, rpm, la_awa_db, la_raw_db, delta_raw_db, la_post_env_db, delta_post_env_db)
-            VALUES (:rid, :rpm, :awa, :row, :dr, :post, :dp)
-        """), {
-            'rid': run_id,
-            'rpm': int(r.get('rpm') or 0),
-            'awa': r.get('la_env_db'),
-            'row': r.get('la_raw_db'),
-            'dr':  r.get('delta_raw_db'),
-            'post': r.get('la_post_env_db'),
-            'dp':  r.get('delta_post_env_db')
-        })
-
-@calib_admin_bp.get('/admin/api/calib/preview/debug')
-def api_calib_preview_debug():
-    if not session.get('is_admin'):
-        return resp_err('UNAUTHORIZED', '请先登录', 401)
-    batch_id = (request.args.get('batch_id') or '').strip()
-    if not batch_id:
-        return resp_err('INVALID_INPUT', '缺少 batch_id')
-
-    with _engine().begin() as conn:
-        row = conn.execute(text("""
-            SELECT r.preview_model_json, b.base_path, b.model_id, b.condition_id
-            FROM calib_run r
-            JOIN audio_batch b ON b.batch_id = r.batch_id
-            WHERE r.batch_id = :bid
-            ORDER BY r.finished_at DESC LIMIT 1
-        """), {'bid': batch_id}).fetchone()
-        if not row:
-            return resp_err('NOT_FOUND', 'calib_run 未找到该 batch_id', 404)
-        raw_model = row._mapping.get('preview_model_json')
-        if isinstance(raw_model, str):
+            # 上传成功后在后台异步触发一次清理（best-effort，不影响主流程）
             try:
-                model_json = json.loads(raw_model)
+                threading.Thread(
+                    target=_cleanup_unbound_audio_internal,
+                    name='cleanup-unbound-audio',
+                    daemon=True
+                ).start()
             except Exception:
-                model_json = {}
-        else:
-            model_json = raw_model or {}
-        base_path = row._mapping.get('base_path') or ''
-        mid = int(row._mapping['model_id']); cid = int(row._mapping['condition_id'])
+                current_app.logger.exception('[calib] spawn cleanup-unbound-audio failed')
 
-    env_dir = os.path.join(base_path, 'env')
-    r_dirs = []
-    audio_counts = {}
-
-    if os.path.isdir(base_path):
-        for base2, dirnames, _ in os.walk(base_path):
-            for name in dirnames:
-                full = os.path.join(base2, name)
-                if name.lower() == 'env':
-                    env_dir = full
-                else:
-                    val = _parse_rpm_loose(name)
-                    if val is not None:
-                        rel = os.path.relpath(full, base_path).replace(os.sep, '/')
-                        r_dirs.append(rel)
-
-        def _cnt(folder):
-            if not os.path.isdir(folder): return {'audio': 0, 'awa': 0}
-            try:
-                fns = os.listdir(folder)
-            except Exception:
-                return {'audio': 0, 'awa': 0}
-            a = sum(1 for fn in fns if _guess_is_audio(fn))
-            w = sum(1 for fn in fns if _is_awa(fn))
-            return {'audio': a, 'awa': w}
-
-        audio_counts['env'] = _cnt(env_dir)
-        for d in r_dirs:
-            audio_counts[d] = _cnt(os.path.join(base_path, d))
-
-    centers = model_json.get('centers_hz') or []
-    bands = model_json.get('band_models_pchip') or []
-    valid_bands = sum(1 for p in bands if p and isinstance(p, dict) and p.get('x'))
-    rpm_min = model_json.get('rpm_min'); rpm_max = model_json.get('rpm_max')
-
-    return resp_ok({
-        'batch_id': batch_id,
-        'db': { 'model_id': mid, 'condition_id': cid },
-        'fs': {
-            'base_path_exists': bool(os.path.isdir(base_path)),
-            'base_path': base_path,
-            'env_exists': bool(os.path.isdir(env_dir)),
-            'r_dirs': sorted(r_dirs),
-            'file_counts': audio_counts
-        },
-        'model_stats': {
-            'centers_len': len(centers),
-            'bands_len': len(bands),
-            'valid_bands': valid_bands,
-            'rpm_min': rpm_min,
-            'rpm_max': rpm_max
-        }
-    }, message='debug')
-
-@calib_admin_bp.get('/admin/api/calib/preview')
-def api_calib_preview():
-    if not session.get('is_admin'):
-        return resp_err('UNAUTHORIZED', '请先登录', 401)
-    batch_id = (request.args.get('batch_id') or '').strip()
-    if not batch_id:
-        return resp_err('INVALID_INPUT', '缺少 batch_id')
-    _log('preview:start', batch_id=batch_id)
-
-    with _engine().begin() as conn:
-        row = conn.execute(text("""
-            SELECT r.batch_id, b.base_path, b.model_id, b.condition_id
-            FROM calib_run r
-            JOIN audio_batch b ON b.batch_id = r.batch_id
-            WHERE r.batch_id = :bid
-            ORDER BY r.finished_at DESC
-            LIMIT 1
-        """), {'bid': batch_id}).fetchone()
-        if not row:
-            _log('preview:calib_run_missing', batch_id=batch_id)
-            return resp_err('NOT_FOUND', '预览数据不存在', 404)
-        base_path = row._mapping.get('base_path')
-        mid = int(row._mapping['model_id']); cid = int(row._mapping['condition_id'])
-    _log('preview:resolved_base', base_path=base_path, model_id=mid, condition_id=cid, base_exists=os.path.isdir(base_path))
-
-    try:
-        params = sb_load_default_params()
-        t0 = time.time()
-        _log('pipeline:start', where='preview', base_path=base_path, model_id=mid, condition_id=cid, code_version=CODE_VERSION)
-        model_json, _rows = _run_inproc_and_collect(base_path, params, mid, cid)
-        _log('pipeline:done', where='preview', ms=int((time.time()-t0)*1000), rows=len(_rows or []))
+            return resp
     except Exception as e:
-        current_app.logger.exception('[calib] preview:build_fail')
-        return resp_err('CALIB_FAIL', f'预览生成失败: {e}', 500)
+        current_app.logger.exception('[calib] upload_zip duplicate-check failed: %s', e)
+        # 命中检查失败时，继续走“创建新批次”，不当成致命错误
 
-    return resp_ok({
-        'model': model_json or {},
-        'model_id': mid,
-        'condition_id': cid
-    })
+    # 未命中 data_hash：创建新的 audio_batch + audio_file
+    try:
+        admin_name, _admin_id = _admin_actor()
+        with engine.begin() as conn:
+            # 插入 audio_batch
+            conn.execute(
+                text("""
+                    INSERT INTO audio_batch
+                      (audio_batch_id, data_hash, fs_path, fs_state, created_at, created_by, last_used_at, source_zip_name, comment)
+                    VALUES
+                      (:abid, :dh, :p, 'present', NOW(), :by, NOW(), :zipname, NULL)
+                """),
+                {
+                    'abid': audio_batch_id,
+                    'dh': data_hash,
+                    'p': fs_path,
+                    'by': admin_name,
+                    'zipname': getattr(f, 'filename', None) or None,
+                }
+            )
+
+            # 插入 audio_file 明细（只保留 audio/awa 且 rpm 不为 None）
+            for fi in files or []:
+                if fi.get('file_type') not in ('audio', 'awa'):
+                    continue
+                rpm = fi.get('rpm')
+                if rpm is None:
+                    continue
+                conn.execute(
+                    text("""
+                        INSERT INTO audio_file
+                          (audio_batch_id, rpm, file_type, rel_path, size_bytes, sha256, created_at)
+                        VALUES
+                          (:abid, :rpm, :tp, :rp, :sz, :sh, NOW())
+                    """),
+                    {
+                        'abid': audio_batch_id,
+                        'rpm': int(rpm),
+                        'tp': fi['file_type'],
+                        'rp': fi['rel_path'],
+                        'sz': int(fi['size_bytes']),
+                        'sh': fi['sha256'],
+                    }
+                )
+
+        resp = resp_ok({
+            'audio_batch_id': audio_batch_id,
+            'data_hash': data_hash,
+            'duplicated': 0,
+            'bindings': [],
+        }, message='上传成功，已创建音频批次（未执行标定）')
+
+        # 上传成功后在后台异步触发一次清理（best-effort，不影响主流程）
+        try:
+            threading.Thread(
+                target=_cleanup_unbound_audio_internal,
+                name='cleanup-unbound-audio',
+                daemon=True
+            ).start()
+        except Exception as e:
+            current_app.logger.exception('[calib] spawn cleanup-unbound-audio failed: %s', e)
+
+        return resp
+    except Exception as e:
+        # 写库失败时，尽量清理刚刚解压的目录
+        current_app.logger.exception('[calib] upload_zip insert audio_batch failed: %s', e)
+        try:
+            shutil.rmtree(fs_path, ignore_errors=True)
+        except Exception:
+            pass
+        return resp_err('DB_WRITE_FAIL', f'写入音频批次失败: {e}', 500)
 
 @calib_admin_bp.get('/admin/api/calib/bindings')
 def api_admin_calib_bindings_by_mid_cid():
@@ -718,15 +575,14 @@ def api_admin_calib_bindings_by_mid_cid():
     if mid <= 0 or cid <= 0:
         return resp_err('INVALID_INPUT', '缺少 model_id 或 condition_id')
 
-    # 新：查询 perf_audio_binding（替代 perf_model_binding）
+    # 新：查询 audio_perf_binding（替代 perf_model_binding）
     sql = """
       SELECT
         b.perf_batch_id,
         b.audio_batch_id,
-        b.audio_data_hash,
         b.created_at,
         b.created_by
-      FROM perf_audio_binding b
+      FROM audio_perf_binding b
       WHERE b.model_id=:m AND b.condition_id=:c
       ORDER BY b.created_at DESC
       LIMIT 20
@@ -740,67 +596,17 @@ def api_admin_calib_bindings_by_mid_cid():
         items.append({
             'perf_batch_id': mp.get('perf_batch_id'),
             'audio_batch_id': mp.get('audio_batch_id'),
-            'audio_data_hash': mp.get('audio_data_hash'),
             'created_at': str(mp.get('created_at')) if mp.get('created_at') else None,
             'created_by': mp.get('created_by') or None
         })
     return resp_ok({'items': items})
 
-@calib_admin_bp.get('/admin/api/calib/rpm-noise')
-def api_admin_calib_rpm_noise():
-    """
-    新增支持 audio_batch_id 查询，便于前端仅基于音频批次取噪音明细。
-    优先级：run_id > model_hash > audio_batch_id
-    """
-    if not session.get('is_admin'):
-        return resp_err('UNAUTHORIZED', '请先登录', 401)
-    run_id = request.args.get('run_id')
-    model_hash = (request.args.get('model_hash') or '').strip()
-    audio_batch_id = (request.args.get('audio_batch_id') or '').strip()
-
-    rid = None
-    if run_id:
-        try:
-            rid = int(run_id)
-        except Exception:
-            return resp_err('INVALID_INPUT', 'run_id 非法')
-    with _engine().begin() as conn:
-        if not rid and model_hash:
-            rid = conn.execute(text("""
-                SELECT id FROM calib_run WHERE model_hash=:mh ORDER BY finished_at DESC LIMIT 1
-            """), {'mh': model_hash}).scalar()
-            rid = int(rid or 0) if rid else None
-        if not rid and audio_batch_id:
-            rid = conn.execute(text("""
-                SELECT id FROM calib_run WHERE batch_id=:bid ORDER BY finished_at DESC LIMIT 1
-            """), {'bid': audio_batch_id}).scalar()
-            rid = int(rid or 0) if rid else None
-        if not rid:
-            return resp_err('INVALID_INPUT', '请提供 run_id 或 audio_batch_id', 400)
-
-        with _engine().begin() as conn:
-            rows = conn.execute(text("""
-                SELECT rpm, la_post_env_db
-                FROM calib_report_item
-                WHERE run_id=:rid AND rpm IS NOT NULL AND rpm > 0 AND la_post_env_db IS NOT NULL
-                ORDER BY rpm
-            """), {'rid': rid}).fetchall()
-
-        items = [{'rpm': int(r._mapping['rpm']), 'noise_db': float(r._mapping['la_post_env_db'])} for r in rows or []]
-        _log('rpm_noise:result', run_id=rid, count=len(items))
-        return resp_ok({'items': items, 'run_id': rid})
-
 @calib_admin_bp.post('/admin/api/calib/bind-model')
 def api_bind_model_to_perf():
     """
-    新版绑定：将性能批次(perf_batch_id)绑定到音频批次(audio_batch_id)，并预热频谱缓存。
-    入参：model_id, condition_id, perf_batch_id, audio_batch_id
-    行为：
-      - 校验 perf_batch_id 属于该 mid/cid，校验 audio_batch_id 存在；
-      - UPSERT 到 perf_audio_binding（唯一约束 uq_pab_mcp）；
-      - 预热频谱缓存：
-         * 若现有 {mid}_{cid}_spectrum.json 的 meta 与当前 (audio_data_hash, param_hash, code_version) 一致，仅更新 meta.perf_batch_id；
-         * 否则从 audio_batch.base_path 跑一遍 pipeline，生成并覆盖写入（带完整 meta）。
+    绑定 perf_batch_id 与 audio_batch_id。
+    仅写 audio_perf_binding，不再直接执行 pipeline。
+    如需预热频谱，可在前端调用 /admin/api/calib/jobs 或直接依赖前台 /api/spectrum-models 自愈。
     """
     if not session.get('is_admin'):
         return resp_err('UNAUTHORIZED', '请先登录', 401)
@@ -817,7 +623,6 @@ def api_bind_model_to_perf():
     if model_id <= 0 or condition_id <= 0 or not perf_batch_id or not audio_batch_id:
         return resp_err('INVALID_INPUT', '缺少必要参数（model_id/condition_id/perf_batch_id/audio_batch_id）')
 
-    # 校验 perf_batch_id 是否属于该 mid/cid
     with _engine().begin() as conn:
         ok = conn.execute(text("""
             SELECT 1 FROM fan_performance_data
@@ -827,24 +632,20 @@ def api_bind_model_to_perf():
         if not ok:
             return resp_err('NOT_FOUND', '性能批次不存在或不属于该型号/工况', 404)
 
-        # 读取音频批次信息
         row_ab = conn.execute(text("""
-            SELECT batch_id, base_path, data_hash
+            SELECT audio_batch_id, fs_path, data_hash
             FROM audio_batch
-            WHERE batch_id=:abid
+            WHERE audio_batch_id=:abid
             LIMIT 1
         """), {'abid': audio_batch_id}).fetchone()
         if not row_ab:
             return resp_err('NOT_FOUND', '音频批次不存在', 404)
-        base_path = row_ab._mapping.get('base_path') or ''
-        audio_data_hash = (row_ab._mapping.get('data_hash') or '').strip()
 
-        # 新增：强校验同一 audio_batch 仅允许绑定同一 mid,cid
         bound_others = conn.execute(text("""
             SELECT 
               b.model_id, m.model_name,
               b.condition_id, c.condition_name_zh
-            FROM perf_audio_binding b
+            FROM audio_perf_binding b
             LEFT JOIN fan_model m ON m.model_id = b.model_id
             LEFT JOIN working_condition c ON c.condition_id = b.condition_id
             WHERE b.audio_batch_id=:ab
@@ -858,99 +659,31 @@ def api_bind_model_to_perf():
             } for r in bound_others]
             any_diff = any(b['model_id'] != model_id or b['condition_id'] != condition_id for b in binds)
             if any_diff:
-                # 将可读的绑定清单放到 meta 里返回，便于前端提示
-                return resp_err('AUDIO_BOUND_CONFLICT', '该音频批次已绑定到其他型号/工况，禁止绑定', 409, meta={'bindings': binds})
-            
-        admin_name, _admin_id = _admin_actor()
+                return resp_err('AUDIO_BOUND_CONFLICT',
+                                '该音频批次已绑定到其他型号/工况，禁止绑定',
+                                409, meta={'bindings': binds})
 
-        # 建立/更新绑定关系（唯一：model_id, condition_id, perf_batch_id）
+        admin_name, _admin_id = _admin_actor()
         conn.execute(text("""
-            INSERT INTO perf_audio_binding
-              (model_id, condition_id, perf_batch_id, audio_batch_id, audio_data_hash, created_at, created_by)
+            INSERT INTO audio_perf_binding
+              (model_id, condition_id, perf_batch_id, audio_batch_id, created_at, created_by)
             VALUES
-              (:m,:c,:pb,:ab,:dh, NOW(), :by)
+              (:m,:c,:pb,:ab, NOW(), :by)
             ON DUPLICATE KEY UPDATE
               audio_batch_id=VALUES(audio_batch_id),
-              audio_data_hash=VALUES(audio_data_hash),
               created_by=VALUES(created_by),
               created_at=VALUES(created_at)
         """), {
             'm': model_id, 'c': condition_id, 'pb': perf_batch_id,
-            'ab': audio_batch_id, 'dh': audio_data_hash,
+            'ab': audio_batch_id,
             'by': admin_name
         })
 
-    # 预热：读取当前默认参数，计算 param_hash/code_version
-    params = sb_load_default_params()
-    param_hash = hashlib.sha1(json.dumps(params, sort_keys=True, separators=(',',':')).encode('utf-8')).hexdigest()
-    code_ver = CODE_VERSION or ''
-
-    # 若已存在频谱文件，且 (audio_data_hash,param_hash,code_version) 一致，仅更新 perf_batch_id，避免重算
-    cur = spectrum_cache.load(model_id, condition_id)
-    if cur and isinstance(cur, dict):
-        meta = (cur.get('meta') or {})
-        if str(meta.get('audio_data_hash') or '') == audio_data_hash \
-           and str(meta.get('param_hash') or '') == param_hash \
-           and str(meta.get('code_version') or '') == code_ver:
-            # 仅切换 perf_batch_id
-            new_meta = dict(meta)
-            new_meta['perf_batch_id'] = perf_batch_id
-            new_meta['audio_batch_id'] = audio_batch_id
-            new_meta['updated_at'] = datetime.utcnow().isoformat(timespec='seconds') + 'Z'
-            # 直接复用旧 model 内容，重新落盘
-            try:
-                spectrum_cache.save(
-                    cur.get('model') or {},
-                    model_id=model_id,
-                    condition_id=condition_id,
-                    extra_meta=new_meta
-                )
-                out_path = spectrum_cache.path(model_id, condition_id)
-                return resp_ok({
-                    'perf_batch_id': perf_batch_id,
-                    'audio_batch_id': audio_batch_id,
-                    'audio_data_hash': audio_data_hash,
-                    'cache_saved': True,
-                    'cache_dir': os.path.abspath(curve_cache_dir()),
-                    'cache_path': out_path,
-                    'reused_model': True
-                }, message='绑定成功（频谱缓存已更新元数据，无需重建）')
-            except Exception as e:
-                # 明确返回错误，避免静默成功
-                return resp_err('CACHE_SAVE_FAIL', f'频谱缓存更新失败: {e}', 500)
-
-    # 重建（音频 + 当前默认参数）
-    try:
-        model_json, _rows = _run_inproc_and_collect(base_path, params, model_id, condition_id)
-        meta_out = {
-            'perf_batch_id': perf_batch_id,
-            'audio_batch_id': audio_batch_id,
-            'audio_data_hash': audio_data_hash,
-            'param_hash': param_hash,
-            'code_version': code_ver,
-            'built_at': datetime.utcnow().isoformat(timespec='seconds') + 'Z'
-        }
-        saved = spectrum_cache.save(
-            model_json or {},
-            model_id=model_id,
-            condition_id=condition_id,
-            extra_meta=meta_out
-        )
-        out_path = saved.get('path')
-        ok_ids = bool(out_path and os.path.isfile(out_path))
-        if not ok_ids:
-            return resp_err('CACHE_SAVE_FAIL', '频谱缓存落盘失败', 500)
-        return resp_ok({
-            'perf_batch_id': perf_batch_id,
-            'audio_batch_id': audio_batch_id,
-            'audio_data_hash': audio_data_hash,
-            'cache_saved': True,
-            'cache_dir': os.path.abspath(curve_cache_dir()),
-            'cache_path': out_path
-        }, message='绑定成功')
-    except Exception as e:
-        # 失败时返回错误，促使前端明确告警（避免“成功但未落盘”）
-        return resp_err('PIPELINE_OR_SAVE_FAIL', f'频谱模型重建/落盘失败: {e}', 500)
+    # 这里不再预热频谱，交给前台 /api/spectrum-models 或后台手动触发 job
+    return resp_ok({
+        'perf_batch_id': perf_batch_id,
+        'audio_batch_id': audio_batch_id
+    }, message='绑定成功')
 
 @calib_admin_bp.get('/admin/api/calib/cache/inspect')
 def api_calib_cache_inspect():
@@ -985,92 +718,221 @@ def api_calib_cache_inspect():
         "files": files
     }, message="curve-cache inspect")
 
-@calib_admin_bp.post('/admin/api/calib/cleanup-unbound-audio')
-def api_calib_cleanup_unbound_audio():
+@calib_admin_bp.post('/admin/api/calib/jobs')
+def api_calib_create_job():
     """
-    前置清理接口：删除音频根目录下未在 perf_audio_binding 中出现的批次目录。
+    管理侧仅作为客户端：转发到用户侧 /api/calib/jobs。
+    """
+    if not session.get('is_admin'):
+        return resp_err('UNAUTHORIZED', '请先登录', 401)
 
-    逻辑：
-      1. 查询 perf_audio_binding 中所有 distinct audio_batch_id（已绑定的音频批次）。
-      2. 枚举 AUDIO_ROOT 下的一级子目录（仅考虑 UUIDv4 命名的目录）。
-      3. 若目录名不在绑定集合中，则递归删除该目录。
-      4. 返回删除的目录列表、保留数量及统计信息。
+    payload = request.get_json(force=True, silent=True) or {}
+    audio_batch_id = (payload.get('audio_batch_id') or '').strip()
+    model_id = payload.get('model_id')
+    condition_id = payload.get('condition_id')
 
-    安全措施：
-      - 仅删除目录名符合 UUIDv4 格式且未被绑定的目录。
-      - 不依赖 audio_batch 表，严格按“是否已绑定”判定孤儿目录。
-      - 如需更严格，可再校验目录是否存在于 audio_batch；此处按需求省略。
+    if not audio_batch_id or not model_id or not condition_id:
+        return resp_err('INVALID_INPUT', '缺少 audio_batch_id / model_id / condition_id')
 
-    返回:
+    import requests
+    base = os.getenv('USER_SIDE_BASE_URL', 'http://127.0.0.1:5001')
+    try:
+        resp = requests.post(
+            f"{base}/api/calib/jobs",
+            json={
+                'audio_batch_id': audio_batch_id,
+                'model_id': model_id,
+                'condition_id': condition_id
+            },
+            timeout=10
+        )
+    except Exception as e:
+        return resp_err('UPSTREAM_ERROR', f'调用用户侧标定服务失败: {e}', 502)
+
+    return make_response(resp.content, resp.status_code, resp.headers.items())
+
+@calib_admin_bp.get('/admin/api/calib/jobs/<int:job_id>')
+def api_calib_get_job(job_id: int):
+    """
+    查询单个标定任务状态：转发到用户侧 /api/calib/jobs/<job_id>。
+    """
+    if not session.get('is_admin'):
+        return resp_err('UNAUTHORIZED', '请先登录', 401)
+
+    import requests
+    base = os.getenv('USER_SIDE_BASE_URL', 'http://127.0.0.1:5001')
+    try:
+        resp = requests.get(f"{base}/api/calib/jobs/{job_id}", timeout=10)
+    except Exception as e:
+        return resp_err('UPSTREAM_ERROR', f'调用用户侧标定服务失败: {e}', 502)
+
+    return make_response(resp.content, resp.status_code, resp.headers.items())
+
+@calib_admin_bp.get('/admin/api/calib/preview')
+def api_calib_preview():
+    """
+    新版预览接口：不再直接调用 pipeline，只读取 audio_spectrum_model 缓存文件。
+    入参（query）：
+      - job_id (优先)
+      - audio_batch_id + model_id + condition_id（备用）
+    返回：
+      { model: <model_json>, model_id, condition_id }
+    """
+    if not session.get('is_admin'):
+        return resp_err('UNAUTHORIZED', '请先登录', 401)
+
+    job_id_raw = (request.args.get('job_id') or '').strip()
+    audio_batch_id = (request.args.get('audio_batch_id') or '').strip()
+    mid_raw = (request.args.get('model_id') or '').strip()
+    cid_raw = (request.args.get('condition_id') or '').strip()
+
+    job_id = None
+    if job_id_raw:
+        try:
+            job_id = int(job_id_raw)
+        except Exception:
+            return resp_err('INVALID_INPUT', 'job_id 非法')
+
+    model_id = None
+    condition_id = None
+    if mid_raw and cid_raw:
+        try:
+            model_id = int(mid_raw)
+            condition_id = int(cid_raw)
+        except Exception:
+            return resp_err('INVALID_INPUT', 'model_id/condition_id 非法')
+
+    with _engine().begin() as conn:
+        if job_id is not None:
+            row = conn.execute(text("""
+                SELECT j.job_id, j.status, j.model_id, j.condition_id, j.model_hash
+                FROM audio_calib_job j
+                WHERE j.job_id = :jid
+                LIMIT 1
+            """), {'jid': job_id}).fetchone()
+        elif audio_batch_id and model_id and condition_id:
+            row = conn.execute(text("""
+                SELECT j.job_id, j.status, j.model_id, j.condition_id, j.model_hash
+                FROM audio_calib_job j
+                WHERE j.audio_batch_id = :abid
+                  AND j.model_id = :mid
+                  AND j.condition_id = :cid
+                ORDER BY j.finished_at DESC, j.created_at DESC
+                LIMIT 1
+            """), {'abid': audio_batch_id, 'mid': model_id, 'cid': condition_id}).fetchone()
+        else:
+            return resp_err('INVALID_INPUT', '请提供 job_id 或 (audio_batch_id, model_id, condition_id)')
+
+    if not row:
+        return resp_err('NOT_FOUND', '标定任务不存在', 404)
+
+    mp = row._mapping
+    if mp.get('status') != 'success':
+        return resp_err('JOB_NOT_READY', f'标定任务尚未成功完成，当前状态: {mp.get("status")}', 400)
+
+    mid = int(mp['model_id'])
+    cid = int(mp['condition_id'])
+
+    # 直接从 spectrum_cache 读取模型（里面已经带 meta）
+    try:
+        cur = spectrum_cache.load(mid, cid)
+        if not cur or not isinstance(cur, dict):
+            return resp_err('MODEL_NOT_FOUND', '频谱模型缓存不存在', 404)
+        model_json = cur.get('model') or cur  # 兼容两种结构
+    except Exception as e:
+        current_app.logger.exception('[calib] preview:load_cache_fail')
+        return resp_err('CACHE_LOAD_FAIL', f'读取频谱缓存失败: {e}', 500)
+
+    return resp_ok({
+        'model': model_json or {},
+        'model_id': mid,
+        'condition_id': cid
+    })
+
+@calib_admin_bp.get('/admin/api/calib/rpm-noise')
+def api_admin_calib_rpm_noise():
+    """
+    新版 rpm-noise 接口：从 audio_calib_job.summary_json 读取 rpm_noise。
+    入参优先级：
+      - job_id
+      - audio_batch_id + model_id + condition_id
+    返回：
       {
-        deleted: [<目录名>],
-        kept: [<目录名>],
-        bound_ids_count: <绑定ID数量>,
-        total_dirs: <扫描到的符合 UUID 格式的目录总数>
+        items: [{rpm, noise_db}, ...],
+        job_id: 123
       }
     """
     if not session.get('is_admin'):
         return resp_err('UNAUTHORIZED', '请先登录', 401)
 
-    try:
-        with _engine().begin() as conn:
-            rows = conn.execute(text("""
-                SELECT DISTINCT audio_batch_id
-                FROM perf_audio_binding
-                WHERE audio_batch_id IS NOT NULL AND audio_batch_id <> ''
-            """)).fetchall()
-        bound_ids = { (getattr(r, '_mapping', {}) or {}).get('audio_batch_id') for r in rows if (getattr(r, '_mapping', {}) or {}).get('audio_batch_id') }
-    except Exception as e:
-        return resp_err('DB_READ_FAIL', f'读取绑定记录失败: {e}', 500)
+    job_id_raw = (request.args.get('job_id') or '').strip()
+    audio_batch_id = (request.args.get('audio_batch_id') or '').strip()
+    mid_raw = (request.args.get('model_id') or '').strip()
+    cid_raw = (request.args.get('condition_id') or '').strip()
 
-    deleted = []
-    kept = []
-    total_dirs = 0
-
-    def _is_uuid4(name: str) -> bool:
+    job_id = None
+    if job_id_raw:
         try:
-            u = uuid.UUID(name, version=4)
-            return str(u) == name
+            job_id = int(job_id_raw)
         except Exception:
-            return False
+            return resp_err('INVALID_INPUT', 'job_id 非法')
 
-    try:
-        if not os.path.isdir(AUDIO_ROOT):
-            return resp_ok({
-                'deleted': [],
-                'kept': [],
-                'bound_ids_count': len(bound_ids),
-                'total_dirs': 0
-            }, message='音频根目录不存在，跳过清理')
+    model_id = None
+    condition_id = None
+    if mid_raw and cid_raw:
+        try:
+            model_id = int(mid_raw)
+            condition_id = int(cid_raw)
+        except Exception:
+            return resp_err('INVALID_INPUT', 'model_id/condition_id 非法')
 
-        for entry in os.listdir(AUDIO_ROOT):
-            abs_path = os.path.join(AUDIO_ROOT, entry)
-            if not os.path.isdir(abs_path):
-                continue
-            if not _is_uuid4(entry):
-                # 仅统计符合 UUIDv4 的音频批次目录
-                continue
-            total_dirs += 1
-            if entry in bound_ids:
-                kept.append(entry)
-                continue
-            # 未绑定 -> 删除
+    with _engine().begin() as conn:
+        if job_id is not None:
+            row = conn.execute(text("""
+                SELECT job_id, status, summary_json
+                FROM audio_calib_job
+                WHERE job_id = :jid
+                LIMIT 1
+            """), {'jid': job_id}).fetchone()
+        elif audio_batch_id and model_id and condition_id:
+            row = conn.execute(text("""
+                SELECT job_id, status, summary_json
+                FROM audio_calib_job
+                WHERE audio_batch_id = :abid
+                  AND model_id = :mid
+                  AND condition_id = :cid
+                ORDER BY finished_at DESC, created_at DESC
+                LIMIT 1
+            """), {'abid': audio_batch_id, 'mid': model_id, 'cid': condition_id}).fetchone()
+        else:
+            return resp_err('INVALID_INPUT', '请提供 job_id 或 (audio_batch_id, model_id, condition_id)')
+
+    if not row:
+        return resp_err('NOT_FOUND', '标定任务不存在', 404)
+
+    mp = row._mapping
+    if mp.get('status') != 'success':
+        return resp_err('JOB_NOT_READY', f'标定任务尚未成功完成，当前状态: {mp.get("status")}', 400)
+
+    summary = None
+    raw_summary = mp.get('summary_json')
+    if isinstance(raw_summary, str):
+        try:
+            summary = json.loads(raw_summary)
+        except Exception:
+            summary = None
+    elif isinstance(raw_summary, dict):
+        summary = raw_summary
+
+    items = []
+    if summary and isinstance(summary.get('rpm_noise'), list):
+        for it in summary['rpm_noise']:
             try:
-                shutil.rmtree(abs_path, ignore_errors=True)
-                deleted.append(entry)
+                rpm = int(it.get('rpm'))
+                noise_db = float(it.get('noise_db'))
             except Exception:
-                # 删除失败也视为保留（可在后续运维处理）
-                kept.append(entry)
+                continue
+            items.append({'rpm': rpm, 'noise_db': noise_db})
 
-    except Exception as e:
-        return resp_err('FS_SCAN_FAIL', f'扫描或删除目录失败: {e}', 500)
-
-    # 可选：记录日志
-    _log('cleanup-unbound-audio', deleted=len(deleted), kept=len(kept), bound_ids=len(bound_ids), total=total_dirs)
-
-    return resp_ok({
-        'deleted': deleted,
-        'kept': kept,
-        'bound_ids_count': len(bound_ids),
-        'total_dirs': total_dirs
-    }, message=f'清理完成：删除 {len(deleted)} 个未绑定目录')
+    _log('rpm_noise:result', job_id=int(mp['job_id']), count=len(items))
+    return resp_ok({'items': items, 'job_id': int(mp['job_id'])})

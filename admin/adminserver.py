@@ -7,8 +7,8 @@ from flask import Flask, request, jsonify, make_response, session, render_templa
 from sqlalchemy import create_engine, text
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash
-from .admin_data import data_mgmt_bp
-from .admin_calib import calib_admin_bp
+from admin.admin_data import data_mgmt_bp
+from admin.admin_calib import calib_admin_bp
 
 # =========================
 # Config

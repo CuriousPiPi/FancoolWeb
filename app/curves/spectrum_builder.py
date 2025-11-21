@@ -46,7 +46,7 @@ def load_default_params() -> Dict[str, Any]:
     """
     with _engine.begin() as conn:
         row = conn.execute(text("""
-            SELECT params_json FROM calibration_params
+            SELECT params_json FROM audio_calibration_params
             WHERE is_default=1
             ORDER BY updated_at DESC
             LIMIT 1

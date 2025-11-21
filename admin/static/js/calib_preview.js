@@ -123,10 +123,10 @@
   styleTag.textContent = `@keyframes calibSpin { from{ transform:rotate(0deg);} to{ transform:rotate(360deg);} }`;
   document.head.appendChild(styleTag);
 
-  CalibPreview.show = async function({ mount, batchId }){
+  CalibPreview.show = async function({ mount, batchId, jobId }){
     const container = (typeof mount==='string')? document.querySelector(mount) : mount;
     if(!container) throw new Error('mount container not found');
-    if(!batchId) throw new Error('batchId required');
+    if(!jobId && !batchId) throw new Error('jobId or batchId required');
 
     container.innerHTML = `
       <div class="panel" style="margin-top:10px; position:relative;">
@@ -168,7 +168,10 @@
     let requestSec = null;
     try {
       const t0 = performance.now();
-      const res = await fetch(`/admin/api/calib/preview?batch_id=${encodeURIComponent(batchId)}`);
+      const qs = jobId
+        ? `job_id=${encodeURIComponent(jobId)}`
+        : `audio_batch_id=${encodeURIComponent(batchId)}`;
+      const res = await fetch(`/admin/api/calib/preview?${qs}`);
       const j = await res.json();
       requestSec = (performance.now() - t0)/1000;
       if(!j.success) throw new Error(j.error_message||'预览数据拉取失败');
@@ -291,7 +294,6 @@
       const sw  = t.sweep_phase || {};
       const fmt = (v)=> (typeof v==='number' && isFinite(v)) ? `${v.toFixed(2)} s` : '-';
 
-      // CPU 统计（后端注入）
       const cpuOverall = t.cpu_stats_overall || null;
       const cpuCal = t.cpu_stats_calibration || null;
       const cpuSweep = t.cpu_stats_sweep || null;
@@ -334,7 +336,6 @@
         ['— sweep：帧/频带', `${sw.frames||0} 帧 / ${sw.bands||0} 带`],
         ['— sweep：阶段小计', fmt(sw.total_sec)],
 
-        // 可选：分阶段 CPU
         ...(cpuCal ? [['— 校准阶段 CPU 核秒', c.coreSec], ['— 校准阶段峰值核心', c.peak]] : []),
         ...(cpuSweep ? [['— sweep阶段 CPU 核秒', s.coreSec], ['— sweep阶段峰值核心', s.peak]] : [])
       ];
@@ -370,9 +371,9 @@
           if(!Number.isFinite(Lh)) continue;
           const Eh = Math.pow(10, Lh/10);
           const fLine = h*bpf;
-            for(const [k,w] of distributeLineToBands(fLine, centers, f1, f2, sigmaB, topk)){
-              Es[k] += Eh*w;
-            }
+          for(const [k,w] of distributeLineToBands(fLine, centers, f1, f2, sigmaB, topk)){
+            Es[k] += Eh*w;
+          }
         }
       }
       const E_sum = Es.reduce((a,b)=>a+b,0);
@@ -480,6 +481,6 @@
     rpmInput.addEventListener('change', ()=> setRPM(rpmInput.value));
     rpmRange.addEventListener('input', ()=> setRPM(rpmRange.value));
   };
-
+  
   window.CalibPreview = CalibPreview;
 })();
