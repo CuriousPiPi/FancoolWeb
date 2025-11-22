@@ -133,7 +133,7 @@ def _short_file_worker(ap: str,
                                     highpass_hz=0.0, for_slm_like=True)
     E_A_full, Etot_full = bands_time_energy_A(
         x_raw, fs_raw, centers, n_per_oct, frame_sec, hop_ratio,
-        grid=band_grid, fft_workers=1, **fb_kwargs
+        fft_workers=1, **fb_kwargs
     )
     short_full_sec = (time.perf_counter() - t_start_full)
 
@@ -257,11 +257,10 @@ def band_edges_from_centers(centers: np.ndarray, n_per_octave=12, grid: str = "i
     centers = np.asarray(centers, float)
     if centers.size == 0:
         return np.zeros_like(centers), np.zeros_like(centers)
-    if grid == "iec-decimal":
-        bpd = bands_per_decade_from_npo(n_per_octave)
-        g = 10.0 ** (1.0 / (2.0 * float(bpd)))
-    else:
-        g = 2.0 ** (1.0 / (2.0 * float(n_per_octave)))
+    
+    # IEC‑decimal: g = 10^(1/(2*bpd))
+    bpd = bands_per_decade_from_npo(n_per_octave)
+    g = 10.0 ** (1.0 / (2.0 * float(bpd)))
     return centers / g, centers * g
 
 def db10_from_energy(E: np.ndarray, floor=1e-30) -> np.ndarray:
@@ -663,6 +662,29 @@ def _build_pchip_anchor(xs_in: List[float], ys_in: List[float], *, nonneg: bool 
     m = _pchip_slopes_fritsch_carlson(xs, ys, nonneg=nonneg)
     return {"x": xs, "y": ys, "m": m, "x0": xs[0], "x1": xs[-1]}
 
+def _derive_proc_from_raw(x_raw: np.ndarray,
+                          fs_in: int,
+                          trim_head: float,
+                          trim_tail: float,
+                          hp_hz: float) -> Tuple[np.ndarray, int]:
+    """
+    从原始单声道波形派生“裁剪 + 高通 + 零均值”的处理段。
+    - 仅在内存中做裁剪与高通，避免重复读盘。
+    - calibrate_from_points_in_memory / build_model_from_calib_with_sweep_in_memory 共用。
+    """
+    xw = np.asarray(x_raw, dtype=np.float64, order='C')
+    n_head = int(max(0.0, trim_head) * fs_in)
+    n_tail = int(max(0.0, trim_tail) * fs_in)
+    if xw.size > n_head + n_tail:
+        xw = xw[n_head: xw.size - n_tail]
+    elif xw.size > n_head:
+        xw = xw[n_head:]
+    xw = xw - float(np.mean(xw)) if xw.size else xw
+    if hp_hz and hp_hz > 0 and fs_in > 2 * hp_hz and xw.size:
+        sos = signal.butter(2, float(hp_hz), btype='highpass', fs=fs_in, output='sos')
+        xw = signal.sosfilt(sos, xw)
+    return xw.astype(np.float64, copy=False), int(fs_in)
+
 # ---------------- 流水线：标定（env + 短录音） ----------------
 def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
     """
@@ -732,21 +754,6 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
 
     fbkw = _fb_kwargs(params)
 
-    def _derive_proc_from_raw(x_raw: np.ndarray, fs_in: int,
-                              trim_head: float, trim_tail: float, hp_hz: float) -> Tuple[np.ndarray, int]:
-        xw = np.asarray(x_raw, dtype=np.float64, order='C')
-        n_head = int(max(0.0, trim_head) * fs_in)
-        n_tail = int(max(0.0, trim_tail) * fs_in)
-        if xw.size > n_head + n_tail:
-            xw = xw[n_head: xw.size - n_tail]
-        elif xw.size > n_head:
-            xw = xw[n_head:]
-        xw = xw - float(np.mean(xw)) if xw.size else xw
-        if hp_hz and hp_hz > 0 and fs_in > 2 * hp_hz and xw.size:
-            sos = signal.butter(2, float(hp_hz), btype='highpass', fs=fs_in, output='sos')
-            xw = signal.sosfilt(sos, xw)
-        return xw.astype(np.float64, copy=False), int(fs_in)
-
     root = os.path.abspath(root_dir)
     env_dir = os.path.join(root, "env")
     if not os.path.isdir(env_dir):
@@ -781,7 +788,7 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
         for (x_raw, fs_raw) in env_raw_cache:
             E_A_full, _ = bands_time_energy_A(
                 x_raw, fs_raw, centers, n_per_oct, frame_sec, hop_ratio,
-                grid=band_grid, fft_workers=max(1, num_workers), **fbkw
+                fft_workers=max(1, num_workers), **fbkw
             )
             E_env_A_full_list.append(E_A_full)
     timings["env_abs_scale_sec"] += (time.perf_counter() - t1)
@@ -794,10 +801,11 @@ def calibrate_from_points_in_memory(root_dir: str, params: Dict[str, Any]) -> Tu
     E_env_A_proc_list, Etot_env_list = [], []
     with _threadpool_limits_ctx(max(1, num_workers)):
         for (x_raw, fs_raw) in env_raw_cache:
+            # 统一使用模块级 _derive_proc_from_raw
             x_proc, fs_proc = _derive_proc_from_raw(x_raw, fs_raw, trim_head_sec, trim_tail_sec, highpass_hz)
             E_A_p, Etot = bands_time_energy_A(
                 x_proc, fs_proc, centers, n_per_oct, frame_sec, hop_ratio,
-                grid=band_grid, fft_workers=max(1, num_workers), **fbkw
+                fft_workers=max(1, num_workers), **fbkw
             )
             E_env_A_proc_list.append(E_A_p)
             Etot_env_list.append(Etot)
@@ -1083,7 +1091,6 @@ def build_model_from_calib_with_sweep_in_memory(root_dir: str,
         except Exception:
             # Lowering process priority failed (e.g., insufficient permissions); safe to ignore and continue with default priority.
             pass
-    # Windows 可选：若用户强需求，可外部整体下调运行服务的进程优先级
 
     t_all = time.perf_counter()
     timing = {
@@ -1194,29 +1201,14 @@ def build_model_from_calib_with_sweep_in_memory(root_dir: str,
                                  highpass_hz=0.0, for_slm_like=True)
     timing["read_raw_sec"] += (time.perf_counter() - t1)
 
-    # 内存派生“裁剪+高通”的处理段
-    def _derive_proc_from_raw(xr: np.ndarray, fs_in: int,
-                              trim_head: float, trim_tail: float, hp_hz: float) -> Tuple[np.ndarray, int]:
-        xw = np.asarray(xr, dtype=np.float64, order='C')
-        n_head = int(max(0.0, trim_head) * fs_in)
-        n_tail = int(max(0.0, trim_tail) * fs_in)
-        if xw.size > n_head + n_tail:
-            xw = xw[n_head: xw.size - n_tail]
-        elif xw.size > n_head:
-            xw = xw[n_head:]
-        xw = xw - float(np.mean(xw)) if xw.size else xw
-        if hp_hz and hp_hz > 0 and fs_in > 2 * hp_hz and xw.size:
-            sos = signal.butter(2, float(hp_hz), btype='highpass', fs=fs_in, output='sos')
-            xw = signal.sosfilt(sos, xw)
-        return xw.astype(np.float64, copy=False), int(fs_in)
-
     # 逐帧滤波（仅一次；开启 FFT 多线程 + 限制 BLAS 线程数）
     t1 = time.perf_counter()
+    # 统一使用模块级 _derive_proc_from_raw，而不是本地重复定义
     x_proc, fs1 = _derive_proc_from_raw(x_raw, fs0, trim_head_sec, trim_tail_sec, highpass_hz)
     with _threadpool_limits_ctx(max(1, num_workers)):
         E_A_frames, _ = bands_time_energy_A(
             x_proc, fs1, centers, n_per_oct, frame_sec, hop_ratio,
-            grid=band_grid, fft_workers=max(1, num_workers), **_fb_kwargs(params)
+            fft_workers=max(1, num_workers), **_fb_kwargs(params)
         )
     timing["read_proc_sec"] += 0.0  # 内存派生很快
     timing["frames_filter_sec"] += (time.perf_counter() - t1)
@@ -1939,7 +1931,6 @@ def bands_time_energy_A(x: np.ndarray,
                         n_per_oct: int,
                         frame_sec: float,
                         hop_ratio: float,
-                        grid: str = "iec-decimal",
                         *,
                         bands_filter_order: int = 4,
                         use_fir_cpb: bool = False,
