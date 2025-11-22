@@ -123,6 +123,14 @@ function getSpectrumResolutionMode() {
 
 /*
  * 将高分辨率 IEC 频带（例如 1/48 倍频程）聚合成低分辨率 IEC 频带（1/3 或 1/12）。
+ * 使用“按带宽重叠比例分配能量”的方式，保证能量守恒：
+ *   - 每个细带先转换为能量 E_i，对应的实际带宽为 [f1Fine[i], f2Fine[i]]
+ *   - 粗带 j 的能量为所有细带在 [f1Coarse[j], f2Coarse[j]] 区间内的重叠能量之和：
+ *       overlap = max(0, min(f2Fine, f2Coarse) - max(f1Fine, f1Coarse))
+ *       w = overlap / (f2Fine - f1Fine)
+ *       Eacc_j += E_i * w
+ *   - 最后把 Eacc_j 转回 dB。
+ *
  * @param {number[]} fineCenters  高分辨率中心频数组（Hz）
  * @param {number[]} fineValuesDb 同长 dB 数组，每个元素是该带 A 计权声级（dB）
  * @param {number}  fineNPerOct   高分辨率 n_per_oct（例如 48）
@@ -137,7 +145,7 @@ function downsampleSpectrumBands(fineCenters, fineValuesDb, fineNPerOct, coarseN
     return { centers: [], valuesDb: [] };
   }
 
-  // 1) 目标 IEC 频带中心 & 带宽
+  // 1) 目标 IEC 频带中心 & 带宽（粗分辨率）
   const fmin = SPECTRUM_X_MIN;
   const fmax = SPECTRUM_X_MAX;
   const centersCoarse = iecMakeCenters(coarseNPerOct, fmin, fmax);
@@ -146,7 +154,10 @@ function downsampleSpectrumBands(fineCenters, fineValuesDb, fineNPerOct, coarseN
   }
   const { f1: f1Coarse, f2: f2Coarse } = iecBandEdgesFromCenters(centersCoarse, coarseNPerOct);
 
-  // 2) 高分辨率带能量（线性域）
+  // 2) 细分频带边界（基于 fineNPerOct）
+  const { f1: f1Fine, f2: f2Fine } = iecBandEdgesFromCenters(centersFine, fineNPerOct);
+
+  // 3) 高分辨率带能量（线性域）
   const P0_2 = Math.pow(20e-6, 2);
   const EsFine = new Array(K);
   for (let i = 0; i < K; i++) {
@@ -161,17 +172,31 @@ function downsampleSpectrumBands(fineCenters, fineValuesDb, fineNPerOct, coarseN
   const centersOut = [];
   const valsOut = [];
 
+  // 4) 按重叠带宽比例，将细带能量分配到粗带
   for (let j = 0; j < centersCoarse.length; j++) {
-    const lo = f1Coarse[j];
-    const hi = f2Coarse[j];
+    const loC = f1Coarse[j];
+    const hiC = f2Coarse[j];
 
-    // 直接对所有落入该粗带的细带能量求和
     let Eacc = 0;
     for (let i = 0; i < K; i++) {
-      const fc = centersFine[i];
-      if (fc < lo || fc >= hi) continue;
       const E = EsFine[i];
-      if (E > 0) Eacc += E;
+      if (E <= 0) continue;
+
+      const loF = f1Fine[i];
+      const hiF = f2Fine[i];
+      if (!(hiF > loF)) continue;
+
+      // 细带与当前粗带的交集
+      const lo = Math.max(loC, loF);
+      const hi = Math.min(hiC, hiF);
+      if (hi <= lo) continue; // 无重叠
+
+      const overlap = hi - lo;
+      const widthFine = hiF - loF || 1e-9;
+      const w = overlap / widthFine;  // 重叠比例
+      if (w > 0) {
+        Eacc += E * w;
+      }
     }
 
     if (Eacc > 0) {
@@ -773,6 +798,7 @@ function onWindowResize(){
     if (lastPayload) render(lastPayload); else chart.resize();
   } else {
     chart.resize();
+    try { if (spectrumEnabled) placeSpectrumSwitchOverlay(); } catch(_) {}
     try { spectrumEnabled && spectrumChart && spectrumChart.resize(); } catch(_) {}
 
     if (lastOption) {
@@ -908,6 +934,207 @@ function mount(rootEl) {
   render(emptyPayload);
 }
 
+function ensureSpectrumResolutionSwitch() {
+  if (!spectrumInner) return null;
+  
+  const oldEl = spectrumInner.querySelector('.spectrum-res-switch');
+  if (oldEl && !oldEl.classList.contains('is-slider-type')) {
+    oldEl.remove();
+  }
+
+  let container = spectrumInner.querySelector('.spec-switch-container');
+  if (!container) {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'spectrum-res-switch is-slider-type';
+    wrapper.style.display = 'flex';
+    wrapper.style.alignItems = 'center';
+    wrapper.style.gap = '8px';
+    
+    // 显式设置样式，确保 JS 接管控制权
+    wrapper.style.position = 'absolute';
+    wrapper.style.zIndex = '200';
+    
+    const label = document.createElement('span');
+    label.className = 'label';
+    label.textContent = '频带分辨率';
+    wrapper.appendChild(label);
+
+    container = document.createElement('div');
+    container.className = 'spec-switch-container';
+    container.innerHTML = `
+      <div class="spec-switch-track">
+        <div class="spec-switch-strip" id="specResSlider">
+          <div class="spec-item">1/48</div>
+          <div class="spec-item">1/12</div>
+          <div class="spec-item">1/3</div>
+        </div>
+      </div>
+    `;
+    wrapper.appendChild(container);
+    spectrumInner.insertBefore(wrapper, spectrumInner.firstChild);
+    
+    bindSpecResSwitch(container);
+    
+    // 创建后立即尝试一次定位
+    requestAnimationFrame(placeSpectrumSwitchOverlay);
+  }
+
+  updateSpecResSwitchPos(container);
+  return container;
+}
+
+function bindSpecResSwitch(container) {
+  const slider = container.querySelector('#specResSlider');
+  if (!slider) return;
+
+  const MODES = ['1_48', '1_12', '1_3'];
+  
+  let itemWidth = 36;
+  let containerWidth = 72;
+  let centerOffset = 0;
+  
+  let dragging = false;
+  let dragMoved = false;
+  let startX = 0;
+  let currentTranslate = 0;
+  let activePointerId = null;
+
+  function getModeIndex() {
+    const cur = getSpectrumResolutionMode();
+    const idx = MODES.indexOf(cur);
+    return idx >= 0 ? idx : 0;
+  }
+
+  function updateMetrics() {
+    containerWidth = container.offsetWidth || 72;
+    const firstItem = slider.querySelector('.spec-item');
+    if (firstItem) itemWidth = firstItem.offsetWidth || 36;
+    centerOffset = (containerWidth - itemWidth) / 2;
+  }
+
+  function updateItemScales(tx) {
+    const items = slider.querySelectorAll('.spec-item');
+    if (!items.length) return;
+    
+    const cwHalf = containerWidth / 2;
+    const centerInStrip = cwHalf - tx;
+
+    items.forEach((el, i) => {
+      const itemCenterInStrip = (i * itemWidth) + (itemWidth / 2);
+      const dist = Math.abs(itemCenterInStrip - centerInStrip);
+      
+      let scale = 0.65;
+      let opacity = 0.4;
+
+      if (dist < itemWidth * 1.2) {
+        const ratio = dist / (itemWidth * 1.2);
+        scale = 1.0 - (0.35 * ratio);    
+        opacity = 1.0 - (0.6 * ratio);  
+      }
+      
+      el.style.transform = `scale(${scale.toFixed(3)})`;
+      el.style.opacity = opacity.toFixed(2);
+    });
+  }
+
+  function syncPos(animate = true) {
+    const idx = getModeIndex();
+    const x = centerOffset - (idx * itemWidth);
+    
+    slider.style.transition = animate ? 'transform .25s cubic-bezier(0.25, 0.1, 0.25, 1)' : 'none';
+    slider.style.transform = `translateX(${x}px)`;
+    currentTranslate = x;
+    updateItemScales(x);
+  }
+
+  function commitMode(idx) {
+    const safeIdx = Math.max(0, Math.min(MODES.length - 1, idx));
+    const newMode = MODES[safeIdx];
+    setSpectrumResolutionMode(newMode);
+    updateMetrics(); 
+    syncPos(true);
+    // 切换模式后立即刷新位置，因为标题文本长度变了
+    setTimeout(placeSpectrumSwitchOverlay, 0);
+  }
+
+  // ... pointer events (保持不变) ...
+  function onPointerDown(e) {
+    if (e.button !== undefined && e.button !== 0) return;
+    updateMetrics();
+    dragging = true; dragMoved = false; startX = e.clientX;
+    activePointerId = e.pointerId ?? null;
+    slider.style.transition = 'none';
+    const style = window.getComputedStyle(slider);
+    currentTranslate = new DOMMatrix(style.transform).m41;
+    updateItemScales(currentTranslate);
+    try { if (activePointerId != null) slider.setPointerCapture(activePointerId); } catch(_) {}
+    e.preventDefault?.();
+  }
+
+  function onPointerMove(e) {
+    if (!dragging) return;
+    const dx = e.clientX - startX;
+    if (!dragMoved && Math.abs(dx) > 2) dragMoved = true;
+    let nextTx = currentTranslate + dx;
+    const minTx = centerOffset - ((MODES.length - 1) * itemWidth) - 24;
+    const maxTx = centerOffset + 24;
+    if (nextTx > maxTx) nextTx = maxTx + (nextTx - maxTx) * 0.3;
+    if (nextTx < minTx) nextTx = minTx + (nextTx - minTx) * 0.3;
+    slider.style.transform = `translateX(${nextTx}px)`;
+    updateItemScales(nextTx);
+  }
+
+  function onPointerUp(e) {
+    if (!dragging) return;
+    dragging = false;
+    try { if (activePointerId != null) slider.releasePointerCapture(activePointerId); } catch(_) {}
+    activePointerId = null;
+    if (!dragMoved) {
+      let idx = getModeIndex(); idx = (idx + 1) % MODES.length; commitMode(idx);
+    } else {
+      const style = window.getComputedStyle(slider);
+      const finalTx = new DOMMatrix(style.transform).m41;
+      let idx = Math.round((centerOffset - finalTx) / itemWidth);
+      commitMode(idx);
+    }
+  }
+
+  container.addEventListener('pointerdown', onPointerDown);
+  window.addEventListener('pointermove', onPointerMove, { passive: true });
+  window.addEventListener('pointerup', onPointerUp, { passive: true });
+  window.addEventListener('pointercancel', onPointerUp);
+  
+  requestAnimationFrame(() => { updateMetrics(); syncPos(false); });
+  container.__updatePos = () => { updateMetrics(); syncPos(true); };
+}
+
+function updateSpecResSwitchPos(container) {
+  if (container && container.__updatePos) {
+    container.__updatePos();
+  }
+}
+
+// 在 setSpectrumResolutionMode 中添加 UI 同步调用
+function setSpectrumResolutionMode(mode) {
+  const m = String(mode || '').trim();
+  if (!['1_3', '1_12', '1_48'].includes(m)) return;
+  if (m === spectrumResolutionMode) return;
+  spectrumResolutionMode = m;
+  
+  // 同步 UI 位置
+  if (spectrumInner) {
+    const container = spectrumInner.querySelector('.spec-switch-container');
+    if (container) updateSpecResSwitchPos(container);
+  }
+
+  // 仅影响前端聚合方式，重建频谱即可
+  try {
+    if (spectrumEnabled && spectrumChart) {
+      buildAndSetSpectrumOption(true);
+    }
+  } catch (_) {}
+}
+
 function ensureSpectrumHost() {
   // 若已存在 host，仅保证有 .spectrum-inner 子元素
   if (spectrumRoot && spectrumRoot.isConnected) {
@@ -952,6 +1179,7 @@ function ensureSpectrumHost() {
 
   spectrumRoot = host;
   spectrumInner = inner;
+  try { ensureSpectrumResolutionSwitch(); } catch(_) {}
   return host;
 }
 
@@ -2326,13 +2554,15 @@ async function toggleSpectrumUI(show) {
   
 function updateSpectrumLayout() {
   if (!spectrumRoot || !spectrumInner) return;
-
   if (isFs) {
     spectrumRoot.style.height = '';
     spectrumInner.style.height = '';
   }
-  // NEW: 任何模式下都尽量触发频谱 resize，使其跟随容器宽度
-  if (spectrumChart) { try { spectrumChart.resize(); } catch(_) {} }
+  if (spectrumChart) { 
+    try { spectrumChart.resize(); } catch(_) {} 
+    // 布局变化时重算开关位置
+    placeSpectrumSwitchOverlay();
+  }
 }
 
 function getXQueryOrDefault(mode){
@@ -2500,6 +2730,7 @@ function rpmMaxForSeries(s, model) {
 
 function buildAndSetSpectrumOption(fullRefresh = false, themeOverride) {
   if (!spectrumChart) return;
+  try { ensureSpectrumResolutionSwitch(); } catch(_) {}
 
   const themeName =
     themeOverride ||
@@ -2697,8 +2928,8 @@ function buildAndSetSpectrumOption(fullRefresh = false, themeOverride) {
       z: 1,
       clip: true,
       animation: true,
-      animationDuration: 650,
-      animationEasing: 'linear',
+      animationDuration: 1500,
+      animationEasing: 'cubicOut',
       animationDelay: idx => idx * 14,
       animationDurationUpdate: 500,
       animationEasingUpdate: 'cubicOut',
@@ -2733,6 +2964,7 @@ function buildAndSetSpectrumOption(fullRefresh = false, themeOverride) {
 
   spectrumChart.setOption(optionObj, fullRefresh ? true : false);
   spectrumChart.resize();
+  requestAnimationFrame(placeSpectrumSwitchOverlay);
 }
 
 function buildSpectrumTooltip(t){
@@ -2786,17 +3018,25 @@ function buildSpectrumTitle() {
   const x = Number(getXQueryOrDefault(mode));
 
   const resMode = getSpectrumResolutionMode();
-  let resLabel = '';
-  if (resMode === '1_3')  resLabel = '1/3 倍频程 ';
-  if (resMode === '1_12') resLabel = '1/12 倍频程 ';
-  if (resMode === '1_48') resLabel = '1/48 倍频程 ';
+
+  // FIGURE SPACE (U+2007) 宽度接近数字字符，用来给 “1/3” 补足到与 “1/12” / “1/48” 接近的视觉长度
+  const FRAC_PAD = '\u2007';
+
+  // 基础分辨率段（仅“1/n”），对 1/3 追加占位
+  let fractionPart = '1/48';
+  if (resMode === '1_12') fractionPart = '1/12';
+  if (resMode === '1_3')  fractionPart = '1/3' + FRAC_PAD;
+
+  // 两个空格分隔 “1/n” 与 “倍频程”，并在 “倍频程” 后留两个空格作为与后续内容以及覆盖开关的间距
+  // 注意：placeSpectrumSwitchOverlay 仅覆盖 fractionPart，本实现不会让滑块遮住“倍频程”
+  const resLabel = `${fractionPart} 倍频程  `;
 
   if (mode === 'rpm') {
     const xr = Number.isFinite(x) ? Math.round(x) : '-';
-    return `${resLabel}A计权声级频谱 @ ${xr} RPM（IEC 61260 网格）`;
+    return `${resLabel}A计权声级频谱 @ ${xr} RPM`;
   } else {
     const v = Number.isFinite(x) ? x.toFixed(1) : '-';
-    return `${resLabel}A计权声级频谱 @ ${v} dB（IEC 61260 网格）`;
+    return `${resLabel}A计权声级频谱 @ ${v} dB`;
   }
 }
 
@@ -3309,7 +3549,7 @@ const layoutScheduler = (() => {
       if (dirty.has('legend')) { updateLegendRailLayout(); renderLegendRailItems(); }
       if (dirty.has('fitUI'))  { placeFitUI(); }
       if (dirty.has('pointer')){ repaintPointer(); }
-      if (dirty.has('spectrum')){ updateSpectrumLayout(); }
+      if (dirty.has('spectrum')){ updateSpectrumLayout(); placeSpectrumSwitchOverlay(); }
       if (dirty.has('axisSwitch')) { updateAxisSwitchPosition({ force:true, animate:false }); }
       if (dirty.has('dock')) { placeSpectrumDock(); }
       if (dirty.has('railPark')) { updateRailParkedState(); }
@@ -3897,6 +4137,73 @@ function renderFitPanel({ mode, rows, xValue, unit, onToggleSeries }) {
   }
 
   // 保持可见性由 toggleFitUI 控制
+}
+
+// ---- 替换原 placeSpectrumSwitchOverlay ----
+function placeSpectrumSwitchOverlay() {
+  const wrapper = spectrumInner ? spectrumInner.querySelector('.spectrum-res-switch') : null;
+  if (!wrapper) return;
+
+  if (!spectrumEnabled || !spectrumChart) {
+    wrapper.style.visibility = 'hidden';
+    return;
+  }
+
+  const chartW = spectrumChart.getWidth();
+  if (!chartW || chartW < 50) {
+    requestAnimationFrame(placeSpectrumSwitchOverlay);
+    return;
+  }
+
+  const titleText =
+    (lastSpectrumOption && lastSpectrumOption.title && lastSpectrumOption.title.text) ||
+    (typeof buildSpectrumTitle === 'function' ? buildSpectrumTitle() : '') ||
+    '';
+
+  const t = tokens(lastPayload?.theme);
+  const fontSize = 16;
+  const fontWeight = 700;
+
+  // 整体标题宽度
+  const fullWidth = measureText(titleText, fontSize, fontWeight, t.fontFamily).width;
+  const titleStartX = (chartW / 2) - (fullWidth / 2);
+
+  // 新锚点：固定 "1/" 两字符，避免 1/3 时占位字符导致的宽度波动
+  const anchorStr = '1/';
+  let targetCenterX;
+  const SHIFT_LEFT = 4; // 锚在 "1/" 中心后再略向左，给后续数字和“倍频程”留空间
+
+  const anchorIndex = titleText.indexOf(anchorStr);
+  if (anchorIndex >= 0) {
+    // 前缀到 "1/" 开始前的文本
+    const prefixWidth = measureText(titleText.slice(0, anchorIndex), fontSize, fontWeight, t.fontFamily).width;
+    // "1/" 自身宽度（仅两个字符，忽略后面数字及 figure space）
+    const anchorWidth = measureText(anchorStr, fontSize, fontWeight, t.fontFamily).width;
+    const anchorCenterX = titleStartX + prefixWidth + anchorWidth / 2;
+    targetCenterX = anchorCenterX - SHIFT_LEFT;
+  } else {
+    // 回退 1：旧的完整分数匹配（避免极端标题改动）
+    const fractionMatch = titleText.match(/1\/\d+/);
+    if (fractionMatch && typeof fractionMatch.index === 'number') {
+      const fracStart = fractionMatch.index;
+      const prefixWidth = measureText(titleText.slice(0, fracStart), fontSize, fontWeight, t.fontFamily).width;
+      const fracWidth = measureText(fractionMatch[0], fontSize, fontWeight, t.fontFamily).width;
+      const fracCenterX = titleStartX + prefixWidth + fracWidth / 2;
+      targetCenterX = fracCenterX - 10; // 旧逻辑保留较大偏移
+    }
+  }
+
+  // 回退 2：都失败时，经验值（标题居中基础上左偏）
+  if (targetCenterX == null) {
+    targetCenterX = (chartW / 2) - 40;
+  }
+
+  const targetCenterY = 6 + 10; // 与之前保持一致
+
+  wrapper.style.left = Math.round(targetCenterX) + 'px';
+  wrapper.style.top = Math.round(targetCenterY) + 'px';
+  wrapper.style.transform = 'translate(-50%, -50%)';
+  wrapper.style.visibility = 'visible';
 }
 
 // 可选：暴露到全局，便于调试或其他模块监听

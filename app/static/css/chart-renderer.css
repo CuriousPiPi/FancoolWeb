@@ -575,3 +575,94 @@
   justify-content:space-between; gap:8px; box-shadow:0 -4px 10px rgba(0,0,0,0.03);
 }
 .fit-bubble .foot .hint{ color:var(--text-); font-size:11px; margin:0; line-height:1.2; }
+
+.spectrum-res-switch {
+  /* 移除内边距，因为现在是精准定位 */
+  padding: 0;
+  font-size: 12px;
+  color: var(--text-);
+  user-select: none;
+  /* 改为绝对定位，由 JS 控制位置 */
+  position: absolute; 
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  /* 初始隐藏，JS 计算好位置后再显示 */
+  visibility: hidden;
+}
+
+/* 隐藏原本的 "频带分辨率" 文本标签，因为现在开关直接嵌入在标题里，上下文已足够 */
+.spectrum-res-switch .label {
+  display: none; 
+}
+
+/* 容器：宽度比单个Item宽，用于显示一部分相邻Item */
+.spec-switch-container {
+  position: relative;
+  width: 66px;  /* 窗口宽度：36px(Item) + 18px(左露) + 18px(右露) */
+  height: 26px; /* 与 X轴开关高度一致 */
+  touch-action: none;
+  transform: translate(0, 7%);
+}
+
+/* 轨道：复用 X轴开关的底色与圆角，并增加左右内阴影 */
+.spec-switch-track {
+  width: 100%;
+  height: 100%;
+  background: var(--border-color);
+  border-radius: 9px; /* 半高圆角 */
+  position: relative;
+  overflow: hidden;
+  cursor: grab;
+  box-shadow: inset 0 2px 6px rgba(0,0,0,.10), inset 0 -1px 0 rgba(0,0,0,.05);
+}
+[data-theme="dark"] .spec-switch-track {
+  box-shadow: inset 0 2px 8px rgba(0,0,0,0.45), inset 0 -1px 0 rgba(0,0,0,0.35);
+}
+
+/* 使用伪元素增加左右边缘的“深邃”内阴影，提示可滑动 */
+.spec-switch-track::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 5;
+  border-radius: inherit;
+  /* 左右较重的内阴影，中间透明 */
+  box-shadow: inset 12px 0 12px -8px rgba(0,0,0,0.18), inset -12px 0 12px -8px rgba(0,0,0,0.18);
+}
+
+/* 滑动条：透明背景，纯文字容器 */
+.spec-switch-strip {
+  position: absolute;
+  top: 0; left: 0; height: 100%;
+  display: flex;
+  align-items: center;
+  width: max-content; /* 宽度由内容决定 */
+  background: transparent !important;
+  box-shadow: none !important;
+  will-change: transform;
+  z-index: 1;
+}
+
+/* 内部文字 Item */
+.spec-item {
+  width: 36px; /* 固定宽度 */
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--text-primary); 
+  /* 初始状态，JS 会接管 */
+  opacity: 0.5; 
+  transform: scale(0.7);
+  transition: opacity 0.1s; /* 保留一点 CSS 过渡，用于点击时的平滑 */
+  user-select: none;
+}
+
+.spec-switch-container:active .spec-switch-track { cursor: grabbing; }
