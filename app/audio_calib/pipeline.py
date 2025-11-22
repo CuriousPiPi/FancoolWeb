@@ -2051,30 +2051,47 @@ def _design_cpb_filterbank_iir(centers: np.ndarray,
                                f_lo_limit: float = 0.5) -> List[Optional[np.ndarray]]:
     """
     设计 IIR (Butterworth) 1/n 倍频程带通滤波器组，返回 sos 列表。
+    IEC‑decimal 版：
+      - 频带边界按 IEC 61260 decimal 网格计算：
+        bpd = bands_per_decade_from_npo(n_per_oct)
+        g   = 10**(1/(2*bpd))
+        f1  = fc / g, f2 = fc * g
+      - 与 make_centers_iec61260 / band_edges_from_centers(..., grid="iec-decimal") 完全一致。
     order 为 butter 的阶数（总阶数），推荐 4~8。
     """
     centers = np.asarray(centers, float)
     nyq = fs * 0.5
     if centers.size == 0 or fs <= 0:
         return [None] * int(centers.size)
-    g = 2.0 ** (1.0 / (2.0 * float(n_per_oct)))  # f1=fc/g f2=fc*g
+
+    # IEC‑decimal: g = 10^(1/(2*bpd))
+    bpd = bands_per_decade_from_npo(n_per_oct)
+    g = 10.0 ** (1.0 / (2.0 * float(bpd)))
+
     sos_list: List[Optional[np.ndarray]] = []
     for fc in centers:
         if not (np.isfinite(fc) and fc > 0):
-            sos_list.append(None); continue
+            sos_list.append(None)
+            continue
+
         f1 = max(f_lo_limit, float(fc) / g)
         f2 = float(fc) * g
         if f1 >= f2 or f1 >= nyq or f2 <= 0:
-            sos_list.append(None); continue
+            sos_list.append(None)
+            continue
+
         wn1 = f1 / nyq
         wn2 = min(0.999, f2 / nyq)
         if wn1 <= 0 or wn1 >= wn2:
-            sos_list.append(None); continue
+            sos_list.append(None)
+            continue
+
         try:
             sos = signal.butter(int(order), [wn1, wn2], btype='band', output='sos')
         except Exception:
             sos = None
         sos_list.append(sos if sos is not None else None)
+
     return sos_list
 
 def _design_cpb_filterbank_fir(centers: np.ndarray,
@@ -2084,17 +2101,26 @@ def _design_cpb_filterbank_fir(centers: np.ndarray,
                                f_lo_limit: float = 0.5,
                                window: str = 'hann') -> List[Optional[np.ndarray]]:
     """
-    FIR 线性相位 1/n 倍频程滤波器组设计（窗函数法）。
-    返回每个频带的 (taps, delay) 形式：存放 numpy 数组（coeff），不使用 sos。
-    base_taps: 基准 taps 数，实际按带宽缩放：taps_scale = ref_bw / bw
-              ref_bw 取最宽带的带宽；最终 taps = int(base_taps * taps_scale)，并夹在 [base_taps//2, base_taps*2]
+    FIR 线性相位 1/n 倍频程滤波器组设计（IEC‑decimal 版）。
+    - 带宽与 IIR 版本完全一致：
+        bpd = bands_per_decade_from_npo(n_per_oct)
+        g   = 10**(1/(2*bpd))
+        f1  = fc / g, f2 = fc * g
+    - taps 数按带宽缩放：
+        bw_list 由 (f2 - f1) 计算
+        ref_bw  为最宽带带宽
+        taps    = clip(base_taps * (ref_bw / bw), [base_taps//2, base_taps*2])
+    返回每个频带的 FIR taps（numpy 数组），未使用的带为 None。
     """
     centers = np.asarray(centers, float)
     nyq = fs * 0.5
     if centers.size == 0 or fs <= 0:
         return [None] * int(centers.size)
 
-    g = 2.0 ** (1.0 / (2.0 * float(n_per_oct)))
+    # IEC‑decimal: g = 10^(1/(2*bpd))
+    bpd = bands_per_decade_from_npo(n_per_oct)
+    g = 10.0 ** (1.0 / (2.0 * float(bpd)))
+
     # 计算每带理论带宽
     bw_list = []
     for fc in centers:
@@ -2105,28 +2131,36 @@ def _design_cpb_filterbank_fir(centers: np.ndarray,
     ref_bw = float(np.max(bw_arr))  # 最宽带作为参考
 
     fir_bank: List[Optional[np.ndarray]] = []
-    for i, fc in enumerate(centers):
+    for fc in centers:
         if not (np.isfinite(fc) and fc > 0):
-            fir_bank.append(None); continue
+            fir_bank.append(None)
+            continue
+
         f1 = max(f_lo_limit, fc / g)
         f2 = fc * g
         if f1 >= f2 or f1 >= nyq or f2 <= 0:
-            fir_bank.append(None); continue
+            fir_bank.append(None)
+            continue
+
         bw = max(1e-9, f2 - f1)
         taps_scale = ref_bw / bw
         taps = int(base_taps * taps_scale)
         taps = max(base_taps // 2, min(taps, base_taps * 2))  # 限制范围
+
         # 归一化到 [0,1]
         pass_lo = f1 / nyq
         pass_hi = min(0.999, f2 / nyq)
         if pass_lo <= 0 or pass_lo >= pass_hi:
-            fir_bank.append(None); continue
+            fir_bank.append(None)
+            continue
+
         try:
             # firwin 带通：使用带阻两个截止 (low, high)，默认窗函数
             coeff = signal.firwin(taps, [pass_lo, pass_hi], pass_zero=False, window=window)
         except Exception:
             coeff = None
         fir_bank.append(coeff if coeff is not None else None)
+
     return fir_bank
 
 def _get_progress_hook(params: Dict[str, Any]):

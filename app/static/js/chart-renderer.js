@@ -20,6 +20,7 @@
   const spectrumModelCache = new Map();
   const SPECTRUM_X_MIN = 20;
   const SPECTRUM_X_MAX = 20000;
+  let spectrumResolutionMode = '1_48';
   let __spectrumRaf = null;
   let __skipSpectrumOnce = false;
 
@@ -34,6 +35,154 @@
   const NARROW_HYSTERESIS = 48;     // 迟滞窗口（像素），用于防抖
   const LEGEND_OFFSET = 50;     // Legend 顶部下移像素
   let spectrumDockEl = null;
+
+// IEC 61260 频带工具：从 1/48 基础频带聚合到 1/3 / 1/12 等
+const IEC_RENARD_MANTISSAS = {
+  3:  [1.00, 2.00, 5.00],
+  10: [1.00, 1.25, 1.60, 2.00, 2.50, 3.15, 4.00, 5.00, 6.30, 8.00],
+  20: [1.00, 1.12, 1.25, 1.40, 1.60, 1.80, 2.00, 2.24, 2.50, 2.80,
+       3.15, 3.55, 4.00, 4.50, 5.00, 5.60, 6.30, 7.10, 8.00, 9.00],
+  40: [1.00, 1.06, 1.12, 1.18, 1.25, 1.32, 1.40, 1.50, 1.60, 1.70,
+       1.80, 1.90, 2.00, 2.12, 2.24, 2.36, 2.50, 2.65, 2.80, 3.00,
+       3.15, 3.35, 3.55, 3.75, 4.00, 4.25, 4.50, 4.75, 5.00, 5.30,
+       5.60, 6.00, 6.30, 6.70, 7.10, 7.50, 8.00, 8.50, 9.00, 9.50]
+};
+
+function iecBandsPerDecadeFromNpo(nPerOct) {
+  // 与后端 bands_per_decade_from_npo 完全一致
+  return Math.round((nPerOct * 10) / 3);
+}
+
+function iecSnapToRenard(vals, bpd) {
+  const mans = IEC_RENARD_MANTISSAS[bpd];
+  if (!mans || !mans.length) return vals.slice();
+  const mansArr = mans.map(Number);
+  const out = [];
+  for (let i = 0; i < vals.length; i++) {
+    const f = Number(vals[i]);
+    if (!(Number.isFinite(f) && f > 0)) continue;
+    const e = Math.floor(Math.log10(f));
+    const m = f / Math.pow(10, e);
+    let bestIdx = 0;
+    let bestErr = Infinity;
+    for (let j = 0; j < mansArr.length; j++) {
+      const err = Math.abs(mansArr[j] - m);
+      if (err < bestErr) { bestErr = err; bestIdx = j; }
+    }
+    const snapped = mansArr[bestIdx] * Math.pow(10, e);
+    out.push(snapped);
+  }
+  // 去重 + 排序
+  const uniq = Array.from(new Set(out.map(v => Number(v.toFixed(6))))).sort((a,b)=>a-b);
+  return uniq;
+}
+
+function iecMakeCenters(nPerOct, fmin, fmax) {
+  const bpd = iecBandsPerDecadeFromNpo(nPerOct);
+  const fMinClamped = Math.max(fmin, 1e-12);
+  const fMaxClamped = Math.max(fmax, 1e-12);
+  const kMin = Math.ceil(bpd * Math.log10(fMinClamped));
+  const kMax = Math.floor(bpd * Math.log10(fMaxClamped));
+  if (kMax < kMin) return [];
+  const ks = [];
+  for (let k = kMin; k <= kMax; k++) ks.push(k);
+  const centersExact = ks.map(k => Math.pow(10, k / bpd));
+  const centersNom = iecSnapToRenard(centersExact, bpd);
+  return centersNom.filter(f => f >= fmin && f <= fmax);
+}
+
+function iecBandEdgesFromCenters(centers, nPerOct) {
+  const bpd = iecBandsPerDecadeFromNpo(nPerOct);
+  // IEC decimal grid: g = 10^(1/(2*bpd))
+  const g = Math.pow(10, 1 / (2 * bpd));
+  const f1 = [];
+  const f2 = [];
+  for (const fc of centers) {
+    f1.push(fc / g);
+    f2.push(fc * g);
+  }
+  return { f1, f2 };
+}
+
+function setSpectrumResolutionMode(mode) {
+  const m = String(mode || '').trim();
+  if (!['1_3', '1_12', '1_48'].includes(m)) return;
+  if (m === spectrumResolutionMode) return;
+  spectrumResolutionMode = m;
+  // 仅影响前端聚合方式，重建频谱即可
+  try {
+    if (spectrumEnabled && spectrumChart) {
+      buildAndSetSpectrumOption(true);
+    }
+  } catch (_) {}
+}
+
+function getSpectrumResolutionMode() {
+  return spectrumResolutionMode;
+}
+
+/*
+ * 将高分辨率 IEC 频带（例如 1/48 倍频程）聚合成低分辨率 IEC 频带（1/3 或 1/12）。
+ * @param {number[]} fineCenters  高分辨率中心频数组（Hz）
+ * @param {number[]} fineValuesDb 同长 dB 数组，每个元素是该带 A 计权声级（dB）
+ * @param {number}  fineNPerOct   高分辨率 n_per_oct（例如 48）
+ * @param {number}  coarseNPerOct 目标 n_per_oct（例如 3 或 12）
+ * @returns {{centers:number[], valuesDb:number[]}}
+ */
+function downsampleSpectrumBands(fineCenters, fineValuesDb, fineNPerOct, coarseNPerOct) {
+  const centersFine = fineCenters.map(Number);
+  const valsFine = fineValuesDb.map(Number);
+  const K = Math.min(centersFine.length, valsFine.length);
+  if (!K || !Number.isFinite(fineNPerOct) || !Number.isFinite(coarseNPerOct)) {
+    return { centers: [], valuesDb: [] };
+  }
+
+  // 1) 目标 IEC 频带中心 & 带宽
+  const fmin = SPECTRUM_X_MIN;
+  const fmax = SPECTRUM_X_MAX;
+  const centersCoarse = iecMakeCenters(coarseNPerOct, fmin, fmax);
+  if (!centersCoarse.length) {
+    return { centers: [], valuesDb: [] };
+  }
+  const { f1: f1Coarse, f2: f2Coarse } = iecBandEdgesFromCenters(centersCoarse, coarseNPerOct);
+
+  // 2) 高分辨率带能量（线性域）
+  const P0_2 = Math.pow(20e-6, 2);
+  const EsFine = new Array(K);
+  for (let i = 0; i < K; i++) {
+    const dB = valsFine[i];
+    if (!Number.isFinite(dB)) {
+      EsFine[i] = 0;
+    } else {
+      EsFine[i] = P0_2 * Math.pow(10, dB / 10);
+    }
+  }
+
+  const centersOut = [];
+  const valsOut = [];
+
+  for (let j = 0; j < centersCoarse.length; j++) {
+    const lo = f1Coarse[j];
+    const hi = f2Coarse[j];
+
+    // 直接对所有落入该粗带的细带能量求和
+    let Eacc = 0;
+    for (let i = 0; i < K; i++) {
+      const fc = centersFine[i];
+      if (fc < lo || fc >= hi) continue;
+      const E = EsFine[i];
+      if (E > 0) Eacc += E;
+    }
+
+    if (Eacc > 0) {
+      const dB = 10 * Math.log10(Eacc / P0_2);
+      centersOut.push(centersCoarse[j]);
+      valsOut.push(dB);
+    }
+  }
+
+  return { centers: centersOut, valuesDb: valsOut };
+}
 
 function __forceSpectrumDockFromUrl(){
   try {
@@ -2429,7 +2578,7 @@ function buildAndSetSpectrumOption(fullRefresh = false, themeOverride) {
     const mid = Number(midRaw), cid = Number(cidRaw);
     if (!Number.isInteger(mid) || !Number.isInteger(cid)) return;
 
-    const model = spectrumModelCache.get(`${mid}_${cid}`);
+        const model = spectrumModelCache.get(`${mid}_${cid}`);
     if (!model) return;
 
     const centers = Array.isArray(model.centers_hz) ? model.centers_hz : (model.freq_hz || model.freq || []);
@@ -2437,17 +2586,43 @@ function buildAndSetSpectrumOption(fullRefresh = false, themeOverride) {
     if (!(centers.length && bands.length)) return;
 
     const rpmTarget = getSeriesRpmForCurrentX(s, model);
-    const pts = [];
+    let pts = [];
     if (Number.isFinite(rpmTarget) && rpmTarget > 0) {
+      const fineCenters = [];
+      const fineValsDb = [];
       for (let i = 0; i < centers.length; i++) {
         const hz = Number(centers[i]);
         if (!Number.isFinite(hz)) continue;
         const bm = bands[i];
         if (!bm || !Array.isArray(bm.x) || !Array.isArray(bm.y) || !Array.isArray(bm.m)) continue;
         const raw = Number(evalPchipJS(bm, rpmTarget));
-        const db = Number.isFinite(raw) ? Math.max(0, raw) : NaN;
+        const db = Number.isFinite(raw) ? raw : NaN;
         if (!Number.isFinite(db)) continue;
-        pts.push([hz, db]);
+        fineCenters.push(hz);
+        fineValsDb.push(db);
+      }
+
+      if (fineCenters.length) {
+        // 根据当前前端分辨率模式决定是否做 IEC 聚合
+        const modeRes = getSpectrumResolutionMode();   // '1_48' | '1_12' | '1_3'
+        // 从模型中推断后端 n_per_oct，默认为 48（你的后端可根据实际调整）
+        const calib = model.calibration || {};
+        const fineNPerOct = Number(
+          calib.n_per_oct != null
+            ? calib.n_per_oct
+            : (model.n_per_oct != null ? model.n_per_oct : 48)
+        );
+        let centersUse = fineCenters;
+        let valsUse = fineValsDb;
+
+        if (modeRes === '1_3' || modeRes === '1_12') {
+          const coarseN = (modeRes === '1_3') ? 3 : 12;
+          const agg = downsampleSpectrumBands(fineCenters, fineValsDb, fineNPerOct, coarseN);
+          centersUse = agg.centers;
+          valsUse = agg.valuesDb;
+        }
+
+        pts = centersUse.map((hz, idx) => [hz, valsUse[idx]]);
       }
     }
 
@@ -2606,20 +2781,35 @@ function buildSpectrumTooltip(t){
   };
 }
 
-// 新增：频谱标题文本
-function buildSpectrumTitle(){
+function buildSpectrumTitle() {
   const mode = currentXModeFromPayload(lastPayload);
   const x = Number(getXQueryOrDefault(mode));
-  if (mode === 'rpm') return `A计权声级频谱 @ ${Math.round(x)} RPM`;
-  const v = Number.isFinite(x) ? x.toFixed(1) : '-';
-  return `A计权声级频谱 @ ${v} dB`;
+
+  const resMode = getSpectrumResolutionMode();
+  let resLabel = '';
+  if (resMode === '1_3')  resLabel = '1/3 倍频程 ';
+  if (resMode === '1_12') resLabel = '1/12 倍频程 ';
+  if (resMode === '1_48') resLabel = '1/48 倍频程 ';
+
+  if (mode === 'rpm') {
+    const xr = Number.isFinite(x) ? Math.round(x) : '-';
+    return `${resLabel}A计权声级频谱 @ ${xr} RPM（IEC 61260 网格）`;
+  } else {
+    const v = Number.isFinite(x) ? x.toFixed(1) : '-';
+    return `${resLabel}A计权声级频谱 @ ${v} dB（IEC 61260 网格）`;
+  }
 }
 
 function computeSpectrumYMaxFixed() {
   const sList = getSeriesArray();
   const selected = getLegendSelectionMap();
 
+  // 当前前端频谱分辨率：决定是否做 IEC 聚合
+  const resMode = getSpectrumResolutionMode();   // '1_48' | '1_12' | '1_3'
+  const wantCoarse = (resMode === '1_3' || resMode === '1_12');
+
   let globalMax = 0;
+
   sList.forEach(s => {
     const name = s.name || `${s.brand || ''} ${s.model || ''} - ${s.condition || ''}`;
     if (selected && selected[name] === false) return;
@@ -2634,22 +2824,59 @@ function computeSpectrumYMaxFixed() {
     if (!model) return;
 
     const centers = Array.isArray(model.centers_hz) ? model.centers_hz : (model.freq_hz || model.freq || []);
-    const bands = Array.isArray(model.band_models_pchip) ? model.band_models_pchip : [];
+    const bands   = Array.isArray(model.band_models_pchip) ? model.band_models_pchip : [];
     if (!centers.length || !bands.length) return;
 
+    // 用“该系列的最大 RPM”来计算一个“极端情况下”的频谱峰值
     const rpmMax = rpmMaxForSeries(s, model);
     if (!Number.isFinite(rpmMax) || rpmMax <= 0) return;
 
+    const fineCenters = [];
+    const fineValsDb  = [];
     for (let i = 0; i < centers.length; i++) {
+      const hz = Number(centers[i]);
+      if (!Number.isFinite(hz)) continue;
       const bandModel = bands[i];
       if (!bandModel || !Array.isArray(bandModel.x) || !Array.isArray(bandModel.y) || !Array.isArray(bandModel.m)) continue;
       const v = Number(evalPchipJS(bandModel, rpmMax));
-      const db = Number.isFinite(v) ? Math.max(0, v) : NaN;
-      if (Number.isFinite(db) && db > globalMax) globalMax = db;
+      const db = Number.isFinite(v) ? v : NaN;
+      if (!Number.isFinite(db)) continue;
+      fineCenters.push(hz);
+      fineValsDb.push(db);
+    }
+    if (!fineCenters.length) return;
+
+    // 从模型中推断后端 n_per_oct，默认为 48
+    const calib = model.calibration || {};
+    const fineNPerOct = Number(
+      calib.n_per_oct != null
+        ? calib.n_per_oct
+        : (model.n_per_oct != null ? model.n_per_oct : 48)
+    );
+
+    let valsToScan = fineValsDb;
+
+    // 若当前显示模式是 1/3 或 1/12，则在聚合后的频带上取峰值
+    if (wantCoarse) {
+      const coarseN = (resMode === '1_3') ? 3 : 12;
+      const agg = downsampleSpectrumBands(fineCenters, fineValsDb, fineNPerOct, coarseN);
+      valsToScan = Array.isArray(agg.valuesDb) ? agg.valuesDb : [];
+      if (!valsToScan.length) {
+        // 降采样失败就退回细分谱
+        valsToScan = fineValsDb;
+      }
+    }
+
+    for (let i = 0; i < valsToScan.length; i++) {
+      const db = Number(valsToScan[i]);
+      if (!Number.isFinite(db)) continue;
+      if (db > globalMax) globalMax = db;
     }
   });
 
-  return Math.max(10, Math.ceil(globalMax || 60));
+  // 给一点裕量，避免顶到边
+  const withMargin = (globalMax || 60) * 1.1;
+  return Math.max(10, Math.ceil(withMargin));
 }
 
 function __ensureMainChartMinHeightForSpectrumMode() {
