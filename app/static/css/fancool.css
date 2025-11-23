@@ -1078,39 +1078,6 @@ body.is-vert-dragging #bottom-panel { transition:none!important; }
 .fc-text-success { color:var(--fc-color-success)!important; }
 .fc-text-danger  { color:var(--fc-color-danger)!important; }
 
-/* 窄屏按钮 */
-@media (max-width:1366px) {
-  :root {
-    --quick-add-size-narrow: 26px;
-    --quick-add-bg-narrow: var(--bg-secondary);
-    --quick-add-shadow-narrow: 0 3px 8px rgba(0, 0, 0, 0.388), 0 0 0 0 rgba(0, 0, 0, 0);
-    --quick-add-shadow-narrow-hover: 0 5px 14px rgba(0, 0, 0, 0.34), 0 0 0 0 rgba(0, 0, 0, 0);
-  }
-
-  .fc-btn-icon-add {
-    width: var(--quick-add-size-narrow) !important;
-    height: var(--quick-add-size-narrow) !important;
-    padding: 0 !important;
-    background: var(--quick-add-bg-narrow) !important;
-    border: 1px solid var(--border-color) !important;
-    border-radius: 50% !important;
-    box-shadow: var(--quick-add-shadow-narrow) !important;
-    display: inline-flex !important;
-    align-items: center;
-    justify-content: center;
-    line-height: 1;
-    position: relative;
-    transition: background .25s, box-shadow .25s, transform .2s;
-  }
-
-    #recentLikesList .recent-like-group .actions .fc-btn-icon-add {
-    background:transparent !important;
-    box-shadow:none !important;
-    border:none !important;
-
-  }
-}
-
 :root {
   --toast-glass-bg: rgb(255, 255, 255);
   --toast-glass-border: rgba(255,255,255,0.55);

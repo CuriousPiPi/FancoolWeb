@@ -26,7 +26,7 @@
                 unlockDelayMs: 80   // 新增：解锁延迟
                 };
 
-  function init() {
+ function init() {
     mountRightSubseg();
     initRightPanelSnapTabs();
     initTopQueriesAndLikesExpander();
@@ -37,6 +37,14 @@
     initAndLockHotColWidthsOnce();
     updateRightSubseg('top-queries');
     initRightSegButtonClicks();
+
+    // 新增：根据当前右侧表格是否有横向滚动条，决定是否启用圆形遮罩按钮
+    updateQuickBtnCompactMode();
+
+    // 监听窗口 resize，表格/卡片宽度变化时重新判断
+    window.addEventListener('resize', () => {
+      updateQuickBtnCompactMode();
+    });
   }
 
   // 行级动画锁
@@ -260,6 +268,7 @@ function computeAndLockHotColWidth(table){
             // recent-updates 懒加载，已内聚在 RightPanel
             RightPanel.recentUpdates?.loadIfNeeded?.();
           }
+          updateQuickBtnCompactMode();
         },
         clickScrollBehavior: 'smooth'
       });
@@ -278,6 +287,25 @@ function computeAndLockHotColWidth(table){
     } else {
       window.addEventListener('resize', () => apply(card.getBoundingClientRect().width));
     }
+  }
+
+  /* === 新增：根据右侧滚动区域是否有横向滚动条，控制快捷按钮圆形遮罩 === */
+  function updateQuickBtnCompactMode() {
+    const card = document.querySelector('.fc-right-card');
+    if (!card) return;
+
+    // 右侧卡当前激活的 tab 面板（top-queries / search-results / recent-updates 等）
+    const activePane = card.querySelector('.fc-rank-panel.active');
+    const scroller = activePane?.querySelector('.fc-rank-scroll');
+    if (!scroller) {
+      card.classList.remove('rp-compact-quick-btns');
+      return;
+    }
+
+    // 判断是否存在横向滚动：scrollWidth > clientWidth 视为需要紧凑模式
+    const hasHScroll = scroller.scrollWidth > scroller.clientWidth + 1; // +1 抵消浮点误差
+    if (hasHScroll) card.classList.add('rp-compact-quick-btns');
+    else card.classList.remove('rp-compact-quick-btns');
   }
 
   function initMainPanelsAdaptiveStack(){
@@ -931,6 +959,7 @@ async function expandRow(btn){
   btn.classList.add('is-open');
 
   if (typeof syncQuickActionButtons === 'function') syncQuickActionButtons();
+  updateQuickBtnCompactMode();
 }
 
 // 1) 严格钉底版 collapse 动画：全程 netY = -(current - appliedScroll)，不可能出现“向下走”
@@ -1086,6 +1115,7 @@ function collapseRow(btn){
   btn.setAttribute('aria-expanded','false');
   btn.classList.remove('is-open');
   btn.removeAttribute('title');
+  updateQuickBtnCompactMode();
 }
 
   document.addEventListener('click', (e)=>{
@@ -1099,9 +1129,38 @@ function collapseRow(btn){
     });
   }
 
-  function addClip(el){ if(el){ el.classList.add('fc-col-clip'); el.style.position = el.style.position || 'relative'; } }
-  function removeClip(el){ if(el){ el.classList.remove('fc-col-clip'); } }
+  function addClip(el){
+    if (!el) return;
+    el.classList.add('fc-col-clip');
 
+    // 如果本来就有 inline position，就尊重现状，不改动
+    if (!el.style.position) {
+      const cs = getComputedStyle(el);
+      // 若是 sticky 或 absolute 等，我们不去强行改成 relative，避免破坏布局语义
+      if (cs.position === 'static') {
+        el.dataset._orig_pos = 'static';
+        el.style.position = 'relative';
+      } else {
+        // 记住“无需改 position”，方便 removeClip 清理 data
+        el.dataset._orig_pos = 'keep';
+      }
+    } else {
+      // 已有内联 position，标记为 keep
+      el.dataset._orig_pos = 'keep';
+    }
+  }
+
+  function removeClip(el){
+    if (!el) return;
+    el.classList.remove('fc-col-clip');
+
+    // 只在我们确实从 static -> relative 的情况下还原；对 sticky/absolute/已有 inline 的不动
+    if (el.dataset._orig_pos === 'static') {
+      el.style.position = '';
+    }
+    delete el.dataset._orig_pos;
+  }
+  
   // 仅位移的隐藏/显示（保留）
   function slideHideEl(el, toDy, duration=ANIM.rowMs, easing=ANIM.rowEase){
     if (!el) return;
@@ -1257,6 +1316,7 @@ function collapseRow(btn){
     updatesTabLoaded = true;
     updatesTabLastLoad = Date.now();
     if (typeof syncQuickActionButtons === 'function') syncQuickActionButtons();
+    updateQuickBtnCompactMode();
   }
   function reloadRecentUpdates(debounce = true) {
     if (debounce) {
@@ -1326,6 +1386,7 @@ function collapseRow(btn){
     reload: () => reloadRecentUpdates(false)
   };
   global.RightPanel.updateSubseg = updateRightSubseg;
+  global.RightPanel.updateQuickBtnCompactMode = updateQuickBtnCompactMode;
   
 })(window);
 

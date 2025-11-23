@@ -133,6 +133,33 @@
   background: var(--text-secondary);
 }
 
+/* === 仅右侧主容器：快捷按钮圆形遮罩（由 JS 决定是否启用） === */
+
+/* 尺寸 / 视觉变量：只用于右侧卡 */
+.fc-right-card {
+  --quick-add-size-narrow: 26px;
+  --quick-add-bg-narrow: var(--bg-secondary);
+  --quick-add-shadow-narrow: 0 3px 8px rgba(0, 0, 0, 0.388), 0 0 0 0 rgba(0, 0, 0, 0);
+  --quick-add-shadow-narrow-hover: 0 5px 14px rgba(0, 0, 0, 0.34), 0 0 0 0 rgba(0, 0, 0, 0);
+}
+
+/* 当右侧卡上有 rp-compact-quick-btns 类时，右侧卡内的快捷按钮改为圆形遮罩样式 */
+.fc-right-card.rp-compact-quick-btns .fc-btn-icon-add {
+  width: var(--quick-add-size-narrow) !important;
+  height: var(--quick-add-size-narrow) !important;
+  padding: 0 !important;
+  background: var(--quick-add-bg-narrow) !important;
+  border: 1px solid var(--border-color) !important;
+  border-radius: 50% !important;
+  box-shadow: var(--quick-add-shadow-narrow) !important;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+  position: relative;
+  transition: background .25s, box-shadow .25s, transform .2s;
+}
+
 /* 5) 表头/操作列与遮罩 */
 .fc-right-card .fc-rank-table thead th {
   position: sticky;

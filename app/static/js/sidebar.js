@@ -306,8 +306,8 @@
       isCollapsed = false;
       setTimeout(()=>window.__APP?.modules?.chart?.resizeChart && window.__APP.modules.chart.resizeChart(), 300);
       requestAnimationFrame(() => {
-        // 如果主代码暴露了该方法，就调用以同步顶部区域高度
         if (typeof window.syncTopTabsViewportHeight === 'function') window.syncTopTabsViewportHeight();
+        window.RightPanel?.updateQuickBtnCompactMode?.();
       });
       refreshToggleUI();
     }
@@ -524,19 +524,23 @@
       }
     }
     function dragEnd(){
-      dragging = false;
-      document.body.classList.remove('resizing-sidebar');
-      document.body.classList.remove('sidebar-hdragging');
-      document.body.style.userSelect = '';
-      document.removeEventListener('mousemove', onMouseMove);
-      document.removeEventListener('mouseup',   onMouseUp);
-      window.removeEventListener('pointermove', onPtrMove);
-      window.removeEventListener('pointerup',   onPtrUp);
-      window.removeEventListener('pointercancel', onPtrUp);
-      setTimeout(()=>window.__APP?.modules?.chart?.resizeChart && window.__APP.modules.chart.resizeChart(),120);
-      requestAnimationFrame(()=>typeof window.syncTopTabsViewportHeight === 'function' && window.syncTopTabsViewportHeight());
-      if (typeof window.scheduleAdjust === 'function') window.scheduleAdjust();
-    }
+          dragging = false;
+          document.body.classList.remove('resizing-sidebar');
+          document.body.classList.remove('sidebar-hdragging');
+          document.body.style.userSelect = '';
+          document.removeEventListener('mousemove', onMouseMove);
+          document.removeEventListener('mouseup',   onMouseUp);
+          window.removeEventListener('pointermove', onPtrMove);
+          window.removeEventListener('pointerup',   onPtrUp);
+          window.removeEventListener('pointercancel', onPtrUp);
+          setTimeout(()=>window.__APP?.modules?.chart?.resizeChart && window.__APP.modules.chart.resizeChart(),120);
+          requestAnimationFrame(()=>{
+            if (typeof window.syncTopTabsViewportHeight === 'function') window.syncTopTabsViewportHeight();
+            window.RightPanel?.updateQuickBtnCompactMode?.();
+          });
+          if (typeof window.scheduleAdjust === 'function') window.scheduleAdjust();
+        }
+
     function onMouseMove(ev){
       if (ev.cancelable) ev.preventDefault();
       dragMove(ev.clientX);
