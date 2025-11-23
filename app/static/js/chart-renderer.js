@@ -30,7 +30,7 @@
   let __specPending = false;
   let __specFetchInFlight = false;
   let __specRerunQueued = false;
-
+  
   const NARROW_BREAKPOINT = 1024;   // 窄屏阈值（可按需调整）
   const NARROW_HYSTERESIS = 48;     // 迟滞窗口（像素），用于防抖
   const LEGEND_OFFSET = 50;     // Legend 顶部下移像素
@@ -104,25 +104,12 @@ function iecBandEdgesFromCenters(centers, nPerOct) {
   return { f1, f2 };
 }
 
-function setSpectrumResolutionMode(mode) {
-  const m = String(mode || '').trim();
-  if (!['1_3', '1_12', '1_48'].includes(m)) return;
-  if (m === spectrumResolutionMode) return;
-  spectrumResolutionMode = m;
-  // 仅影响前端聚合方式，重建频谱即可
-  try {
-    if (spectrumEnabled && spectrumChart) {
-      buildAndSetSpectrumOption(true);
-    }
-  } catch (_) {}
-}
-
 function getSpectrumResolutionMode() {
   return spectrumResolutionMode;
 }
 
 /*
- * 将高分辨率 IEC 频带（例如 1/48 倍频程）聚合成低分辨率 IEC 频带（1/3 或 1/12）。
+ * 将高分辨率 IEC 频带（例如 1/48 OCT）聚合成低分辨率 IEC 频带（1/3 或 1/12）。
  * 使用“按带宽重叠比例分配能量”的方式，保证能量守恒：
  *   - 每个细带先转换为能量 E_i，对应的实际带宽为 [f1Fine[i], f2Fine[i]]
  *   - 粗带 j 的能量为所有细带在 [f1Coarse[j], f2Coarse[j]] 区间内的重叠能量之和：
@@ -936,29 +923,27 @@ function mount(rootEl) {
 
 function ensureSpectrumResolutionSwitch() {
   if (!spectrumInner) return null;
-  
+
+  // 移除旧的非 slider 版本
   const oldEl = spectrumInner.querySelector('.spectrum-res-switch');
   if (oldEl && !oldEl.classList.contains('is-slider-type')) {
-    oldEl.remove();
+    try { oldEl.remove(); } catch(_) {}
   }
 
   let container = spectrumInner.querySelector('.spec-switch-container');
   if (!container) {
+    // 创建 wrapper（不再插入“频带分辨率”文字标签）
     const wrapper = document.createElement('div');
     wrapper.className = 'spectrum-res-switch is-slider-type';
     wrapper.style.display = 'flex';
     wrapper.style.alignItems = 'center';
     wrapper.style.gap = '8px';
-    
-    // 显式设置样式，确保 JS 接管控制权
+
+    // 保持绝对定位 + z-index，逻辑仍由 placeSpectrumSwitchOverlay 覆盖到标题上
     wrapper.style.position = 'absolute';
     wrapper.style.zIndex = '200';
-    
-    const label = document.createElement('span');
-    label.className = 'label';
-    label.textContent = '频带分辨率';
-    wrapper.appendChild(label);
 
+    // 仅保留 slider 容器
     container = document.createElement('div');
     container.className = 'spec-switch-container';
     container.innerHTML = `
@@ -971,11 +956,14 @@ function ensureSpectrumResolutionSwitch() {
       </div>
     `;
     wrapper.appendChild(container);
+
+    // 插入到频谱 inner 顶部
     spectrumInner.insertBefore(wrapper, spectrumInner.firstChild);
-    
+
+    // 绑定交互
     bindSpecResSwitch(container);
-    
-    // 创建后立即尝试一次定位
+
+    // 首次定位（异步，等图表尺寸稳定）
     requestAnimationFrame(placeSpectrumSwitchOverlay);
   }
 
@@ -1023,12 +1011,12 @@ function bindSpecResSwitch(container) {
       const itemCenterInStrip = (i * itemWidth) + (itemWidth / 2);
       const dist = Math.abs(itemCenterInStrip - centerInStrip);
       
-      let scale = 0.65;
+      let scale = 0.6;
       let opacity = 0.4;
 
       if (dist < itemWidth * 1.2) {
         const ratio = dist / (itemWidth * 1.2);
-        scale = 1.0 - (0.35 * ratio);    
+        scale = 1.0 - (0.4 * ratio);    
         opacity = 1.0 - (0.6 * ratio);  
       }
       
@@ -1560,7 +1548,7 @@ function buildOption(payload) {
     animationEasingUpdate: 'cubicOut',
     grid:{ left:40, right: gridRight, top: gridTop, bottom: gridBottom },
     title: { text: titleText, left: 'center', top: titleTop,
-      textStyle: { color: t.axisLabel, fontSize: 20, fontWeight: 600, fontFamily:t.fontFamily } },
+      textStyle: { color: t.axisLabel, fontSize: 18, fontWeight: 600, fontFamily:t.fontFamily } },
     legend: legendCfg,
     xAxis:{
       type:'value', name:xName, nameLocation:'middle', nameGap:25, nameMoveOverlap:true,
@@ -1698,23 +1686,36 @@ function bindXAxisSwitch(){
   function pos(type, animate = true) {
     const toNoise = (type === 'noise_db' || type === 'noise');
     const x = toNoise ? maxX : 0;
-    // 统一 0.25s ease
     xAxisSwitchSlider.style.transition = animate ? 'transform .25s ease' : xAxisSwitchSlider.style.transition || '';
     xAxisSwitchSlider.style.transform  = `translateX(${x}px)`;
     xAxisSwitchTrack.setAttribute('aria-checked', String(toNoise));
   }
 
+  // 修改：切换 X 模式后立即重建频谱标题（如果频谱开启）
   function applyType(newType) {
     const normalized = (newType === 'noise') ? 'noise_db' : newType;
     if (normalized !== 'rpm' && normalized !== 'noise_db') return;
     if (xAxisOverride === normalized) return;
     xAxisOverride = normalized;
     try { localStorage.setItem('x_axis_type', normalized); } catch(_){}
+
     pos(normalized, true);
 
+    // 保留跳过一次自动频谱请求的逻辑（避免重复拉取），但我们手动重建标题
     __skipSpectrumOnce = true;
     if (lastPayload) render(lastPayload);
-    if (typeof onXAxisChange === 'function') { try { onXAxisChange(normalized); } catch(_) {} }
+
+    // 新增：若频谱已开启，手动重建一次频谱配置，刷新标题中的 @ RPM / @ dB
+    if (spectrumEnabled && spectrumChart) {
+      try {
+        buildAndSetSpectrumOption(true);   // 强制 fullRefresh 以更新 title
+        placeSpectrumSwitchOverlay();      // 重新定位分辨率开关
+      } catch(_) {}
+    }
+
+    if (typeof onXAxisChange === 'function') {
+      try { onXAxisChange(normalized); } catch(_) {}
+    }
   }
 
   function nearestType() {
@@ -1731,9 +1732,8 @@ function bindXAxisSwitch(){
     startX = e.clientX;
     const m = new DOMMatrix(getComputedStyle(xAxisSwitchSlider).transform);
     base = m.m41 || 0;
-    // 拖拽过程中取消过渡，避免跟随出现惯性
     xAxisSwitchSlider.style.transition = 'none';
-    try { if (activePointerId != null) xAxisSwitchSlider.setPointerCapture(activePointerId); } catch(_){}
+    try { if (activePointerId != null) xAxisSwitchSlider.setPointerCapture(activePointerId); } catch(_) {}
     e.preventDefault?.();
   }
   function onSliderPointerMove(e) {
@@ -1747,7 +1747,7 @@ function bindXAxisSwitch(){
   function onSliderPointerUp() {
     if (!dragging) return;
     dragging = false;
-    try { if (activePointerId != null) xAxisSwitchSlider.releasePointerCapture(activePointerId); } catch(_){}
+    try { if (activePointerId != null) xAxisSwitchSlider.releasePointerCapture(activePointerId); } catch(_) {}
     activePointerId = null;
     const newType = nearestType();
     pos(newType, true);
@@ -1756,7 +1756,7 @@ function bindXAxisSwitch(){
   function onSliderPointerCancel() {
     if (!dragging) return;
     dragging = false;
-    try { if (activePointerId != null) xAxisSwitchSlider.releasePointerCapture(activePointerId); } catch(_){}
+    try { if (activePointerId != null) xAxisSwitchSlider.releasePointerCapture(activePointerId); } catch(_) {}
     activePointerId = null;
     pos(currentXModeFromPayload(lastPayload), true);
   }
@@ -2400,10 +2400,9 @@ async function toggleSpectrumUI(show) {
     ensureSpectrumChart();
 
     if (isFs) {
-      // 关键：先标记为 spectrum 模式，避免 :fullscreen:not([data-chart-mode="spectrum"]) 把高度钳成 0
+      // 全屏展开：保持原 max-height 动画逻辑
       try { shell.setAttribute('data-chart-mode', 'spectrum'); } catch(_) {}
 
-      // 全屏：沿用 max-height 逻辑
       spectrumRoot.style.setProperty('flex', '0 0 auto', 'important');
       spectrumRoot.style.setProperty('max-height', '0px');
 
@@ -2420,7 +2419,7 @@ async function toggleSpectrumUI(show) {
         if (myEpoch !== __specEpoch) return;
         const onEnd = (e) => {
           if (myEpoch !== __specEpoch) return;
-          if (e && e.propertyName && e.propertyName !== 'max-height') return;
+            if (e && e.propertyName && e.propertyName !== 'max-height') return;
           try { spectrumRoot.removeEventListener('transitionend', onEnd); } catch(_) {}
           try { chart && chart.resize(); } catch(_) {}
           try { spectrumChart && spectrumChart.resize(); } catch(_) {}
@@ -2429,7 +2428,7 @@ async function toggleSpectrumUI(show) {
         spectrumRoot.style.setProperty('max-height', targetPx + 'px');
       });
     } else {
-      // 非全屏：先把 inner 固定到“目标像素高”，立即 resize 一次；父容器靠 CSS 过渡做揭示
+      // 非全屏展开：height 过渡 + 合并滚动监听
       const targetPx = __computeNfSpecTargetPx();
       if (spectrumInner) {
         spectrumInner.style.height = targetPx + 'px';
@@ -2439,16 +2438,37 @@ async function toggleSpectrumUI(show) {
       }
       spectrumRoot.classList.add('anim-scale', 'reveal-from-0');
       try { shell.setAttribute('data-chart-mode', 'spectrum'); } catch(_) {}
+
       requestAndRenderSpectrum().catch(()=>{}).then(() => {
         if (myEpoch !== __specEpoch) return;
         try { spectrumChart && spectrumChart.resize(); } catch(_) {}
       });
+
       requestAnimationFrame(() => {
         if (myEpoch !== __specEpoch) return;
+
+        // 合并监听：同时负责清理类与滚动
+        let scrolled = false;
+        const fallbackDelay = Math.min(400, (getCssTransitionMs() || 250) + 50);
+        const fallbackId = setTimeout(() => {
+          if (myEpoch !== __specEpoch) return;
+          if (scrolled) return;
+          scrolled = true;
+          try {
+            const rect = spectrumRoot.getBoundingClientRect();
+            const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+            if (rect.bottom > vh - 8) {
+              spectrumRoot.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            }
+          } catch(_) {}
+        }, fallbackDelay);
+
         const onEnd = (e) => {
           if (myEpoch !== __specEpoch) return;
-          if (e && e.propertyName !== 'height') return;
+          if (e && e.propertyName !== 'height') return; // 只关心 height 动画结束
           try { spectrumRoot.removeEventListener('transitionend', onEnd); } catch(_) {}
+
+          // 清理展开过程中使用的临时样式/类
           spectrumRoot.classList.remove('anim-scale', 'reveal-from-0', 'revealed');
           if (spectrumInner) {
             spectrumInner.style.transition = '';
@@ -2456,10 +2476,26 @@ async function toggleSpectrumUI(show) {
             spectrumInner.style.height = '';
           }
           try { spectrumChart && spectrumChart.resize(); } catch(_) {}
-          revealSpectrumIfNeeded();
+
+          // 条件滚动：频谱底部超出视口时才滚动
+          if (!scrolled) {
+            try {
+              const rect = spectrumRoot.getBoundingClientRect();
+              const vh = window.innerHeight || document.documentElement.clientHeight || 0;
+              if (rect.bottom > vh - 8) {
+                spectrumRoot.scrollIntoView({ behavior: 'smooth', block: 'start' });
+              }
+            } catch(_) {}
+            scrolled = true;
+          }
+
+          try { clearTimeout(fallbackId); } catch(_) {}
         };
-        try { spectrumRoot.addEventListener('transitionend', onEnd, { once:true }); } catch(_) {}
+
+        try { spectrumRoot.addEventListener('transitionend', onEnd); } catch(_) {}
         spectrumRoot.classList.add('revealed');
+
+        // 安全超时：过渡异常（未触发）时仍清理
         specSetTimeout(() => {
           if (myEpoch !== __specEpoch) return;
           spectrumRoot.classList.remove('anim-scale', 'reveal-from-0', 'revealed');
@@ -2472,7 +2508,7 @@ async function toggleSpectrumUI(show) {
       });
     }
   } else {
-    // 收起分支保持原实现（cleanupAfter 会移除 data-chart-mode）
+    // 收起逻辑保持原来结构
     const cleanupAfter = () => {
       if (myEpoch !== __specEpoch) return;
       try { shell.removeAttribute('data-chart-mode'); } catch(_) {}
@@ -2516,10 +2552,9 @@ async function toggleSpectrumUI(show) {
 
       specSetTimeout(() => { try { cleanupAfter(); updateFullscreenHeights(); } catch(_) {} }, Math.max(900, (getCssTransitionMs()||350)+300));
     } else {
-      // 非全屏：先把 inner 固定为“当前像素高”，随后仅靠父容器 height 过渡做收起
       const curH = Math.max(1, Math.round((spectrumRoot.getBoundingClientRect().height || 1)));
       if (spectrumInner) {
-        spectrumInner.style.height = curH + 'px';        // 画布保持最终内容尺寸，只是被父容器逐步遮住
+        spectrumInner.style.height = curH + 'px';
         spectrumInner.style.transition = 'transform var(--transition-speed, .25s) ease';
         spectrumInner.style.opacity = '1';
       }
@@ -2528,7 +2563,6 @@ async function toggleSpectrumUI(show) {
 
       requestAnimationFrame(() => {
         if (myEpoch !== __specEpoch) return;
-
         const onEnd = (e) => {
           if (myEpoch !== __specEpoch) return;
           if (e && e.propertyName !== 'height') return;
@@ -2536,20 +2570,15 @@ async function toggleSpectrumUI(show) {
           cleanupAfter();
           spectrumRoot.classList.remove('anim-scale', 'collapse-to-0');
         };
-
         try { spectrumRoot.addEventListener('transitionend', onEnd, { once:true }); } catch(_) {}
-        try { shell.removeAttribute('data-chart-mode'); } catch(_) {}   // 触发 height 从 dvh → 0 的 CSS 过渡
+        try { shell.removeAttribute('data-chart-mode'); } catch(_) {}
       });
     }
   }
 
-  // 同步外置按钮
-  try {
-    syncSpectrumDockUi();
-  } catch(_) {}
-  try {
-    placeSpectrumDock();
-  } catch(_) {}
+  // 外置按钮同步
+  try { syncSpectrumDockUi(); } catch(_) {}
+  try { placeSpectrumDock(); } catch(_) {}
 }
   
 function updateSpectrumLayout() {
@@ -2877,7 +2906,7 @@ function buildAndSetSpectrumOption(fullRefresh = false, themeOverride) {
       text: buildSpectrumTitle(),
       left: 'center',
       top: 6,
-      textStyle: { color: t.axisLabel, fontWeight: 700, fontSize: 16, fontFamily: t.fontFamily }
+      textStyle: { color: t.axisLabel, fontWeight: 600, fontSize: 16, fontFamily: t.fontFamily }
     },
     grid: { left, right: rightGap, top: 38, bottom: 60 },
     xAxis: {
@@ -3023,13 +3052,13 @@ function buildSpectrumTitle() {
   const FRAC_PAD = '\u2007';
 
   // 基础分辨率段（仅“1/n”），对 1/3 追加占位
-  let fractionPart = '1/48';
-  if (resMode === '1_12') fractionPart = '1/12';
-  if (resMode === '1_3')  fractionPart = '1/3' + FRAC_PAD;
+  let fractionPart = '\u3000\u3000\u3000\u30001/48';
+  if (resMode === '1_12') fractionPart = '\u3000\u3000\u3000\u30001/12';
+  if (resMode === '1_3')  fractionPart = '\u3000\u3000\u3000\u30001/3' + FRAC_PAD;
 
-  // 两个空格分隔 “1/n” 与 “倍频程”，并在 “倍频程” 后留两个空格作为与后续内容以及覆盖开关的间距
-  // 注意：placeSpectrumSwitchOverlay 仅覆盖 fractionPart，本实现不会让滑块遮住“倍频程”
-  const resLabel = `${fractionPart} 倍频程  `;
+  // 两个空格分隔 “1/n” 与 “OCT”，并在 “OCT” 后留两个空格作为与后续内容以及覆盖开关的间距
+  // 注意：placeSpectrumSwitchOverlay 仅覆盖 fractionPart，本实现不会让滑块遮住“OCT”
+  const resLabel = `${fractionPart} OCT  `;
 
   if (mode === 'rpm') {
     const xr = Number.isFinite(x) ? Math.round(x) : '-';
@@ -3125,8 +3154,6 @@ function __ensureMainChartMinHeightForSpectrumMode() {
   const clampH = Math.max(480, Math.min(600, Math.round(vh * 0.62)));
   root.style.minHeight = clampH + 'px';
 }
-
-// 删除重复定义的 updateFullscreenHeights（保留前面的唯一版本）
 
 function revealSpectrumIfNeeded() {
   if (!spectrumRoot) return;
@@ -4139,12 +4166,27 @@ function renderFitPanel({ mode, rows, xValue, unit, onToggleSeries }) {
   // 保持可见性由 toggleFitUI 控制
 }
 
-// ---- 替换原 placeSpectrumSwitchOverlay ----
 function placeSpectrumSwitchOverlay() {
   const wrapper = spectrumInner ? spectrumInner.querySelector('.spectrum-res-switch') : null;
   if (!wrapper) return;
 
+  // 未启用频谱或没有图表实例 → 隐藏
   if (!spectrumEnabled || !spectrumChart) {
+    wrapper.style.visibility = 'hidden';
+    return;
+  }
+
+  // 频谱当前配置（用于判断是否有可渲染数据）
+  let specOpt = null;
+  try { specOpt = spectrumChart.getOption(); } catch(_) {}
+
+  const hasSeries =
+    !!(specOpt &&
+       Array.isArray(specOpt.series) &&
+       specOpt.series.length > 0);
+
+  // 如果没有任何可渲染数据（包括 pending / 空态）直接隐藏开关
+  if (!hasSeries) {
     wrapper.style.visibility = 'hidden';
     return;
   }
@@ -4156,9 +4198,18 @@ function placeSpectrumSwitchOverlay() {
   }
 
   const titleText =
+    (specOpt && specOpt.title && specOpt.title[0] && specOpt.title[0].text) ||
     (lastSpectrumOption && lastSpectrumOption.title && lastSpectrumOption.title.text) ||
     (typeof buildSpectrumTitle === 'function' ? buildSpectrumTitle() : '') ||
     '';
+
+  // 锚点必须存在，否则隐藏（避免在“当前无可渲染频谱”等标题下仍显示开关）
+  const anchorStr = '1/';
+  const anchorIndex = titleText.indexOf(anchorStr);
+  if (anchorIndex < 0) {
+    wrapper.style.visibility = 'hidden';
+    return;
+  }
 
   const t = tokens(lastPayload?.theme);
   const fontSize = 16;
@@ -4168,37 +4219,17 @@ function placeSpectrumSwitchOverlay() {
   const fullWidth = measureText(titleText, fontSize, fontWeight, t.fontFamily).width;
   const titleStartX = (chartW / 2) - (fullWidth / 2);
 
-  // 新锚点：固定 "1/" 两字符，避免 1/3 时占位字符导致的宽度波动
-  const anchorStr = '1/';
-  let targetCenterX;
-  const SHIFT_LEFT = 4; // 锚在 "1/" 中心后再略向左，给后续数字和“倍频程”留空间
+  // 计算到 "1/" 前缀宽度及其自身宽度
+  const prefixWidth = measureText(titleText.slice(0, anchorIndex), fontSize, fontWeight, t.fontFamily).width;
+  const anchorWidth = measureText(anchorStr, fontSize, fontWeight, t.fontFamily).width;
 
-  const anchorIndex = titleText.indexOf(anchorStr);
-  if (anchorIndex >= 0) {
-    // 前缀到 "1/" 开始前的文本
-    const prefixWidth = measureText(titleText.slice(0, anchorIndex), fontSize, fontWeight, t.fontFamily).width;
-    // "1/" 自身宽度（仅两个字符，忽略后面数字及 figure space）
-    const anchorWidth = measureText(anchorStr, fontSize, fontWeight, t.fontFamily).width;
-    const anchorCenterX = titleStartX + prefixWidth + anchorWidth / 2;
-    targetCenterX = anchorCenterX - SHIFT_LEFT;
-  } else {
-    // 回退 1：旧的完整分数匹配（避免极端标题改动）
-    const fractionMatch = titleText.match(/1\/\d+/);
-    if (fractionMatch && typeof fractionMatch.index === 'number') {
-      const fracStart = fractionMatch.index;
-      const prefixWidth = measureText(titleText.slice(0, fracStart), fontSize, fontWeight, t.fontFamily).width;
-      const fracWidth = measureText(fractionMatch[0], fontSize, fontWeight, t.fontFamily).width;
-      const fracCenterX = titleStartX + prefixWidth + fracWidth / 2;
-      targetCenterX = fracCenterX - 10; // 旧逻辑保留较大偏移
-    }
-  }
+  // 将滑块中心锚在 "1/" 的中心往左轻微偏移
+  const SHIFT_LEFT = 4;
+  const anchorCenterX = titleStartX + prefixWidth + anchorWidth / 2;
+  const targetCenterX = anchorCenterX - SHIFT_LEFT;
 
-  // 回退 2：都失败时，经验值（标题居中基础上左偏）
-  if (targetCenterX == null) {
-    targetCenterX = (chartW / 2) - 40;
-  }
-
-  const targetCenterY = 6 + 10; // 与之前保持一致
+  // 垂直位置保持与之前一致
+  const targetCenterY = 6 + 10;
 
   wrapper.style.left = Math.round(targetCenterX) + 'px';
   wrapper.style.top = Math.round(targetCenterY) + 'px';
