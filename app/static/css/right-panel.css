@@ -4,6 +4,15 @@
    作用域：仅限 .fc-right-card 及其子元素
    ========================================================= */
 
+:root {
+  --rank-row-h: 42px;  /* 根据你现在的无徽章主行高度，取 42 或自己精确测一个值 */
+/* 子行公共变量 */
+  --subrow-h: var(--rank-row-h);
+  /* 旧结构回退用的视觉缩进（兜底） */
+  --subrow-indent: clamp(240px, 32vw, 480px);
+  --row-mask-extra: 240px;
+}
+
 /* 1) 右侧主容器定高 */
 .fc-right-card {
   display: flex;
@@ -199,8 +208,29 @@
   background: var(--bg-secondary);
 }
 .fc-right-card .fc-rank-table td:last-child {
-  padding: 8px;
+  padding: 0px;
   background: linear-gradient(to left, transparent 30px, rgba(0,0,0,0) 50px);
+}
+
+.fc-right-card .fc-rank-table tbody > tr:not(.fc-subrow) > td {
+  /* 去掉额外垂直 padding，用固定高度控制 */
+  padding-top: 0.3rem;
+  padding-bottom: 0.3rem;
+  height: var(--rank-row-h);
+  box-sizing: border-box;
+}
+
+/* 保证单元格内内容垂直居中 */
+.fc-right-card .fc-rank-table tbody > tr:not(.fc-subrow) > td > * {
+  line-height: 1.2;
+}
+
+/* 徽章列：限制图标尺寸/行高，避免把整行顶高 */
+.fc-right-card .fc-rank-table .fa-medal {
+  font-size: 16px;
+  line-height: 1;    
+  vertical-align: middle;
+  display: inline-block;
 }
 
 /* 新增：热门工况（第 6 列）最小宽度，受 --hot-col-min-w 约束，设置上限避免狭窄屏过宽 */
@@ -306,14 +336,6 @@
 .fc-row-expander.is-open i,
 .fc-row-expander[aria-expanded="true"] i { transform: rotate(90deg); }
 
-/* 子行公共变量 */
-:root {
-  --subrow-h: 26px;
-  /* 旧结构回退用的视觉缩进（兜底） */
-  --subrow-indent: clamp(240px, 32vw, 480px);
-  --row-mask-extra: 240px;
-}
-
 /* 子行基础：固定行高由 .fc-subrow__row 控制 */
 .fc-subrow {
   position: relative;     /* 参与堆叠 */
@@ -325,8 +347,9 @@
 }
 .fc-subrow .fc-subrow__row {
   height: var(--subrow-h);
-  display: flex; align-items: center; gap: 8px;
-  padding: 0; box-sizing: border-box;
+  display: flex; align-items: center;
+  padding: 0;
+  box-sizing: border-box;
 }
 
 /* 使用 colspan=6 的单元格作为锚点容器 */
